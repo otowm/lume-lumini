@@ -1,0 +1,177 @@
+{
+  ".codex/hooks.json": {
+    "mtime": 1785610784.0114522,
+    "ast_hash": "e309d986108439b7a2508e97e97bf57e",
+    "semantic_hash": "e309d986108439b7a2508e97e97bf57e"
+  },
+  "app/backend/__init__.py": {
+    "mtime": 1784606960.5370877,
+    "ast_hash": "68b329da9893e34099c7d8ad5cb9c940",
+    "semantic_hash": "68b329da9893e34099c7d8ad5cb9c940"
+  },
+  "app/backend/database.py": {
+    "mtime": 1785607562.0295165,
+    "ast_hash": "d5bb1d3ecaae845bff3db1d12e3137a4",
+    "semantic_hash": "d5bb1d3ecaae845bff3db1d12e3137a4"
+  },
+  "app/backend/main.py": {
+    "mtime": 1785630513.406144,
+    "ast_hash": "84a5733ec4ccb0230e7765212f552638",
+    "semantic_hash": ""
+  },
+  "app/backend/main_paths.py": {
+    "mtime": 1785450577.0231612,
+    "ast_hash": "df723dfc3aeac9dc78de56c0965df26b",
+    "semantic_hash": "df723dfc3aeac9dc78de56c0965df26b"
+  },
+  "app/backend/pipeline.py": {
+    "mtime": 1785609626.890844,
+    "ast_hash": "b4cf3c75d1b88bf7662ad22b2cadcdb5",
+    "semantic_hash": "b4cf3c75d1b88bf7662ad22b2cadcdb5"
+  },
+  "app/backend/test_main.py": {
+    "mtime": 1785609648.7667787,
+    "ast_hash": "5ce8af496c6bc5238be610c8068ab44e",
+    "semantic_hash": "5ce8af496c6bc5238be610c8068ab44e"
+  },
+  "bin/audio-bus.sh": {
+    "mtime": 1784609341.983382,
+    "ast_hash": "f75081f3c6dab54ce0d9bd9639c26266",
+    "semantic_hash": "f75081f3c6dab54ce0d9bd9639c26266"
+  },
+  "bin/capture-frame": {
+    "mtime": 1785450577.2131615,
+    "ast_hash": "6b7e92e9225e3af1cd834f028c09a7c9",
+    "semantic_hash": "6b7e92e9225e3af1cd834f028c09a7c9"
+  },
+  "bin/capture-loop": {
+    "mtime": 1784606443.5773597,
+    "ast_hash": "e2a58c05296314cf10f371f9f740ee5b",
+    "semantic_hash": "e2a58c05296314cf10f371f9f740ee5b"
+  },
+  "bin/game-video-loop": {
+    "mtime": 1785629255.3651543,
+    "ast_hash": "2cbcd1dabebc60152e4a11af7f80229f",
+    "semantic_hash": ""
+  },
+  "bin/grava-audio.sh": {
+    "mtime": 1785450577.1171613,
+    "ast_hash": "36de87c784f76abc83908d16377f707c",
+    "semantic_hash": "36de87c784f76abc83908d16377f707c"
+  },
+  "frontend/package.json": {
+    "mtime": 1784607094.1515768,
+    "ast_hash": "d32dfc76f8a7ea89812c39332e28fd43",
+    "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
+  },
+  "frontend/src/api.ts": {
+    "mtime": 1785630513.5071437,
+    "ast_hash": "710cd9810c0391b0a49c70d5d74cbaa1",
+    "semantic_hash": ""
+  },
+  "frontend/src/main.tsx": {
+    "mtime": 1785630518.9375508,
+    "ast_hash": "fb2d7845d6033cd546ee3c702e530d25",
+    "semantic_hash": ""
+  },
+  "frontend/tsconfig.json": {
+    "mtime": 1784607094.2485764,
+    "ast_hash": "6774dc00ce6501abeaca72c87714097a",
+    "semantic_hash": "6774dc00ce6501abeaca72c87714097a"
+  },
+  "frontend/vite.config.ts": {
+    "mtime": 1785447732.8497303,
+    "ast_hash": "05869532f9b0348c50146060db9f5665",
+    "semantic_hash": "05869532f9b0348c50146060db9f5665"
+  },
+  "install-captura-dia.sh": {
+    "mtime": 1785450577.4061615,
+    "ast_hash": "edeb706cb52a23f54b170ea5c4af9053",
+    "semantic_hash": "edeb706cb52a23f54b170ea5c4af9053"
+  },
+  "install-lume.sh": {
+    "mtime": 1785447732.756731,
+    "ast_hash": "b4d5daa300b853d61b5de8fe23aaebe2",
+    "semantic_hash": "b4d5daa300b853d61b5de8fe23aaebe2"
+  },
+  "install-user.sh": {
+    "mtime": 1784604930.5751808,
+    "ast_hash": "b3ac5f1d6d53df06f82c25ae88bdebfa",
+    "semantic_hash": "b3ac5f1d6d53df06f82c25ae88bdebfa"
+  },
+  "AGENTS.md": {
+    "mtime": 1785610784.0111005,
+    "ast_hash": "6a47d64fcc136324ca395065a707ef76",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1785447732.9417293,
+    "ast_hash": "729a9753f8c3d4747769bf5d2f69dc3c",
+    "semantic_hash": ""
+  },
+  "config/captura-dia/janelas-sensiveis.txt": {
+    "mtime": 1784606443.8543582,
+    "ast_hash": "d938a53778ad78db92877d866af037bf",
+    "semantic_hash": ""
+  },
+  "config/captura-dia/video-apps.txt": {
+    "mtime": 1785629048.9318411,
+    "ast_hash": "c406444bae6d30472850dc48c1ec8b90",
+    "semantic_hash": ""
+  },
+  "config/sensitive-windows.txt": {
+    "mtime": 1784604930.0571802,
+    "ast_hash": "4d38d071cf2ad1f2723c35304d5f8ee4",
+    "semantic_hash": ""
+  },
+  "design_handoff_lume/Lume.dc.html": {
+    "mtime": 1784615606.0,
+    "ast_hash": "116b933e7bd575e437a1163069bd6470",
+    "semantic_hash": ""
+  },
+  "design_handoff_lume/README.md": {
+    "mtime": 1784615606.0,
+    "ast_hash": "dfa05d4167b5edc38ab47f628e3bcac3",
+    "semantic_hash": ""
+  },
+  "docker-compose.searxng.yml": {
+    "mtime": 1785606096.3259313,
+    "ast_hash": "900d813dd19fba08a73463fa9b86c19e",
+    "semantic_hash": ""
+  },
+  "frontend/index.html": {
+    "mtime": 1784607313.890319,
+    "ast_hash": "ede80bf11eb947e4ce1ca347a2733101",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1784606960.8840864,
+    "ast_hash": "129de4fd359ba7d902c98be2b264cedf",
+    "semantic_hash": ""
+  },
+  "searxng/settings.yml": {
+    "mtime": 1785606096.4919307,
+    "ast_hash": "b7a5207ddfd7abf763bb62e00be23f1f",
+    "semantic_hash": ""
+  },
+  "capturas/2026-07-21/telas/2026-07-21_00-48-52_mon-all.png": {
+    "mtime": 1784605733.0415006,
+    "ast_hash": "6f8a1ad577db6e875c263c9670ae40f8",
+    "semantic_hash": ""
+  },
+  "capturas/2026-07-21/telas/2026-07-21_00-57-46_mon0_HDMI-A-1.png": {
+    "mtime": 1784606267.5183167,
+    "ast_hash": "68cfb2639822a4d44e52aa3dafe7b567",
+    "semantic_hash": ""
+  },
+  "capturas/2026-07-21/telas/2026-07-21_00-57-46_mon1_DP-1.png": {
+    "mtime": 1784606267.7847805,
+    "ast_hash": "7dc672f3e08ae8c5fcac5d71e0094efa",
+    "semantic_hash": ""
+  },
+  "frontend/public/favicon.svg": {
+    "mtime": 1784607314.0543182,
+    "ast_hash": "72a8d248a841dd6143c25aa7f8636143",
+    "semantic_hash": ""
+  }
+}

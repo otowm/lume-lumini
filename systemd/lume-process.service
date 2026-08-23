@@ -1,0 +1,12 @@
+[Unit]
+Description=Lume - processa áudio, telas e resumo local
+After=ollama.service captura-dia.target
+Wants=captura-dia.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documentos/lume
+ExecStart=%h/Documentos/lume/.venv/bin/python -m app.backend.pipeline --limit-audio 100 --limit-screen 250
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

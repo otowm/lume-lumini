@@ -1,0 +1,16 @@
+[Unit]
+Description=Captura do dia - telas para visão
+After=graphical-session.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/bin/captura-tela-loop.sh
+Restart=always
+RestartSec=15
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=captura-dia.target
+

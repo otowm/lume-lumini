@@ -1,0 +1,12 @@
+[Unit]
+Description=Lume - processamento noturno diário
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=lume-process.service
+
+[Install]
+WantedBy=timers.target
+

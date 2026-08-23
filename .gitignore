@@ -1,0 +1,11 @@
+models/audio-intelligence/
+
+# Dependencies and generated caches
+node_modules/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+
+# SQLite runtime files
+*.sqlite3-shm
+*.sqlite3-wal

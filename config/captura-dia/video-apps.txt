@@ -1,0 +1,7 @@
+# Uma expressão regular por linha, aplicada ao título e à classe da janela ativa.
+# Jogos Proton/X11 usam classes como steam_app_730; "Steam" sozinho também
+# corresponde à loja e à biblioteca e, por isso, não deve ser usado.
+steam_app_[0-9]+
+gamescope
+Lutris
+Heroic

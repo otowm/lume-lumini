@@ -1,0 +1,16 @@
+[Unit]
+Description=Captura periódica de tela para o resumo diário
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/otowm-recall/capture-loop
+Restart=on-failure
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=graphical-session.target
+

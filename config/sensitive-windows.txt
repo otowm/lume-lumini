@@ -1,0 +1,8 @@
+# Uma expressao regular (grep -Ei) por linha. Linhas vazias/com # sao ignoradas.
+Saúde Simples
+GLPI
+KeePassXC
+Bitwarden
+1Password
+Proton Pass
+

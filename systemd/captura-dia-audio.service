@@ -1,0 +1,23 @@
+[Unit]
+Description=Captura do dia - áudio (mic + Discord + sistema em WAV de 3 canais 16 kHz)
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire-pulse.service wireplumber.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=%h/bin/audio-bus.sh setup
+ExecStart=%h/bin/grava-audio.sh
+ExecStopPost=-%h/bin/audio-bus.sh teardown
+Environment=AUDIO_OUTDIR=%h/captura-dia/audio
+Environment=SEG_SECONDS=900
+KillSignal=SIGINT
+TimeoutStopSec=15
+SuccessExitStatus=0 255
+Restart=always
+RestartSec=15
+Nice=5
+
+[Install]
+WantedBy=captura-dia.target
+

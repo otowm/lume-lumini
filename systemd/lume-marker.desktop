@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lume — adicionar destaque
+Comment=Adiciona um marcador à gravação de gameplay atual
+Exec=%h/bin/lume-add-video-marker
+Icon=bookmark-new
+NoDisplay=true
+X-KDE-Shortcuts=F8

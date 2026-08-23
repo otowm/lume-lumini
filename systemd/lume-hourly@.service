@@ -1,0 +1,11 @@
+[Unit]
+Description=Lume - gera resumos horários locais de %i
+After=ollama.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documentos/lume
+ExecStart=%h/Documentos/lume/.venv/bin/python -m app.backend.pipeline --hourly-only %i
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h

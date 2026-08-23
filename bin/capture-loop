@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -u
+
+config_file="${CAPTURA_DIA_TELA_CONFIG:-${OTOWM_RECALL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia/tela.conf}}"
+INTERVAL_SECONDS=20
+CAPTURE_MODE=interval
+CHANGE_POLL_SECONDS=3
+CHANGE_THRESHOLD_PERCENT=3
+CHANGE_MAX_INTERVAL_SECONDS=300
+[[ -r "$config_file" ]] && source "$config_file"
+[[ "$INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "INTERVAL_SECONDS inválido" >&2; exit 2; }
+[[ "$CHANGE_POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "CHANGE_POLL_SECONDS inválido" >&2; exit 2; }
+[[ "$CHANGE_MAX_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "CHANGE_MAX_INTERVAL_SECONDS inválido" >&2; exit 2; }
+[[ "$CAPTURE_MODE" == interval || "$CAPTURE_MODE" == change ]] || { echo "CAPTURE_MODE inválido" >&2; exit 2; }
+
+capture="${CAPTURA_DIA_TELA_BIN:-${OTOWM_RECALL_CAPTURE_BIN:-$HOME/bin/captura-tela.sh}}"
+state_dir="${XDG_RUNTIME_DIR:-/tmp}/captura-dia-tela"
+mkdir -p "$state_dir"
+
+changed_enough() {
+  local old="$1" new="$2" fraction percent
+  [[ -r "$old" ]] || return 0
+  fraction="$(magick \( "$old" -resize '320x180!' \) \( "$new" -resize '320x180!' \) \
+    -compose difference -composite -colorspace Gray -threshold 8% \
+    -format '%[fx:mean]' info:)" || return 0
+  percent="$(awk -v value="$fraction" 'BEGIN { printf "%.4f", value * 100 }')"
+  awk -v value="$percent" -v threshold="$CHANGE_THRESHOLD_PERCENT" 'BEGIN { exit !(value >= threshold) }'
+}
+
+while true; do
+  started=$SECONDS
+  output="$($capture)"
+  status=$?
+  if (( status != 0 && status != 10 && status != 11 )); then
+    echo "capture-frame falhou: status=$status" >&2
+  fi
+  if (( status == 0 )); then
+    mapfile -t frames <<<"$output"
+    if [[ "$CAPTURE_MODE" == interval ]]; then
+      printf '%s\n' "${frames[@]}"
+    else
+      now="$(date +%s)"; last=0
+      [[ -r "$state_dir/last-saved" ]] && read -r last < "$state_dir/last-saved"
+      keep=false
+      (( now - last >= CHANGE_MAX_INTERVAL_SECONDS )) && keep=true
+      for index in "${!frames[@]}"; do
+        [[ -f "${frames[$index]}" ]] || continue
+        if changed_enough "$state_dir/monitor-$index.png" "${frames[$index]}"; then keep=true; fi
+      done
+      if [[ "$keep" == true ]]; then
+        for index in "${!frames[@]}"; do
+          [[ -f "${frames[$index]}" ]] || continue
+          cp "${frames[$index]}" "$state_dir/monitor-$index.png"
+          echo "${frames[$index]}"
+        done
+        printf '%s\n' "$now" > "$state_dir/last-saved"
+      else
+        rm -f -- "${frames[@]}"
+      fi
+    fi
+  fi
+  elapsed=$((SECONDS - started))
+  if [[ "$CAPTURE_MODE" == change ]]; then period=$CHANGE_POLL_SECONDS; else period=$INTERVAL_SECONDS; fi
+  delay=$((period - elapsed))
+  (( delay < 1 )) && delay=1
+  sleep "$delay"
+done

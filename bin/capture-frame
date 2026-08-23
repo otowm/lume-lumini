@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# O user manager pode subir antes da sessão gráfica e deixar serviços sem estas
+# variáveis. Reconstrua os valores locais necessários para clientes Wayland/Qt.
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  candidate_runtime="/run/user/$(id -u)"
+  [[ -d "$candidate_runtime" ]] && export XDG_RUNTIME_DIR="$candidate_runtime"
+fi
+if [[ -z "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  for candidate_display in "$XDG_RUNTIME_DIR"/wayland-*; do
+    if [[ -S "$candidate_display" ]]; then
+      export WAYLAND_DISPLAY="${candidate_display##*/}"
+      break
+    fi
+  done
+fi
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia"
+config_file="${CAPTURA_DIA_TELA_CONFIG:-${OTOWM_RECALL_CONFIG:-$config_dir/tela.conf}}"
+patterns_file="${CAPTURA_DIA_SENSITIVE_WINDOWS:-${OTOWM_RECALL_PATTERNS:-$config_dir/janelas-sensiveis.txt}}"
+storage_file="$config_dir/storage.conf"
+
+INTERVAL_SECONDS=20
+CAPTURE_ROOT="$HOME/captura-dia/telas"
+STORAGE_ROOT="$HOME/captura-dia"
+CAPTURE_MODE=interval
+CHANGE_POLL_SECONDS=3
+CHANGE_THRESHOLD_PERCENT=3
+CHANGE_MAX_INTERVAL_SECONDS=300
+BACKEND=auto
+MAX_GEOMETRY='1920x1080>'
+OUTPUTS=''
+SPLIT_MONITORS=true
+ACTIVE_MONITOR_ONLY=true
+PRIVACY_FAIL_CLOSED=true
+[[ -r "$config_file" ]] && source "$config_file"
+[[ -r "$storage_file" ]] && source "$storage_file"
+CAPTURE_ROOT="$STORAGE_ROOT/telas"
+
+usage() {
+  echo "uso: capture-frame [--dry-run|--print-window]" >&2
+}
+
+mode=capture
+case "${1:-}" in
+  '') ;;
+  --dry-run) mode=dry-run ;;
+  --print-window) mode=print-window ;;
+  *) usage; exit 2 ;;
+esac
+
+active_window() {
+  command -v kdotool >/dev/null 2>&1 || return 1
+  local id title class
+  id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+  title="$(kdotool getwindowname "$id" 2>/dev/null || true)"
+  class="$(kdotool getwindowclassname "$id" 2>/dev/null || true)"
+  printf '%s | %s\n' "$title" "$class"
+}
+
+window_text="$(active_window)" || {
+  if [[ "$mode" == print-window ]]; then
+    echo "ERRO: não foi possível consultar a janela ativa; instale/teste kdotool." >&2
+    exit 3
+  fi
+  if [[ "$PRIVACY_FAIL_CLOSED" == true ]]; then
+    echo "SKIP active-window-unavailable" >&2
+    exit 10
+  fi
+  window_text='(indisponível)'
+}
+
+if [[ "$mode" == print-window ]]; then
+  printf '%s\n' "$window_text"
+  exit 0
+fi
+
+matched=''
+if [[ -r "$patterns_file" ]]; then
+  while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+    [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+    if grep -Eiq -- "$pattern" <<<"$window_text"; then
+      matched="$pattern"
+      break
+    fi
+  done < "$patterns_file"
+fi
+
+if [[ -n "$matched" ]]; then
+  echo "SKIP sensitive-window pattern=$matched window=$window_text" >&2
+  exit 11
+fi
+
+if [[ "$mode" == dry-run ]]; then
+  echo "OK capture-allowed window=$window_text"
+  exit 0
+fi
+
+backend="$BACKEND"
+if [[ "$backend" == auto ]]; then
+  # Serviços systemd iniciados antes da sessão gráfica nem sempre herdam
+  # XDG_CURRENT_DESKTOP.  Nesse caso, consultar as saídas via kscreen-doctor
+  # ainda identifica com segurança uma sessão KDE/KWin disponível.
+  kde_session=false
+  if [[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* || "${KDE_FULL_SESSION:-}" == true ]]; then
+    kde_session=true
+  elif command -v kscreen-doctor >/dev/null && kscreen-doctor -o >/dev/null 2>&1; then
+    kde_session=true
+  fi
+  if [[ "$kde_session" == true ]] && command -v spectacle >/dev/null; then
+    backend=spectacle
+  elif command -v grim >/dev/null; then
+    backend=grim
+  else
+    echo "ERRO: nenhum backend (spectacle/grim) disponível" >&2
+    exit 4
+  fi
+fi
+
+day="$(date +%F)"
+stamp="$(date +%F_%H-%M-%S)"
+dest_dir="${OTOWM_RECALL_IMAGE_ROOT:-$CAPTURE_ROOT}"
+mkdir -p "$dest_dir"
+
+finish_image() {
+  local input="$1" label="$2" crop="${3:-}" final work
+  final="$dest_dir/${stamp}_${label}.png"
+  work="$input"
+  if [[ -n "$crop" ]]; then
+    work="${input%.png}.${label}.png"
+    magick "$input" -crop "$crop" +repage "$work"
+  fi
+  if [[ -n "$MAX_GEOMETRY" ]]; then
+    magick "$work" -auto-orient -thumbnail "$MAX_GEOMETRY" -strip "$final"
+  else
+    cp "$work" "$final"
+  fi
+  printf '%s\n' "$window_text" > "$final.window"
+  [[ "$work" == "$input" ]] || rm -f "$work"
+  echo "$final"
+}
+
+new_temp() {
+  local runtime_dir
+  runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  [[ -d "$runtime_dir" && -w "$runtime_dir" ]] || runtime_dir=/tmp
+  mktemp --tmpdir="$runtime_dir" otowm-recall.XXXXXX.png
+}
+
+screen_geometries() {
+  kscreen-doctor -o 2>/dev/null |
+    sed $'s/\033\[[0-9;]*m//g' |
+    awk '
+      /^Output:/ { name=$3; enabled=0 }
+      /^[[:space:]]+enabled[[:space:]]*$/ { enabled=1 }
+      /Geometry:/ && enabled {
+        for (i=1; i<=NF; i++) if ($i == "Geometry:") {
+          split($(i+1), pos, ","); split($(i+2), size, "x");
+          print name, size[1] "x" size[2] "+" pos[1] "+" pos[2]
+        }
+      }
+    '
+}
+
+active_screen_geometry() {
+  local id geometry wx wy ww wh cx cy index name screen sx sy sw sh
+  id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+  geometry="$(kdotool getwindowgeometry "$id" 2>/dev/null)" || return 1
+  read -r wx wy < <(awk -F'[:, ]+' '/Position:/ {print $3, $4}' <<<"$geometry")
+  read -r ww wh < <(awk -F'[:x ]+' '/Geometry:/ {print $3, $4}' <<<"$geometry")
+  [[ "$wx" =~ ^-?[0-9]+$ && "$wy" =~ ^-?[0-9]+$ && "$ww" =~ ^[0-9]+$ && "$wh" =~ ^[0-9]+$ ]] || return 1
+  cx=$((wx + ww / 2)); cy=$((wy + wh / 2)); index=0
+  while read -r name screen; do
+    read -r sx sy sw sh < <(sed -E 's/^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$/\3 \4 \1 \2/' <<<"$screen")
+    if (( cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh )); then
+      printf '%s %s %s\n' "$index" "$name" "$screen"
+      return 0
+    fi
+    index=$((index + 1))
+  done < <(screen_geometries)
+  return 1
+}
+
+capture_spectacle() {
+  local tmp index name geometry found=0
+  tmp="$(new_temp)"
+  trap 'rm -f "$tmp"' RETURN
+  # --new-instance (-i) é essencial: o Spectacle é single-instance (serviço DBus
+  # org.kde.Spectacle). Sem isto, cada captura do loop reivindica esse serviço
+  # único e o Spectacle aberto manualmente pelo usuário é sequestrado — abre e
+  # fecha na hora. Com -i, a captura roda numa instância própria e convive com o
+  # Spectacle interativo.
+  spectacle --new-instance --background --nonotify --fullscreen --output "$tmp"
+
+  if [[ "$ACTIVE_MONITOR_ONLY" == true ]]; then
+    if read -r index name geometry < <(active_screen_geometry); then
+      finish_image "$tmp" "mon${index}_${name//[^[:alnum:]_.-]/_}" "$geometry"
+      found=1
+    fi
+  elif [[ "$SPLIT_MONITORS" == true ]]; then
+    index=0
+    while read -r name geometry; do
+      [[ -n "$name" && -n "$geometry" ]] || continue
+      finish_image "$tmp" "mon${index}_${name//[^[:alnum:]_.-]/_}" "$geometry"
+      index=$((index + 1)); found=1
+    done < <(screen_geometries)
+  fi
+  if (( found == 0 )); then finish_image "$tmp" mon-all; fi
+}
+
+capture_grim_one() {
+  local label="$1" output="${2:-}" tmp
+  tmp="$(new_temp)"
+  trap 'rm -f "$tmp"' RETURN
+  if [[ -n "$output" ]]; then grim -o "$output" "$tmp"; else grim "$tmp"; fi
+  finish_image "$tmp" "$label"
+}
+
+case "$backend" in
+  spectacle)
+    [[ -z "$OUTPUTS" ]] || { echo "ERRO: spectacle não aceita OUTPUTS; deixe vazio" >&2; exit 5; }
+    capture_spectacle
+    ;;
+  grim)
+    if [[ -n "$OUTPUTS" ]]; then
+      read -r -a outputs <<<"$OUTPUTS"
+      index=0
+      for output in "${outputs[@]}"; do
+        capture_grim_one "mon${index}_${output//[^[:alnum:]_.-]/_}" "$output"
+        index=$((index + 1))
+      done
+    else
+      capture_grim_one mon-all
+    fi
+    ;;
+  *) echo "ERRO: BACKEND inválido: $backend" >&2; exit 6 ;;
+esac

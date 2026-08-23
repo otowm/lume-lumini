@@ -1,0 +1,14 @@
+[Unit]
+Description=Captura seletiva de vídeo para jogos/apps
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/bin/captura-video-loop.sh
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=default.target

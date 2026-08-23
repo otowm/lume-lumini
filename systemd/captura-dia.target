@@ -1,0 +1,8 @@
+[Unit]
+Description=Captura local do dia (áudio e telas)
+Wants=captura-dia-audio.service captura-dia-tela.service
+After=pipewire-pulse.service graphical-session.target
+
+[Install]
+WantedBy=default.target
+

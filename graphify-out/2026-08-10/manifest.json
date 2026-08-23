@@ -1,0 +1,287 @@
+{
+  ".codex/hooks.json": {
+    "mtime": 1785991039.642168,
+    "ast_hash": "",
+    "semantic_hash": ""
+  },
+  "app/backend/__init__.py": {
+    "mtime": 1784606960.5370877,
+    "ast_hash": "68b329da9893e34099c7d8ad5cb9c940",
+    "semantic_hash": "68b329da9893e34099c7d8ad5cb9c940"
+  },
+  "app/backend/database.py": {
+    "mtime": 1786214926.2749717,
+    "ast_hash": "e3d690b67d4e39f56a159b076a3b0968",
+    "semantic_hash": ""
+  },
+  "app/backend/main.py": {
+    "mtime": 1786408952.7288823,
+    "ast_hash": "c4b05a0d502c172ff814bdb3e2f27aa5",
+    "semantic_hash": ""
+  },
+  "app/backend/main_paths.py": {
+    "mtime": 1786069709.7354884,
+    "ast_hash": "78c7ba403b34cc7a4857d919d99e42d0",
+    "semantic_hash": ""
+  },
+  "app/backend/pipeline.py": {
+    "mtime": 1786291352.9581418,
+    "ast_hash": "3ba0567533c0e190c541dfa45f2d591c",
+    "semantic_hash": ""
+  },
+  "app/backend/test_main.py": {
+    "mtime": 1786409024.7861452,
+    "ast_hash": "9ad806e17dbd71a898284dbc6a4ebecc",
+    "semantic_hash": ""
+  },
+  "bin/audio-bus.sh": {
+    "mtime": 1784609341.9833817,
+    "ast_hash": "f75081f3c6dab54ce0d9bd9639c26266",
+    "semantic_hash": "f75081f3c6dab54ce0d9bd9639c26266"
+  },
+  "bin/capture-frame": {
+    "mtime": 1786139210.8342519,
+    "ast_hash": "2e5096320b82279637dce1dad4ff7205",
+    "semantic_hash": ""
+  },
+  "bin/capture-loop": {
+    "mtime": 1784606443.5773597,
+    "ast_hash": "e2a58c05296314cf10f371f9f740ee5b",
+    "semantic_hash": "e2a58c05296314cf10f371f9f740ee5b"
+  },
+  "bin/game-video-loop": {
+    "mtime": 1786297750.3439527,
+    "ast_hash": "b466637ca757ae3ddfff61d4e2a7133d",
+    "semantic_hash": ""
+  },
+  "bin/grava-audio.sh": {
+    "mtime": 1785450577.1171613,
+    "ast_hash": "36de87c784f76abc83908d16377f707c",
+    "semantic_hash": "36de87c784f76abc83908d16377f707c"
+  },
+  "frontend/package.json": {
+    "mtime": 1784607094.1515768,
+    "ast_hash": "d32dfc76f8a7ea89812c39332e28fd43",
+    "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
+  },
+  "frontend/src/api.ts": {
+    "mtime": 1786408889.2657568,
+    "ast_hash": "a12a9d65cc7fa80cab1c54f7ef2cbc65",
+    "semantic_hash": ""
+  },
+  "frontend/src/main.tsx": {
+    "mtime": 1786408920.53694,
+    "ast_hash": "abc975a7a420aa01c3c523e03549bf53",
+    "semantic_hash": ""
+  },
+  "frontend/tsconfig.json": {
+    "mtime": 1784607094.2485764,
+    "ast_hash": "6774dc00ce6501abeaca72c87714097a",
+    "semantic_hash": "6774dc00ce6501abeaca72c87714097a"
+  },
+  "frontend/vite.config.ts": {
+    "mtime": 1785447732.8497303,
+    "ast_hash": "05869532f9b0348c50146060db9f5665",
+    "semantic_hash": "05869532f9b0348c50146060db9f5665"
+  },
+  "install-captura-dia.sh": {
+    "mtime": 1785971948.6287298,
+    "ast_hash": "994a8ce2aa9f2a962e87f0c3ca28143a",
+    "semantic_hash": ""
+  },
+  "install-lume.sh": {
+    "mtime": 1785447732.756731,
+    "ast_hash": "b4d5daa300b853d61b5de8fe23aaebe2",
+    "semantic_hash": "b4d5daa300b853d61b5de8fe23aaebe2"
+  },
+  "install-user.sh": {
+    "mtime": 1784604930.5751808,
+    "ast_hash": "b3ac5f1d6d53df06f82c25ae88bdebfa",
+    "semantic_hash": "b3ac5f1d6d53df06f82c25ae88bdebfa"
+  },
+  "AGENTS.md": {
+    "mtime": 1785610784.0111003,
+    "ast_hash": "6a47d64fcc136324ca395065a707ef76",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1786205744.1487246,
+    "ast_hash": "151a36d51d70bb39d60a65aa243b488a",
+    "semantic_hash": ""
+  },
+  "config/captura-dia/janelas-sensiveis.txt": {
+    "mtime": 1784606443.8543582,
+    "ast_hash": "d938a53778ad78db92877d866af037bf",
+    "semantic_hash": ""
+  },
+  "config/captura-dia/video-apps.txt": {
+    "mtime": 1785629048.931841,
+    "ast_hash": "c406444bae6d30472850dc48c1ec8b90",
+    "semantic_hash": ""
+  },
+  "config/sensitive-windows.txt": {
+    "mtime": 1784604930.0571802,
+    "ast_hash": "4d38d071cf2ad1f2723c35304d5f8ee4",
+    "semantic_hash": ""
+  },
+  "design_handoff_lume/Lume.dc.html": {
+    "mtime": 1784615606.0,
+    "ast_hash": "116b933e7bd575e437a1163069bd6470",
+    "semantic_hash": ""
+  },
+  "design_handoff_lume/README.md": {
+    "mtime": 1784615606.0,
+    "ast_hash": "dfa05d4167b5edc38ab47f628e3bcac3",
+    "semantic_hash": ""
+  },
+  "docker-compose.searxng.yml": {
+    "mtime": 1785606096.3259313,
+    "ast_hash": "900d813dd19fba08a73463fa9b86c19e",
+    "semantic_hash": ""
+  },
+  "frontend/index.html": {
+    "mtime": 1786316354.4016101,
+    "ast_hash": "62813ce7e0ea7cf5384195706f629bf9",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1786057460.9055831,
+    "ast_hash": "62c8c259ab7845ece4dbaa882f68b57b",
+    "semantic_hash": ""
+  },
+  "searxng/settings.yml": {
+    "mtime": 1785606096.4919307,
+    "ast_hash": "b7a5207ddfd7abf763bb62e00be23f1f",
+    "semantic_hash": ""
+  },
+  "frontend/public/favicon.svg": {
+    "mtime": 1784607314.0543182,
+    "ast_hash": "72a8d248a841dd6143c25aa7f8636143",
+    "semantic_hash": ""
+  },
+  "bin/add-video-marker": {
+    "mtime": 1785971922.9797907,
+    "ast_hash": "10283a11064abf626d6cd2910cef7d4c",
+    "semantic_hash": ""
+  },
+  ".claude/settings.local.json": {
+    "mtime": 1786074706.4773307,
+    "ast_hash": "",
+    "semantic_hash": ""
+  },
+  "app/backend/runtime.py": {
+    "mtime": 1786215709.797012,
+    "ast_hash": "4643667bebeb2bf20900fcd21f80f8de",
+    "semantic_hash": ""
+  },
+  "app/capture/__init__.py": {
+    "mtime": 1785976133.1373646,
+    "ast_hash": "06a725cc4aa7a29f9d9000b1d4250345",
+    "semantic_hash": ""
+  },
+  "app/capture/base.py": {
+    "mtime": 1786302093.3536103,
+    "ast_hash": "6cddbd7b9bf33f0ed0e864ddd983d80f",
+    "semantic_hash": ""
+  },
+  "app/capture/linux.py": {
+    "mtime": 1785977750.159287,
+    "ast_hash": "be7e5aa2ba0bccd882fde8505c81b688",
+    "semantic_hash": ""
+  },
+  "app/capture/selftest.py": {
+    "mtime": 1785977791.8348331,
+    "ast_hash": "610c238ee449639f90c2aca694381398",
+    "semantic_hash": ""
+  },
+  "app/capture/windows.py": {
+    "mtime": 1786205742.5932658,
+    "ast_hash": "ae81645cf0f05079b35243536d8fef04",
+    "semantic_hash": ""
+  },
+  "WINDOWS.md": {
+    "mtime": 1786209845.064474,
+    "ast_hash": "2553b5ce473a2549abd571db6e020c85",
+    "semantic_hash": ""
+  },
+  "app/backend/services.py": {
+    "mtime": 1786164298.709824,
+    "ast_hash": "85b3a67f0b3807ac4b7ecdb47396a459",
+    "semantic_hash": ""
+  },
+  "app/capture/imagediff.py": {
+    "mtime": 1785979687.7391045,
+    "ast_hash": "5278e6d0e249325d8e89f0e5617c5be6",
+    "semantic_hash": ""
+  },
+  "app/capture/wasapi.py": {
+    "mtime": 1786246005.687446,
+    "ast_hash": "3ebd62e53696b05a8a892384e4f20f4b",
+    "semantic_hash": ""
+  },
+  "app/capture/winrecord.py": {
+    "mtime": 1786246041.153909,
+    "ast_hash": "79f9a3f282604862b4c9a8ae8916a098",
+    "semantic_hash": ""
+  },
+  "app/capture/winscreen.py": {
+    "mtime": 1785986957.6365542,
+    "ast_hash": "6941b186d2bc6a19f2944d35d63508f1",
+    "semantic_hash": ""
+  },
+  "lume.ps1": {
+    "mtime": 1786074339.053852,
+    "ast_hash": "807d4b2bc15c56fa620d7aec78a6c3dc",
+    "semantic_hash": ""
+  },
+  "HANDOFF.md": {
+    "mtime": 1785990805.3317964,
+    "ast_hash": "9a229f0ad77fd44f8be863a2e5e09f14",
+    "semantic_hash": ""
+  },
+  "app/backend/test_services.py": {
+    "mtime": 1786302263.401819,
+    "ast_hash": "a8feae949da308bc5e8737bba048f194",
+    "semantic_hash": ""
+  },
+  "app/capture/obs.py": {
+    "mtime": 1786302104.012539,
+    "ast_hash": "4703e53bd5d3b744c5b0a1f8c089b168",
+    "semantic_hash": ""
+  },
+  "app/capture/winvideo.py": {
+    "mtime": 1786302100.395354,
+    "ast_hash": "14e02c2f48ce89192f766f95979166bc",
+    "semantic_hash": ""
+  },
+  "app/backend/audio_intelligence.py": {
+    "mtime": 1786307647.703447,
+    "ast_hash": "934a5f2e2995c0d71166a1f39fc154fb",
+    "semantic_hash": ""
+  },
+  "bin/install-audio-intelligence": {
+    "mtime": 1786063672.1643429,
+    "ast_hash": "1d1df4dda776a57da0e8d1196c8f1f3b",
+    "semantic_hash": ""
+  },
+  "app/backend/test_portable_paths.py": {
+    "mtime": 1786069502.9447417,
+    "ast_hash": "7e00796c547988ad31b30b756b637d31",
+    "semantic_hash": ""
+  },
+  "backups/src-backup-2026-08-09/api.ts": {
+    "mtime": 1786315586.8428695,
+    "ast_hash": "d3c4e01b139e5549662df64357a44607",
+    "semantic_hash": ""
+  },
+  "backups/src-backup-2026-08-09/main.tsx": {
+    "mtime": 1786315586.8388512,
+    "ast_hash": "87b79defa5cc00a24ec9aa1774e0bc82",
+    "semantic_hash": ""
+  },
+  "backups/index-backup-2026-08-09.html": {
+    "mtime": 1786315587.040541,
+    "ast_hash": "ede80bf11eb947e4ce1ca347a2733101",
+    "semantic_hash": ""
+  }
+}

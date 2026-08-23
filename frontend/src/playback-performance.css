@@ -1,0 +1,34 @@
+/*
+ * Media popups change their progress UI throughout playback. Keeping a
+ * backdrop blur here would re-composite the entire application on every
+ * progress update, which is especially expensive for video.
+ */
+.overlay,
+.lightbox {
+  backdrop-filter: none !important;
+}
+/* The covered application does not need to be painted while media is open. */
+.app-shell.media-playback-open > .sidebar,
+.app-shell.media-playback-open > main {
+  visibility: hidden;
+}
+.app-shell.media-playback-open > .overlay,
+.app-shell.media-playback-open > .lightbox {
+  visibility: visible;
+}
+/* Marker percentages use the same box as the native progress control. */
+.playback-timeline {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+}
+.playback-timeline > input {
+  width: 100%;
+}
+.playback-timeline > .timeline-marker {
+  top: -11px;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+}

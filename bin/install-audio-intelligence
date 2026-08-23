@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+model_root="$repo_root/models/audio-intelligence"
+mkdir -p "$model_root"
+
+download() {
+  local url="$1" output="$2"
+  if [[ ! -s "$output" ]]; then
+    curl -L --fail --retry 3 -o "$output" "$url"
+  fi
+}
+
+download "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2" "$model_root/speaker-segmentation.tar.bz2"
+download "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx" "$model_root/speaker-embedding.onnx"
+download "https://github.com/k2-fsa/sherpa-onnx/releases/download/audio-tagging-models/sherpa-onnx-zipformer-small-audio-tagging-2024-04-15.tar.bz2" "$model_root/audio-tagging.tar.bz2"
+
+tar -xjf "$model_root/speaker-segmentation.tar.bz2" -C "$model_root"
+tar -xjf "$model_root/audio-tagging.tar.bz2" -C "$model_root"
+
+"$repo_root/.venv/bin/python" -m pip install -r "$repo_root/requirements.txt"
+echo "Inteligência de áudio instalada em $model_root"

@@ -1,0 +1,8 @@
+# Uma regex (grep -Ei) por linha; linhas vazias e comentários são ignorados.
+Saúde Simples
+GLPI
+KeePassXC
+Bitwarden
+1Password
+Proton Pass
+

@@ -1,0 +1,11 @@
+[Unit]
+Description=Lume - gera o resumo local de %i
+After=ollama.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documentos/lume
+ExecStart=%h/Documentos/lume/.venv/bin/python -m app.backend.pipeline --summary-only %i
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30m

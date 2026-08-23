@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia"
+config_file="$config_dir/video.conf"
+apps_file="$config_dir/video-apps.txt"
+storage_file="$config_dir/storage.conf"
+VIDEO_ENABLED=false VIDEO_FPS=30 VIDEO_GEOMETRY=1920x1080 VIDEO_SEGMENT_SECONDS=60
+VIDEO_CODEC=h264 VIDEO_QUALITY=high VIDEO_AUDIO=default_output
+PAUSE_OTHER_CAPTURES=true
+VIDEO_FOCUS_GRACE_SECONDS=20
+STORAGE_ROOT="$HOME/captura-dia"
+[[ -r "$config_file" ]] && source "$config_file"
+[[ -r "$storage_file" ]] && source "$storage_file"
+output_dir="$STORAGE_ROOT/video-buffer"
+mkdir -p "$output_dir"
+pause_state="${XDG_RUNTIME_DIR:-/tmp}/captura-dia-video-paused"
+captures_paused=false
+
+log() {
+  printf 'captura-video: %s\n' "$*" >&2
+}
+
+# User units may be started before Plasma has imported the graphical session
+# variables into systemd.  In that case kdotool can still answer through DBus,
+# but kscreen-doctor/gsr cannot connect to Wayland and the loop never records.
+refresh_graphical_environment() {
+  local key value
+  while IFS='=' read -r key value; do
+    case "$key" in
+      DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP)
+        printf -v "$key" '%s' "$value"
+        export "$key"
+        ;;
+    esac
+  done < <(systemctl --user show-environment 2>/dev/null || true)
+}
+
+graphical_session_ready() {
+  if [[ -z "${WAYLAND_DISPLAY:-}" && -z "${DISPLAY:-}" ]]; then
+    refresh_graphical_environment
+  fi
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    [[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$WAYLAND_DISPLAY" ]] || return 1
+  elif [[ -z "${DISPLAY:-}" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+resume_background_captures() {
+  [[ -r "$pause_state" ]] || { captures_paused=false; return; }
+  read -r restore_audio restore_screen < "$pause_state" || true
+  [[ "${restore_audio:-0}" == 1 ]] && systemctl --user start captura-dia-audio.service || true
+  [[ "${restore_screen:-0}" == 1 ]] && systemctl --user start captura-dia-tela.service || true
+  rm -f "$pause_state"
+  captures_paused=false
+}
+
+pause_background_captures() {
+  [[ "$PAUSE_OTHER_CAPTURES" == true && "$captures_paused" == false ]] || return 0
+  local restore_audio=0 restore_screen=0
+  systemctl --user is-active --quiet captura-dia-audio.service && restore_audio=1
+  systemctl --user is-active --quiet captura-dia-tela.service && restore_screen=1
+  printf '%s %s\n' "$restore_audio" "$restore_screen" > "$pause_state"
+  systemctl --user stop captura-dia-audio.service captura-dia-tela.service
+  captures_paused=true
+}
+
+# Recupera capturas deixadas pausadas por uma interrupção abrupta anterior.
+resume_background_captures
+
+window_info() {
+  local id title class
+  id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+  title="$(kdotool getwindowname "$id" 2>/dev/null || true)"
+  class="$(kdotool getwindowclassname "$id" 2>/dev/null || true)"
+  printf '%s | %s\n' "$title" "$class"
+}
+
+is_selected_app() {
+  local info="$1" pattern
+  [[ "$VIDEO_ENABLED" == true && -r "$apps_file" ]] || return 1
+  while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+    [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$pattern" =~ ^\[(continuous|clips)([[:space:]][^]]*)?\][[:space:]]+ ]]; then
+        pattern="${pattern:${#BASH_REMATCH[0]}}"
+      fi
+    grep -Eiq -- "$pattern" <<<"$info" && return 0
+  done < "$apps_file"
+  return 1
+}
+
+active_monitor() {
+  local id geometry wx wy ww wh cx cy name screen sx sy sw sh
+  id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+  geometry="$(kdotool getwindowgeometry "$id" 2>/dev/null)" || return 1
+  read -r wx wy < <(awk -F'[:, ]+' '/Position:/ {print $3,$4}' <<<"$geometry")
+  read -r ww wh < <(awk -F'[:x ]+' '/Geometry:/ {print $3,$4}' <<<"$geometry")
+  cx=$((wx+ww/2)); cy=$((wy+wh/2))
+  while read -r name screen; do
+    read -r sx sy sw sh < <(sed -E 's/^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$/\3 \4 \1 \2/' <<<"$screen")
+    ((cx>=sx && cx<sx+sw && cy>=sy && cy<sy+sh)) && { printf '%s\n' "$name"; return 0; }
+  done < <(kscreen-doctor -o 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | awk '/^Output:/{n=$3;e=0}/^[[:space:]]+enabled[[:space:]]*$/{e=1}/Geometry:/&&e{for(i=1;i<=NF;i++)if($i=="Geometry:"){split($(i+1),p,",");split($(i+2),s,"x");print n,s[1]"x"s[2]"+"p[1]"+"p[2]}}')
+  return 1
+}
+
+finish_segment() {
+  local pid="$1" partial="$2" final="$3" info="$4" session_id="$5"
+  kill -INT "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if [[ -s "$partial" ]]; then
+    mv "$partial" "$final"
+    printf '%s\n' "$info" > "$final.window"
+    printf '%s\n%s\n' "$session_id" "$info" > "$final.session"
+    echo "$final"
+  else
+    rm -f "$partial"
+  fi
+}
+
+cleanup() {
+  [[ -n "${rec_pid:-}" ]] && kill -INT "$rec_pid" 2>/dev/null || true
+  resume_background_captures
+}
+add_marker() {
+  [[ -n "${rec_pid:-}" && -n "${final:-}" ]] || return 0
+  local offset=$((SECONDS-started))
+  printf '%s\n' "$offset" >> "$final.markers"
+  command -v canberra-gtk-play >/dev/null && canberra-gtk-play -i complete >/dev/null 2>&1 || true
+}
+trap cleanup EXIT TERM INT
+trap add_marker USR1
+session_id=''
+session_wait_logged=false
+while true; do
+  if ! graphical_session_ready; then
+    if [[ "$session_wait_logged" == false ]]; then
+      log "aguardando sessão gráfica (DISPLAY=${DISPLAY:-ausente}, WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-ausente})"
+      session_wait_logged=true
+    fi
+    session_id=''; resume_background_captures; sleep 2; continue
+  fi
+  if [[ "$session_wait_logged" == true ]]; then
+    log "sessão gráfica disponível"
+    session_wait_logged=false
+  fi
+  info="$(window_info || true)"
+  if ! is_selected_app "$info"; then session_id=''; resume_background_captures; sleep 2; continue; fi
+  [[ -n "$session_id" ]] || session_id="$(date +%s)-$$-$RANDOM"
+  pause_background_captures
+  monitor="$(active_monitor || true)"; [[ -n "$monitor" ]] || { sleep 2; continue; }
+  stamp="$(date +%F_%H-%M-%S)"; final="$output_dir/${stamp}_${monitor}.mp4"; partial="$final.partial.mp4"
+  command=(gpu-screen-recorder -w "$monitor" -f "$VIDEO_FPS" -s "$VIDEO_GEOMETRY" -c mp4 -k "$VIDEO_CODEC" -q "$VIDEO_QUALITY" -fm cfr -cursor yes -o "$partial")
+  [[ -n "$VIDEO_AUDIO" ]] && command+=( -a "$VIDEO_AUDIO" )
+  "${command[@]}" & rec_pid=$!
+  started=$SECONDS
+  focus_lost_at=-1
+  session_ended=false
+  while kill -0 "$rec_pid" 2>/dev/null && ((VIDEO_SEGMENT_SECONDS==0 || SECONDS-started<VIDEO_SEGMENT_SECONDS)); do
+    sleep 2; current="$(window_info || true)"
+    if is_selected_app "$current"; then
+      focus_lost_at=-1
+    elif ((focus_lost_at < 0)); then
+      focus_lost_at=$SECONDS
+    elif ((SECONDS-focus_lost_at >= VIDEO_FOCUS_GRACE_SECONDS)); then
+      session_ended=true
+      break
+    fi
+  done
+  finish_segment "$rec_pid" "$partial" "$final" "$info" "$session_id"; rec_pid=''
+  [[ "$session_ended" == true ]] && session_id=''
+done
