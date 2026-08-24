@@ -67,6 +67,59 @@ class ConfigTests(unittest.TestCase):
         size = limit * 10
         self.assertEqual(backend_main.bounded_video_range(f"bytes=-{limit * 2}", size), (size - limit, size - 1))
 
+    def test_trim_command_reencodes_video_and_keeps_all_audio_tracks(self):
+        command = backend_main.trim_video_command(Path("clip.mkv"), Path("cut.mkv"), 4.25, 18.5)
+        self.assertIn("libx264", command)
+        self.assertEqual(command[command.index("-ss") + 1], "4.250")
+        self.assertEqual(command[command.index("-t") + 1], "18.500")
+        self.assertIn("0:a?", command)
+
+    def test_trim_video_replaces_file_shifts_markers_and_resets_stale_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clip.mkv"
+            source.write_bytes(b"original")
+            clips = root / "clips"
+            clips.mkdir()
+            db_path = root / "lume.sqlite3"
+            with patch.object(database, "DB_PATH", db_path):
+                database.initialize()
+                with database.connect() as db:
+                    session_id = db.execute("INSERT INTO video_sessions(name,status,summary) VALUES('Jogo','done','antigo')").lastrowid
+                    video_id = db.execute(
+                        """INSERT INTO video_segments(source_path,captured_at,status,description,transcript,chapters_json,duration_seconds,session_id)
+                           VALUES(?,'2026-08-23T10:00:00-03:00','done','antiga','fala','[{}]',60,?)""",
+                        (str(source), session_id),
+                    ).lastrowid
+                    db.executemany(
+                        "INSERT INTO video_markers(video_id,offset_seconds,title) VALUES(?,?,?)",
+                        [(video_id, 2, "fora"), (video_id, 12, "dentro"), (video_id, 50, "fora")],
+                    )
+
+                def fake_run(command, timeout=0):
+                    Path(command[-1]).write_bytes(b"trimmed")
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                with patch.object(backend_main, "safe_video_path", return_value=source), \
+                     patch.object(backend_main, "probe_video_duration", return_value=60), \
+                     patch.object(backend_main, "run", side_effect=fake_run), \
+                     patch.object(backend_main, "CLIPS_DIR", clips), \
+                     patch.object(backend_main, "delete_video_caches"):
+                    result = backend_main.trim_video(video_id, backend_main.VideoTrimRequest(start_seconds=10, end_seconds=40))
+
+                with database.connect() as db:
+                    video = db.execute("SELECT * FROM video_segments WHERE id=?", (video_id,)).fetchone()
+                    markers = db.execute("SELECT offset_seconds,title FROM video_markers WHERE video_id=?", (video_id,)).fetchall()
+                    session = db.execute("SELECT status,summary FROM video_sessions WHERE id=?", (session_id,)).fetchone()
+            self.assertEqual(source.read_bytes(), b"trimmed")
+            self.assertEqual(result["duration_seconds"], 30)
+            self.assertEqual([(row["offset_seconds"], row["title"]) for row in markers], [(2, "dentro")])
+            self.assertEqual(video["duration_seconds"], 30)
+            self.assertEqual(video["status"], "pending")
+            self.assertEqual(video["description"], "")
+            self.assertEqual(video["captured_at"], "2026-08-23T10:00:10-03:00")
+            self.assertEqual((session["status"], session["summary"]), ("pending", ""))
+
     def test_video_audio_cache_lives_under_selected_media_root(self):
         self.assertEqual(backend_main.VIDEO_AUDIO_TRACK_DIR.parent.parent, backend_main.MEDIA_ROOT)
         self.assertEqual(backend_main.VIDEO_THUMBNAIL_DIR.parent.parent, backend_main.MEDIA_ROOT)
@@ -1049,6 +1102,54 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result["observed_facts"], ["Jogador no lado TR", "Vitória com 1 HP"])
         self.assertEqual(result["user_context_facts"], ["Foi um clutch", "A equipe plantou a bomba"])
         self.assertEqual(result["game_state"]["player_side"], "TR")
+
+
+class VideoSettingsRoundTripTests(unittest.TestCase):
+    """Salvar as preferências não pode apagar chaves silenciosamente.
+
+    ``set_video_settings`` reescreve ``video.conf`` inteiro a partir de um
+    template fixo, então toda chave nova precisa estar em três lugares — modelo,
+    leitura e template. Esquecer o template não quebra nada na hora: a chave
+    simplesmente desaparece no primeiro save, e o defeito só aparece depois.
+    """
+
+    def _round_trip(self, initial: str) -> dict:
+        from fastapi import BackgroundTasks
+
+        from app.backend.main import VideoSettings, get_video_settings, set_video_settings
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "video.conf"
+            apps = Path(directory) / "video-apps.txt"
+            config.write_text(initial, encoding="utf-8")
+            apps.write_text("# Gerenciado pelo Lume\nexe:^jogo\\.exe$\n", encoding="utf-8")
+            shortcut = Path(directory) / "share"
+            with patch.object(backend_main, "VIDEO_CONFIG", config), \
+                 patch.object(backend_main, "VIDEO_APPS", apps), \
+                 patch.dict(os.environ, {"XDG_DATA_HOME": str(shortcut)}, clear=False):
+                before = get_video_settings()
+                set_video_settings(VideoSettings(**before), BackgroundTasks())
+                return get_video_settings()
+
+    def test_hud_preferences_survive_a_save(self):
+        after = self._round_trip(
+            "VIDEO_ENABLED=true\nVIDEO_FPS=60\nVIDEO_GEOMETRY=1920x1080\n"
+            "VIDEO_HUD_ENABLED=true\nVIDEO_HUD_PLACEMENT=both\n"
+            "VIDEO_HUD_CORNER=bottom-left\nVIDEO_HUD_HOTKEY=Ctrl+F9\n"
+            "VIDEO_HUD_SOUND=false\n"
+        )
+        self.assertTrue(after["hud_enabled"])
+        self.assertEqual(after["hud_placement"], "both")
+        self.assertEqual(after["hud_corner"], "bottom-left")
+        self.assertEqual(after["hud_hotkey"], "Ctrl+F9")
+        self.assertFalse(after["hud_sound"])
+
+    def test_config_without_hud_keys_gets_usable_defaults(self):
+        """Uma instalação antiga não pode ficar sem HUD nem quebrar ao salvar."""
+        after = self._round_trip("VIDEO_ENABLED=true\nVIDEO_FPS=60\nVIDEO_GEOMETRY=1920x1080\n")
+        self.assertTrue(after["hud_enabled"])
+        self.assertEqual(after["hud_placement"], "second")
+        self.assertEqual(after["hud_hotkey"], "Ctrl+Shift+F8")
 
 
 if __name__ == "__main__":

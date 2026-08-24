@@ -29,6 +29,22 @@
 .marker-list time{color:#f0b45f}
 .marker-list span{font-size:10px}
 .continuous-session{min-width:0}
+.video-trimmer{padding:12px 14px;border-top:1px solid var(--divider);background:#171925}
+.video-trimmer header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.video-trimmer header div{display:flex;flex-direction:column;gap:3px}
+.video-trimmer header strong{font-size:11px}
+.video-trimmer header span{font-size:9px;color:var(--muted)}
+.video-trimmer output{font-size:10px;color:#f0b45f;font-variant-numeric:tabular-nums}
+.trim-range{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:12px 0}
+.trim-range label{display:grid;gap:5px}
+.trim-range span{font-size:9px;color:var(--muted)}
+.trim-range input{width:100%;accent-color:#f0b45f}
+.video-trimmer footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:7px}
+.video-trimmer button{border:1px solid var(--divider);border-radius:6px;background:var(--surface2);color:var(--text);padding:7px 9px;font-size:9px;cursor:pointer}
+.video-trimmer button:disabled{opacity:.4;cursor:default}
+.video-trimmer button.primary{border-color:rgba(82,214,166,.45);background:rgba(82,214,166,.12);color:var(--green)}
+.trim-message{padding:8px 14px;border-top:1px solid var(--divider);background:rgba(82,214,166,.08);color:var(--green);font-size:9px}
+@media(max-width:760px){.trim-range{grid-template-columns:1fr}}
 .session-continuous-head{display:flex;justify-content:space-between;margin-bottom:8px}
 .session-continuous-head strong{font-size:12px}
 .session-continuous-head span{font-size:10px;color:var(--muted)}

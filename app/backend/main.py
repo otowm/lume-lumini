@@ -22,7 +22,7 @@ import urllib.request
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -64,6 +64,7 @@ ALLOWED_CONFIG = {
     "VIDEO_ANALYSIS_PROFILE","VIDEO_SCAN_INTERVAL_SECONDS","VIDEO_MAX_KEYFRAMES","VIDEO_FOCUS_GRACE_SECONDS",
     "VIDEO_WEB_SEARCH_ENABLED","SEARXNG_URL","VIDEO_WEB_SEARCH_SAFETY_LIMIT","AI_THINKING_ENABLED",
     "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_PREROLL_SECONDS",
+    "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND",
 }
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
@@ -91,10 +92,19 @@ async def lifespan(_app: FastAPI):
         # estado operacional do supervisor e pode ficar vazio após migração ou
         # encerramento inesperado.  Reconciliar os dois evita mostrar vídeo
         # habilitado na interface enquanto o gravador permanece parado.
-        video_enabled = parse_shell_config(VIDEO_CONFIG).get("VIDEO_ENABLED", "false") == "true"
+        video_config = parse_shell_config(VIDEO_CONFIG)
+        video_enabled = video_config.get("VIDEO_ENABLED", "false") == "true"
         manager.action(
             "enable" if video_enabled else "disable",
             ["captura-dia-video.service"], now=True,
+        )
+        # A HUD segue a mesma reconciliação: sem isto ela só subiria depois de o
+        # usuário mexer nas preferências uma vez, porque services.json não sabe
+        # de uma unit que nunca foi habilitada.
+        hud_enabled = video_enabled and video_config.get("VIDEO_HUD_ENABLED", "true") == "true"
+        manager.action(
+            "enable" if hud_enabled else "disable",
+            ["captura-dia-hud.service"], now=True,
         )
     try:
         yield
@@ -204,6 +214,11 @@ class MarkerUpdate(BaseModel):
 
 class VideoDateUpdate(BaseModel):
     captured_at: datetime
+
+
+class VideoTrimRequest(BaseModel):
+    start_seconds: float = Field(ge=0, le=86400)
+    end_seconds: float = Field(gt=0, le=86400)
 
 
 class SpeakerLabelUpdate(BaseModel):
@@ -353,6 +368,11 @@ class VideoSettings(BaseModel):
     text_model: str = Field(default="qwen3.5:9b", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$")
     marker_hotkey: str = Field(default="F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
     marker_preroll_seconds: int = Field(default=8, ge=0, le=120)
+    hud_enabled: bool = True
+    hud_placement: Literal["game", "second", "both"] = "second"
+    hud_corner: Literal["top-left", "top-right", "bottom-left", "bottom-right"] = "top-right"
+    hud_hotkey: str = Field(default="Ctrl+Shift+F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
+    hud_sound: bool = True
     patterns: list[str] = Field(max_length=100)
     pattern_modes: dict[str, Literal["continuous", "clips"]] = Field(default_factory=dict, max_length=100)
     pattern_fps: dict[str, int] = Field(default_factory=dict, max_length=100)
@@ -495,7 +515,7 @@ def _apply_storage_runtime() -> None:
     _report_runtime_failure("reinício do Lume", get_manager().restart_self())
 
 
-def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool) -> None:
+def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool, hud_enabled: bool = True) -> None:
     if refresh_shortcuts and shutil.which("kbuildsycoca6"):
         run(["kbuildsycoca6", "--noincremental"], timeout=30)
     verb = "enable" if enabled else "disable"
@@ -503,6 +523,15 @@ def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool) -> None:
     _report_runtime_failure("gravador de vídeo", result)
     if enabled and result.returncode == 0:
         _report_runtime_failure("reinício do gravador de vídeo", service_action("restart", ["captura-dia-video.service"], timeout=20))
+    # A HUD lê a configuração só ao subir; qualquer mudança de posição, canto ou
+    # atalho exige religá-la. Ela também não tem o que mostrar com o vídeo
+    # seletivo desligado, então segue o estado dele.
+    hud_verb = "enable" if (enabled and hud_enabled) else "disable"
+    _report_runtime_failure("HUD de gravação",
+                            service_action(hud_verb, ["captura-dia-hud.service"], timeout=30, now=True))
+    if enabled and hud_enabled:
+        _report_runtime_failure("reinício da HUD",
+                                service_action("restart", ["captura-dia-hud.service"], timeout=20))
 
 
 def _restart_screen_runtime() -> None:
@@ -580,7 +609,7 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
 
 
 @app.get("/api/ollama/models")
@@ -644,6 +673,11 @@ LUME_VISION_MODEL={shlex.quote(settings.vision_model)}
 LUME_TEXT_MODEL={shlex.quote(settings.text_model)}
 VIDEO_MARKER_HOTKEY={shlex.quote(settings.marker_hotkey)}
 VIDEO_MARKER_PREROLL_SECONDS={settings.marker_preroll_seconds}
+VIDEO_HUD_ENABLED={'true' if settings.hud_enabled else 'false'}
+VIDEO_HUD_PLACEMENT={settings.hud_placement}
+VIDEO_HUD_CORNER={settings.hud_corner}
+VIDEO_HUD_HOTKEY={shlex.quote(settings.hud_hotkey)}
+VIDEO_HUD_SOUND={'true' if settings.hud_sound else 'false'}
 """
     for pattern,fps in settings.pattern_fps.items():
         if pattern in settings.patterns and not 1 <= fps <= 60:
@@ -665,7 +699,8 @@ NoDisplay=true
 X-KDE-Shortcuts={settings.marker_hotkey}
 """)
     if config_changed or rules_changed or shortcut_changed:
-        background_tasks.add_task(_apply_video_runtime, settings.enabled, shortcut_changed)
+        background_tasks.add_task(_apply_video_runtime, settings.enabled, shortcut_changed,
+                                  settings.hud_enabled)
     return get_video_settings()
 
 
@@ -770,6 +805,21 @@ def probe_video_duration(path: Path) -> float:
     except (TypeError, ValueError):
         return 0.0
     return duration if math.isfinite(duration) and duration > 0 else 0.0
+
+
+def trim_video_command(source: Path, destination: Path, start: float, length: float) -> list[str]:
+    """Monta uma conversão precisa e preserva todas as faixas de áudio."""
+    webm = source.suffix.lower() == ".webm"
+    video_codec = ["-c:v", "libvpx-vp9", "-crf", "24", "-b:v", "0"] if webm else [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+    ]
+    audio_codec = ["-c:a", "libopus", "-b:a", "160k"] if webm else ["-c:a", "aac", "-b:a", "192k"]
+    return [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{length:.3f}",
+        "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0",
+        *video_codec, *audio_codec, "-avoid_negative_ts", "make_zero", str(destination),
+    ]
 
 
 def backfill_video_session_durations() -> int:
@@ -1891,6 +1941,75 @@ def update_video_date(video_id: int, payload: VideoDateUpdate) -> dict:
             ordered=db.execute("SELECT id FROM video_segments WHERE session_id=? ORDER BY captured_at,id",(row["session_id"],)).fetchall()
             for order,item in enumerate(ordered): db.execute("UPDATE video_segments SET sort_order=? WHERE id=?",(order,item["id"]))
     return {"ok":True,"id":video_id,"captured_at":captured}
+
+
+@app.post("/api/videos/{video_id}/trim")
+def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
+    """Substitui um clipe pelo intervalo escolhido e invalida a análise antiga."""
+    initialize()
+    with connect() as db:
+        row = db.execute(
+            "SELECT source_path,captured_at,status,session_id,preserved FROM video_segments WHERE id=?",
+            (video_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+    if row["status"] in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="Interrompa ou aguarde a análise antes de cortar")
+
+    source = safe_video_path(row["source_path"])
+    total = probe_video_duration(source)
+    start = float(payload.start_seconds)
+    end = min(float(payload.end_seconds), total)
+    if total <= 0:
+        raise HTTPException(status_code=422, detail="Não foi possível ler a duração do vídeo")
+    if end - start < 0.25:
+        raise HTTPException(status_code=422, detail="O corte precisa ter pelo menos 0,25 segundo")
+    if start >= total or (start <= 0.05 and end >= total - 0.05):
+        raise HTTPException(status_code=422, detail="Escolha um intervalo menor que o vídeo original")
+
+    temporary = source.with_name(f".{source.stem}.lume-trim-{secrets.token_hex(5)}{source.suffix}")
+    cancel_video_audio_track_job(source)
+    try:
+        result = run(trim_video_command(source, temporary, start, end - start), timeout=3600)
+        if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail=result.stderr.strip() or "O FFmpeg não conseguiu salvar o corte")
+        delete_video_caches(source)
+        os.replace(temporary, source)
+        preserved_copy = CLIPS_DIR.resolve() / source.name
+        if bool(row["preserved"]) and source.parent != CLIPS_DIR.resolve() and preserved_copy.is_file():
+            shutil.copy2(source, preserved_copy)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+    captured = row["captured_at"]
+    try:
+        captured = (datetime.fromisoformat(captured) + timedelta(seconds=start)).isoformat()
+    except (TypeError, ValueError):
+        pass
+    with connect() as db:
+        db.execute("DELETE FROM video_markers WHERE video_id=? AND (offset_seconds<? OR offset_seconds>=?)", (video_id, start, end))
+        db.execute("UPDATE video_markers SET offset_seconds=offset_seconds-? WHERE video_id=?", (start, video_id))
+        db.execute(
+            """UPDATE video_segments SET captured_at=?,duration_seconds=?,description='',transcript='',
+                      transcript_segments_json='[]',speakers_json='[]',audio_events_json='[]',chapters_json='[]',
+                      model='',status='pending',stage='Aguardando análise',progress=0,trace_json='[]',job_unit='',
+                      error='',processed_at=NULL,ai_live_thinking='',ai_live_content='',ai_metrics_json='{}'
+               WHERE id=?""",
+            (captured, end - start, video_id),
+        )
+        if row["session_id"] is not None:
+            db.execute(
+                """UPDATE video_sessions SET status='pending',stage='Análise desatualizada após corte',progress=0,
+                          summary='',trace_json='[]',job_unit='',error='',processed_at=NULL,
+                          ai_live_thinking='',ai_live_content='',ai_metrics_json='{}' WHERE id=?""",
+                (row["session_id"],),
+            )
+    return {
+        "ok": True, "id": video_id, "start_seconds": start, "end_seconds": end,
+        "duration_seconds": end - start, "captured_at": captured, "analysis_reset": True,
+    }
 
 @app.put("/api/video-markers/{marker_id}")
 def update_video_marker(marker_id: int, payload: MarkerUpdate) -> dict:

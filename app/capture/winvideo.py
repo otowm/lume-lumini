@@ -29,6 +29,7 @@ from pathlib import Path
 from . import get_backend
 from .base import parse_video_app_rule, read_patterns, read_shell_config
 from .imagediff import thumbnail
+from .winhotkey import MarkerHotkey
 from . import obs
 from ..backend.main_paths import CONFIG_DIR, VIDEO_DIR
 from ..backend.database import connect, initialize
@@ -144,79 +145,6 @@ class Settings:
         return self.matches_details(title, window_class, executable)
 
 
-class MarkerHotkey:
-    """Atalho global para marcar um momento durante a gravação.
-
-    No Linux o atalho do KDE manda ``USR1`` para o laço. O Windows não tem
-    ``USR1``, então registramos um hotkey global e rodamos a fila de mensagens
-    numa thread — é o equivalente mais próximo, e funciona com o jogo em foco.
-    """
-
-    _MODIFIERS = {"ALT": 0x1, "CTRL": 0x2, "CONTROL": 0x2, "SHIFT": 0x4, "WIN": 0x8}
-    _WM_HOTKEY = 0x0312
-
-    def __init__(self, spec: str, on_press) -> None:
-        self.spec = spec
-        self.on_press = on_press
-        self._thread = None
-
-    @classmethod
-    def _parse(cls, spec: str) -> tuple[int, int] | None:
-        modifiers = 0
-        key = None
-        for part in spec.replace("-", "+").split("+"):
-            token = part.strip().upper()
-            if not token:
-                continue
-            if token in cls._MODIFIERS:
-                modifiers |= cls._MODIFIERS[token]
-            else:
-                key = token
-        if not key:
-            return None
-        if re.fullmatch(r"F([1-9]|1[0-9]|2[0-4])", key):
-            return modifiers, 0x70 + int(key[1:]) - 1
-        if len(key) == 1 and (key.isalpha() or key.isdigit()):
-            return modifiers, ord(key)
-        return None
-
-    def start(self) -> None:
-        parsed = self._parse(self.spec)
-        if parsed is None:
-            log(f"[aviso] atalho de marcador inválido: {self.spec!r}")
-            return
-        import threading
-
-        self._thread = threading.Thread(target=self._loop, args=parsed,
-                                        name="lume-marker-hotkey", daemon=True)
-        self._thread.start()
-
-    def _loop(self, modifiers: int, vk: int) -> None:
-        user32 = ctypes.windll.user32
-        if not user32.RegisterHotKey(None, 1, modifiers, vk):
-            log(f"[aviso] não foi possível registrar {self.spec!r} "
-                f"(outro programa já usa esse atalho)")
-            return
-        log(f"[marcador] atalho {self.spec} registrado")
-
-        class MSG(ctypes.Structure):
-            _fields_ = [("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint),
-                        ("wParam", ctypes.c_void_p), ("lParam", ctypes.c_void_p),
-                        ("time", ctypes.c_uint),
-                        ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long)]
-
-        message = MSG()
-        try:
-            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-                if message.message == self._WM_HOTKEY:
-                    try:
-                        self.on_press()
-                    except Exception as exc:  # nunca derrubar a thread do atalho
-                        log(f"[marcador] falhou: {exc}")
-        finally:
-            user32.UnregisterHotKey(None, 1)
-
-
 def foreground_details() -> tuple[str, str, str]:
     """Título, classe e executável da janela em foco — o que o OBS precisa
     para enganchar exatamente naquele app."""
@@ -288,6 +216,10 @@ class VideoLoop:
         self.clip_save_queued = False
         self.clip_session_key = ""
         self.clip_window = ""
+        self.last_clip_name = ""
+        self.active_window = ""
+        self.last_event: dict | None = None
+        self.event_seq = 0
         self.active_capture_mode: str | None = None
         self.active_fps: int | None = None
         self.active_geometry: str | None = None
@@ -377,14 +309,53 @@ class VideoLoop:
         self.game_session_key = ""
         self._game_session_heartbeat = 0.0
 
-    def _suspend_others(self, window: str) -> None:
+    def _publish_activity(self) -> None:
+        """Escreve o sinal de atividade lido pela HUD.
+
+        Fica separado de :meth:`_suspend_others` porque tem duas cadências: a
+        volta do laço (2 s) e, sempre que algo acontece, imediatamente. Uma
+        confirmação de marcador que demorasse até dois segundos para aparecer
+        não serviria como confirmação — a pessoa apertaria de novo.
+        """
+        # O sinal significa "há captura de vídeo em curso": o supervisor suspende
+        # áudio e telas enquanto ele existir, e a API o lê como gravação ativa.
+        # Escrevê-lo fora de uma sessão — por um F8 solto, por exemplo — pausaria
+        # a captura do dia inteiro por engano.
+        if not self.session_active:
+            return
         try:
             self.activity_flag.parent.mkdir(parents=True, exist_ok=True)
             self.activity_flag.write_text(json.dumps({
-                "window": window,
+                "window": self.active_window,
                 "started_at": self.session_started_at or time.time(),
                 "mode": self.active_capture_mode or self.settings.capture_mode,
+                # A HUD usa a data de modificação deste arquivo como sinal de
+                # vida: um sinal parado significa laço morto, não gravação em
+                # curso.
+                "markers": len(self.pending_markers),
+                "last_clip": self.last_clip_name,
+                "event": self.last_event,
             }, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _note_event(self, kind: str, label: str) -> None:
+        """Registra um acontecimento pontual e publica na hora.
+
+        A sequência é o que deixa a HUD distinguir *evento novo* de *mesmo
+        evento relido*: contagens e nomes de arquivo se repetem (dois
+        marcadores seguidos, um clipe salvo duas vezes no mesmo segundo), um
+        contador que só cresce não.
+        """
+        self.event_seq += 1
+        self.last_event = {"kind": kind, "label": label,
+                           "seq": self.event_seq, "at": time.time()}
+        self._publish_activity()
+
+    def _suspend_others(self, window: str) -> None:
+        self.active_window = window
+        self._publish_activity()
+        try:
             if self.settings.pause_others:
                 self.flag.write_text(window, encoding="utf-8")
         except OSError:
@@ -420,11 +391,17 @@ class VideoLoop:
     def hotkey_pressed(self) -> None:
         if (self.active_capture_mode or self.settings.capture_mode) == "clips":
             if self.clip_buffer_active:
+                # Salvar leva segundos (o OBS só informa o arquivo depois de
+                # gravá-lo), então avisamos antes e confirmamos depois — senão o
+                # silêncio no meio pareceria que o atalho não pegou.
+                self._note_event("clip_saving", "Salvando clipe…")
                 self.save_replay_clip()
             elif self.session_active:
                 self.clip_save_queued = True
+                self._note_event("clip_queued", "Clipe na fila")
                 log("[clipe] F8 recebido durante a preparação; salvamento enfileirado")
             else:
+                self._note_event("ignored", "Nenhum jogo monitorado")
                 log("[clipe] ignorado: nenhum jogo monitorado está ativo")
             return
         self.add_marker()
@@ -442,13 +419,17 @@ class VideoLoop:
                 if self.session_active:
                     self.marker_queued_for_start = True
                     log("[marcador] recebido durante a transição; será aplicado ao início do próximo clipe")
+                    self._note_event("marker_queued", "Marcador na próxima cena")
                     self._confirmation_sound()
                 else:
                     log("[marcador] ignorado: nenhuma gravação em andamento")
+                    self._note_event("ignored", "Nada sendo gravado")
                 return
             offset = max(0.0, time.monotonic() - self.recording_started)
             self.pending_markers.append(offset)
+            total = len(self.pending_markers)
         log(f"[marcador] {offset:.1f}s anotado")
+        self._note_event("marker", f"Marcador {total} · {offset / 60:.0f}:{offset % 60:02.0f}")
         self._confirmation_sound()
 
     def _activate_recording(self) -> None:
@@ -466,6 +447,7 @@ class VideoLoop:
         with self._clip_lock:
             if not self.clip_buffer_active:
                 log("[clipe] ignorado: Replay Buffer não está ativo")
+                self._note_event("ignored", "Buffer de clipes inativo")
                 return None
             try:
                 previous = str(obs.call("GetLastReplayBufferReplay").get("savedReplayPath") or "")
@@ -475,6 +457,7 @@ class VideoLoop:
                 obs.call("SaveReplayBuffer")
             except (obs.ObsError, OSError) as exc:
                 log(f"[clipe] falha ao salvar Replay Buffer: {exc}")
+                self._note_event("clip_failed", "O OBS recusou o pedido")
                 return None
 
             path: Path | None = None
@@ -491,13 +474,16 @@ class VideoLoop:
                 time.sleep(0.15)
             if path is None:
                 log("[clipe] o OBS aceitou o F8, mas não informou o arquivo salvo")
+                self._note_event("clip_failed", "O OBS não informou o arquivo")
                 return None
 
             path.with_suffix(path.suffix + ".window").write_text(self.clip_window, encoding="utf-8")
             path.with_suffix(path.suffix + ".session").write_text(
                 f"{self.clip_session_key}\n{self.clip_window}\n", encoding="utf-8")
             self.clip_save_queued = False
+            self.last_clip_name = path.name
             log(f"[clipe] últimos {self.settings.replay_seconds}s salvos em {path.name}")
+            self._note_event("clip_saved", f"Clipe salvo · {self.settings.replay_seconds}s")
             self._confirmation_sound()
             return path
 
@@ -652,6 +638,11 @@ class VideoLoop:
                 session_ended = False
                 while not self.stopping:
                     time.sleep(POLL_SECONDS)
+                    # Reescrever o sinal a cada volta mantém o marcador e o
+                    # tempo visíveis para a HUD, e faz da data de modificação um
+                    # batimento: sem segmentação (``VIDEO_SEGMENT_SECONDS=0``)
+                    # isto aqui seria escrito uma única vez na sessão inteira.
+                    self._suspend_others(window)
                     elapsed = time.monotonic() - self.recording_started
                     if limit and elapsed >= limit:
                         break
@@ -691,6 +682,7 @@ class VideoLoop:
             focus_lost_at = -1.0
             while not self.stopping:
                 time.sleep(POLL_SECONDS)
+                self._suspend_others(window)
                 current, rule = self._focused_window()
                 if rule and rule[0] == "clips" and self._same_app(window, current):
                     focus_lost_at = -1.0

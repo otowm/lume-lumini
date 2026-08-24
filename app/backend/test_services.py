@@ -5,6 +5,7 @@ que dá para exercitar em qualquer lugar (resolução de units, política de
 reinício, formato do estado) e o resto é pulado explicitamente.
 """
 
+import json
 import os
 import tempfile
 import threading
@@ -262,7 +263,8 @@ class VideoMarkerTransitionTests(unittest.TestCase):
         loop.marker_queued_for_start = False
         loop._marker_lock = threading.Lock()
 
-        with unittest.mock.patch.object(loop, "_confirmation_sound"):
+        with unittest.mock.patch.object(loop, "_confirmation_sound"), \
+             unittest.mock.patch.object(loop, "_note_event"):
             loop.add_marker()
         self.assertTrue(loop.marker_queued_for_start)
         with unittest.mock.patch("app.capture.winvideo.time.monotonic", return_value=123.0):
@@ -283,7 +285,8 @@ class VideoMarkerTransitionTests(unittest.TestCase):
         loop.marker_queued_for_start = False
         loop._marker_lock = threading.Lock()
 
-        loop.add_marker()
+        with unittest.mock.patch.object(loop, "_note_event"):
+            loop.add_marker()
         self.assertFalse(loop.marker_queued_for_start)
         self.assertEqual(loop.pending_markers, [])
 
@@ -331,7 +334,8 @@ class VideoReplayClipTests(unittest.TestCase):
                 {"savedReplayPath": str(replay)},
             ])
             with unittest.mock.patch.object(winvideo.obs, "call", side_effect=lambda *_args, **_kwargs: next(responses)), \
-                 unittest.mock.patch.object(loop, "_confirmation_sound") as sound:
+                 unittest.mock.patch.object(loop, "_confirmation_sound") as sound, \
+                 unittest.mock.patch.object(loop, "_note_event"):
                 result = loop.save_replay_clip()
 
             self.assertEqual(result, replay)
@@ -704,6 +708,343 @@ class LinuxAudioTrackTests(unittest.TestCase):
             AudioConfig(outdir=Path(tempfile.gettempdir()), channels=1, duration_seconds=5))
         self.assertEqual(argv.count("pulse"), 1)
         self.assertNotIn("-filter_complex", argv)
+
+
+class HudStateTests(unittest.TestCase):
+    """As regras que decidem se a captura está saudável.
+
+    Rodam nos dois sistemas de propósito: são a parte da HUD que não depende de
+    OBS nem de PipeWire, e portanto a parte que dá para verificar sem um jogo
+    aberto — inclusive no sistema que não está rodando.
+    """
+
+    @staticmethod
+    def _recording(**overrides):
+        from app.capture.hudstate import HudSnapshot
+
+        base = dict(enabled=True, available=True, recording=True, elapsed_seconds=60.0,
+                    video_hooked=True, disk_free_bytes=200 * 1024**3)
+        base.update(overrides)
+        return HudSnapshot(**base)
+
+    def _keys(self, snapshot) -> set[str]:
+        from app.capture.hudstate import evaluate
+
+        return {alert.key for alert in evaluate(snapshot).alerts}
+
+    def test_healthy_recording_raises_nothing(self):
+        from app.capture.hudstate import evaluate
+
+        status = evaluate(self._recording())
+        self.assertEqual(status.level, "ok")
+        self.assertEqual(status.headline, "Gravando")
+        self.assertEqual(status.alerts, [])
+
+    def test_capture_that_never_hooked_is_a_failure(self):
+        self.assertIn("sem-imagem", self._keys(self._recording(video_hooked=False)))
+
+    def test_hook_gets_a_grace_period_before_being_accused(self):
+        # Logo após o StartRecord o hook ainda está injetando; acusar aqui seria
+        # alarme falso em toda troca de segmento.
+        self.assertNotIn("sem-imagem",
+                         self._keys(self._recording(video_hooked=False, elapsed_seconds=2.0)))
+
+    def test_linux_never_reports_a_hook_failure(self):
+        # Lá se grava um monitor inteiro: não existe hook que possa falhar.
+        self.assertNotIn("sem-imagem", self._keys(self._recording(video_hooked=None)))
+
+    def test_stalled_file_is_a_failure(self):
+        self.assertIn("travada", self._keys(self._recording(bytes_stalled_seconds=30.0)))
+
+    def test_replay_buffer_is_not_expected_to_grow_a_file(self):
+        # Em modo clipes o buffer vive em memória e não escreve nada até o F8.
+        keys = self._keys(self._recording(recording=False, buffering=True,
+                                          bytes_stalled_seconds=300.0))
+        self.assertNotIn("travada", keys)
+
+    def test_missing_microphone_is_a_failure(self):
+        from app.capture.hudstate import Meter
+
+        mic = Meter("Microfone", present=False, absent_seconds=20.0, required=True)
+        self.assertIn("ausente:Microfone", self._keys(self._recording(meters=[mic])))
+
+    def test_a_quiet_microphone_is_not_a_missing_one(self):
+        """Ficar calado é normal; confundir com falha destrói a confiança na HUD."""
+        from app.capture.hudstate import Meter
+
+        mic = Meter("Microfone", peak_db=-90.0, present=True, silent_seconds=5.0, required=True)
+        self.assertEqual(self._keys(self._recording(meters=[mic])), set())
+
+    def test_a_long_silence_is_worth_a_gentle_warning(self):
+        from app.capture.hudstate import Meter, evaluate
+
+        mic = Meter("Microfone", peak_db=-90.0, present=True, silent_seconds=600.0, required=True)
+        status = evaluate(self._recording(meters=[mic]))
+        self.assertEqual([alert.level for alert in status.alerts], ["warn"])
+
+    def test_silent_optional_sources_stay_quiet(self):
+        # Discord fechado é o caso normal de quem joga sozinho.
+        from app.capture.hudstate import Meter
+
+        discord = Meter("Discord", present=False, absent_seconds=600.0)
+        self.assertEqual(self._keys(self._recording(meters=[discord])), set())
+
+    def test_muted_microphone_is_reported_even_while_present(self):
+        from app.capture.hudstate import Meter
+
+        mic = Meter("Microfone", present=False, muted=True, required=True)
+        self.assertIn("mudo:Microfone", self._keys(self._recording(meters=[mic])))
+
+    def test_disabled_video_reports_nothing_at_all(self):
+        from app.capture.hudstate import evaluate
+
+        status = evaluate(self._recording(enabled=False, video_hooked=False))
+        self.assertEqual(status.alerts, [])
+
+    def test_unknown_service_state_does_not_accuse_anyone(self):
+        from app.capture.hudstate import evaluate
+
+        idle = self._recording(recording=False, service_active=None)
+        self.assertEqual(evaluate(idle).alerts, [])
+        stopped = self._recording(recording=False, service_active=False)
+        self.assertIn("servico", {alert.key for alert in evaluate(stopped).alerts})
+
+    def test_decibel_conversion_floors_at_digital_silence(self):
+        from app.capture.hudstate import SILENCE_DB, to_db
+
+        self.assertEqual(to_db(0.0), SILENCE_DB)
+        self.assertAlmostEqual(to_db(1.0), 0.0)
+        self.assertAlmostEqual(to_db(0.5), -6.02, places=1)
+
+    def test_elapsed_reads_like_a_stopwatch(self):
+        from app.capture.hudstate import format_elapsed
+
+        self.assertEqual(format_elapsed(95), "1:35")
+        self.assertEqual(format_elapsed(3725), "1:02:05")
+
+
+class HudPlacementTests(unittest.TestCase):
+    """Onde a HUD desenha, dado o arranjo de monitores."""
+
+    PRIMARY = Monitor(index=0, name="display0", x=0, y=0, width=1920, height=1080)
+    SECOND = Monitor(index=1, name="display1", x=1920, y=0, width=1366, height=768)
+
+    def test_game_placement_follows_the_focused_monitor(self):
+        from app.capture.hud import choose_monitors
+
+        chosen = choose_monitors("game", [self.PRIMARY, self.SECOND], self.SECOND)
+        self.assertEqual([m.index for m in chosen], [1])
+
+    def test_second_placement_avoids_the_game_monitor(self):
+        from app.capture.hud import choose_monitors
+
+        chosen = choose_monitors("second", [self.PRIMARY, self.SECOND], self.PRIMARY)
+        self.assertEqual([m.index for m in chosen], [1])
+
+    def test_both_covers_game_and_a_spare_monitor(self):
+        from app.capture.hud import choose_monitors
+
+        chosen = choose_monitors("both", [self.PRIMARY, self.SECOND], self.PRIMARY)
+        self.assertEqual([m.index for m in chosen], [0, 1])
+
+    def test_single_monitor_never_leaves_the_hud_homeless(self):
+        """Com um monitor só, "no outro monitor" tem que recair sobre este."""
+        from app.capture.hud import choose_monitors
+
+        for placement in ("game", "second", "both"):
+            chosen = choose_monitors(placement, [self.PRIMARY], self.PRIMARY)
+            self.assertEqual([m.index for m in chosen], [0], placement)
+
+    def test_no_monitors_is_handled_without_blowing_up(self):
+        from app.capture.hud import choose_monitors
+
+        self.assertEqual(choose_monitors("second", [], None), [])
+
+    def test_corners_stay_inside_the_target_monitor(self):
+        from app.capture.hud import corner_position
+
+        for corner in ("top-left", "top-right", "bottom-left", "bottom-right"):
+            x, y = corner_position(self.SECOND, corner, width=352, height=140)
+            self.assertGreaterEqual(x, self.SECOND.x, corner)
+            self.assertGreaterEqual(y, self.SECOND.y, corner)
+            self.assertLessEqual(x + 352, self.SECOND.x + self.SECOND.width, corner)
+            self.assertLessEqual(y + 140, self.SECOND.y + self.SECOND.height, corner)
+
+
+class VideoActivityFlagTests(unittest.TestCase):
+    """O sinal de atividade tem um significado só, e ele é caro de errar.
+
+    Enquanto o arquivo existe, o supervisor mantém áudio e telas suspensos e a
+    API relata gravação em curso. Publicá-lo fora de uma sessão — por um atalho
+    apertado à toa, por exemplo — pausaria a captura do dia inteiro sem que
+    nada estivesse sendo gravado.
+    """
+
+    def _loop(self, directory: Path, session_active: bool):
+        from app.capture.winvideo import VideoLoop
+
+        loop = object.__new__(VideoLoop)
+        loop.activity_flag = directory / "lume-video-active"
+        loop.session_active = session_active
+        loop.session_started_at = 100.0
+        loop.active_window = "Meu Jogo | jogo.exe"
+        loop.active_capture_mode = "clips"
+        loop.pending_markers = []
+        loop.last_clip_name = ""
+        loop.last_event = None
+        loop.event_seq = 0
+        loop.settings = unittest.mock.Mock(capture_mode="clips")
+        return loop
+
+    def test_an_event_outside_a_session_does_not_create_the_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loop = self._loop(Path(directory), session_active=False)
+            loop._note_event("ignored", "Nada sendo gravado")
+            self.assertFalse(loop.activity_flag.exists())
+
+    def test_an_event_during_a_session_publishes_it_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loop = self._loop(Path(directory), session_active=True)
+            loop._note_event("marker", "Marcador 1 · 0:12")
+            payload = json.loads(loop.activity_flag.read_text(encoding="utf-8"))
+            self.assertEqual(payload["event"]["kind"], "marker")
+            self.assertEqual(payload["event"]["label"], "Marcador 1 · 0:12")
+            self.assertEqual(payload["event"]["seq"], 1)
+
+    def test_the_sequence_distinguishes_two_identical_events(self):
+        """Dois marcadores seguidos têm o mesmo rótulo; só a sequência os separa."""
+        with tempfile.TemporaryDirectory() as directory:
+            loop = self._loop(Path(directory), session_active=True)
+            loop._note_event("marker", "Marcador 1")
+            first = json.loads(loop.activity_flag.read_text(encoding="utf-8"))["event"]
+            loop._note_event("marker", "Marcador 1")
+            second = json.loads(loop.activity_flag.read_text(encoding="utf-8"))["event"]
+            self.assertEqual(second["seq"], first["seq"] + 1)
+
+
+class HudEventAnimationTests(unittest.TestCase):
+    """A curva da animação de confirmação, sem abrir janela nenhuma."""
+
+    def test_band_starts_hidden_and_settles_open(self):
+        from app.capture.hud import EVENT_IN_SECONDS, EVENT_SLIDE_PX, event_animation
+
+        start = event_animation("marker", 0.0)
+        self.assertEqual((start.reveal, start.glow, start.slide), (0.0, 0.0, EVENT_SLIDE_PX))
+        settled = event_animation("marker", EVENT_IN_SECONDS)
+        self.assertEqual((settled.reveal, settled.glow, settled.slide), (1.0, 1.0, 0.0))
+
+    def test_entry_overshoots_a_little_before_settling(self):
+        """O repique é o que separa "apareceu" de "chegou"."""
+        from app.capture.hud import EVENT_IN_SECONDS, event_animation
+
+        peak = max(event_animation("marker", EVENT_IN_SECONDS * f).reveal
+                   for f in (0.5, 0.6, 0.7, 0.8, 0.9))
+        self.assertGreater(peak, 1.0)
+        self.assertLess(peak, 1.2, "exagero demais vira enfeite")
+
+    def test_colour_never_overshoots_even_when_movement_does(self):
+        """Uma cor que passa do alvo não existe; um movimento que passa, sim."""
+        from app.capture.hud import EVENT_IN_SECONDS, event_animation
+
+        for f in (0.1, 0.5, 0.7, 0.9, 1.0):
+            frame = event_animation("marker", EVENT_IN_SECONDS * f)
+            self.assertLessEqual(frame.glow, 1.0)
+            self.assertGreaterEqual(frame.glow, 0.0)
+
+    def test_band_retracts_and_then_disappears(self):
+        from app.capture.hud import EVENT_STYLES, event_animation
+
+        total = EVENT_STYLES["marker"][2]
+        fading = event_animation("marker", total - 0.1)
+        self.assertIsNotNone(fading)
+        self.assertLess(fading.reveal, 1.0)
+        self.assertIsNone(event_animation("marker", total))
+
+    def test_saving_a_clip_stays_up_much_longer_than_a_marker(self):
+        """O OBS leva segundos para informar o arquivo; a faixa espera por ele."""
+        from app.capture.hud import EVENT_STYLES
+
+        self.assertGreater(EVENT_STYLES["clip_saving"][2], EVENT_STYLES["marker"][2] * 4)
+
+    def test_unknown_event_draws_nothing_instead_of_crashing(self):
+        from app.capture.hud import event_animation
+
+        self.assertIsNone(event_animation("kind-que-nao-existe", 0.1))
+
+    def test_blend_walks_between_the_two_colors(self):
+        from app.capture.hud import blend
+
+        self.assertEqual(blend("#000000", "#ffffff", 0.0), "#000000")
+        self.assertEqual(blend("#000000", "#ffffff", 1.0), "#ffffff")
+        self.assertEqual(blend("#000000", "#ffffff", 0.5), "#808080")
+
+
+class HudFrameRateTests(unittest.TestCase):
+    """As três cadências existem por causa do custo de redesenhar.
+
+    Cada volta recria os itens do Canvas e custa alguns milissegundos; a 60
+    quadros por segundo isso passaria de 20% de um núcleo, gasto justamente
+    durante o jogo. A fluidez fica reservada ao que é curto e se nota.
+    """
+
+    def test_animation_is_the_fastest_cadence(self):
+        from app.capture.hud import ANIMATION_TICK_MS, IDLE_TICK_MS, TICK_MS
+
+        self.assertLess(ANIMATION_TICK_MS, TICK_MS)
+        self.assertLess(TICK_MS, IDLE_TICK_MS)
+
+    def test_animation_runs_near_sixty_frames_per_second(self):
+        from app.capture.hud import ANIMATION_TICK_MS
+
+        self.assertLessEqual(ANIMATION_TICK_MS, 20)
+
+    def test_the_whole_entry_gets_many_frames(self):
+        """Uma entrada de 0,26 s precisa de quadros suficientes para não escadear."""
+        from app.capture.hud import ANIMATION_TICK_MS, EVENT_IN_SECONDS
+
+        self.assertGreater(EVENT_IN_SECONDS * 1000 / ANIMATION_TICK_MS, 10)
+
+
+class HudEventContractTests(unittest.TestCase):
+    """O evento cruza dois processos por um arquivo; o formato é um contrato.
+
+    O ``winvideo`` escreve e a HUD lê. Como são processos diferentes, nada além
+    destes testes garante que os dois continuem falando a mesma língua.
+    """
+
+    def _flag(self, event):
+        return {"window": "Jogo | jogo.exe", "started_at": 1.0, "mode": "clips",
+                "markers": 2, "last_clip": "x.mkv", "event": event}
+
+    def test_event_survives_the_trip_from_the_video_loop(self):
+        import time as clock
+
+        from app.capture.hudsource import _event_fields
+
+        fields = _event_fields(self._flag(
+            {"kind": "clip_saved", "label": "Clipe salvo · 60s", "seq": 7,
+             "at": clock.time() - 1.5}))
+        self.assertEqual(fields["event_kind"], "clip_saved")
+        self.assertEqual(fields["event_label"], "Clipe salvo · 60s")
+        self.assertEqual(fields["event_seq"], 7)
+        self.assertAlmostEqual(fields["event_age_seconds"], 1.5, delta=0.5)
+
+    def test_a_flag_without_an_event_reports_nothing(self):
+        from app.capture.hudsource import _event_fields
+
+        self.assertEqual(_event_fields(self._flag(None)), {})
+        self.assertEqual(_event_fields({}), {})
+
+    def test_every_kind_the_video_loop_emits_has_a_drawing_style(self):
+        """Um tipo sem estilo seria um evento invisível — falha silenciosa."""
+        import re as regex
+
+        from app.capture.hud import EVENT_STYLES
+
+        source = Path("app/capture/winvideo.py").read_text(encoding="utf-8")
+        emitted = set(regex.findall(r'_note_event\("([a-z_]+)"', source))
+        self.assertTrue(emitted, "nenhum evento encontrado em winvideo.py")
+        self.assertEqual(emitted - set(EVENT_STYLES), set())
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ install -m 0644 "$root/systemd/lume-process.service" "$unit_dir/lume-process.ser
 install -m 0644 "$root/systemd/lume-summary@.service" "$unit_dir/lume-summary@.service"
 install -m 0644 "$root/systemd/lume-hourly@.service" "$unit_dir/lume-hourly@.service"
 install -m 0644 "$root/systemd/lume-process.timer" "$unit_dir/lume-process.timer"
+install -m 0644 "$root/systemd/captura-dia-hud.service" "$unit_dir/captura-dia-hud.service"
 systemctl --user daemon-reload
 systemctl --user enable --now lume.service
 systemctl --user enable --now lume-process.timer

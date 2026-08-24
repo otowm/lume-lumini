@@ -22,6 +22,11 @@ aqui fica só o que interessa a quem for mexer no código.
     `bin/capture-loop`; `imagediff.py` é a comparação 320x180 com ffmpeg.
   - `obs.py` e `winvideo.py` são o porte de `bin/game-video-loop`: uma cópia
     portátil do OBS em `~/.lume-obs`, dirigida por obs-websocket.
+  - `hudstate.py`, `hudsource.py` e `hud.py` são a HUD de gravação, na mesma
+    divisão: as regras de saúde são puras e portáteis (`hudstate`), a coleta tem
+    uma implementação por SO (`hudsource`) e a janela é única (`hud`).
+  - `winhotkey.py` tem o `MarkerHotkey` (`RegisterHotKey` + fila de mensagens),
+    usado tanto pela gravação quanto pela HUD, em processos separados.
 - `app/backend/services.py` — `ServiceManager`: `systemctl --user` no Linux,
   supervisor de processos no Windows. `main.py` só fala com ele
   (`unit_state()`, `service_action()`, `get_manager()`), tratando nomes de unit
@@ -69,6 +74,50 @@ aqui fica só o que interessa a quem for mexer no código.
   reconstrói `video_sessions` a partir dele, portanto Linux e Windows podem ter
   bancos SQLite locais sem perder o agrupamento visual. Vídeos seletivos antigos
   com apenas `.window` são tratados como sessões individuais.
+- **A HUD precisa de `WS_EX_NOACTIVATE`.** Sem ele a janela rouba o foco ao
+  aparecer, o `winvideo` conclui que o jogo saiu de foco e **para a gravação**
+  que a HUD deveria estar vigiando. Junto vão `WS_EX_TRANSPARENT` (clique
+  atravessa) e `WS_EX_TOOLWINDOW` (fora do Alt+Tab).
+- **Não existe overlay sobre fullscreen exclusivo sem injetar DLL.** É o que
+  Discord e RTSS fazem, e está descartado: há anti-cheat na lista de apps. A
+  janela `TOPMOST` aparece na maioria dos jogos (Fullscreen Optimizations os põe
+  em flip-model) e some no exclusivo de verdade — daí a posição configurável e o
+  aviso sonoro, que chega mesmo quando a HUD não aparece.
+- **Chave nova em `video.conf` mora em quatro lugares.** `ALLOWED_CONFIG`
+  (senão `parse_shell_config` a descarta em silêncio na leitura), o modelo
+  `VideoSettings`, `get_video_settings()` e o template de `set_video_settings()`,
+  que reescreve o arquivo inteiro. Faltar em qualquer um deles some com a chave
+  no primeiro save, sem erro. `VideoSettingsRoundTripTests` cobre isso.
+- **O sinal `lume-video-active` é batimento, não só estado.** É reescrito a cada
+  volta do laço (2 s) e a HUD trata um sinal velho como ausente — senão um laço
+  morto seguraria para sempre a aparência de gravação em curso.
+- **O sinal de atividade tem um significado só.** Enquanto `lume-video-active`
+  existe, o supervisor mantém áudio e telas suspensos e a API relata gravação em
+  curso. Por isso `_publish_activity()` só escreve dentro de uma sessão: publicar
+  por um `F8` apertado à toa pausaria a captura do dia sem nada estar gravando.
+  `VideoActivityFlagTests` fixa isso.
+- **Evento é instante, saúde é estado.** As confirmações (marcador anotado,
+  clipe salvo, atalho ignorado) ficam **fora** de `hudstate.evaluate()`. Se um
+  clipe que falhou uma vez virasse alerta, a HUD ficaria vermelha para sempre.
+- **A sequência do evento é o que o identifica**, não o rótulo. Dois marcadores
+  seguidos têm o mesmo texto e o mesmo nome de arquivo; um contador que só
+  cresce distingue *evento novo* de *mesmo evento relido a cada volta*.
+- **Salvar clipe tem duas fases.** O OBS só informa o arquivo depois de gravá-lo
+  (até 15 s), então o laço avisa `clip_saving` na hora e `clip_saved`/`clip_failed`
+  no desfecho — sem isso o silêncio no meio pareceria atalho não registrado.
+- **Redesenhar o Canvas custa ~4 ms**, porque o tkinter recria os itens a cada
+  volta. A 60 quadros por segundo isso daria uns 20% de um núcleo, durante o
+  jogo. Daí três cadências (`ANIMATION_TICK_MS`/`TICK_MS`/`IDLE_TICK_MS`) e o
+  descarte de redesenho no modo compacto, que parado só muda quando o relógio
+  vira: escondida a HUD custa 0%, compacta quase nada, expandida ~6%.
+- **A confirmação não expande o painel.** Abrir a HUD inteira por cima do jogo
+  para avisar de um marcador seria pior que o problema. No compacto o evento
+  entra como letreiro — a linha normal sobe, a do evento toma o lugar e depois
+  volta; o recorte é o próprio canvas. No expandido ele vira uma faixa cuja
+  altura cresce junto com a animação, sem o salto de antes.
+- **A HUD não é pausável.** Fica fora de `_PAUSABLE` e de `captura-dia.target`
+  de propósito: ela existe para vigiar a gravação, então precisa continuar de pé
+  exatamente quando as outras capturas são suspensas.
 
 ## O que falta
 
@@ -80,6 +129,11 @@ aqui fica só o que interessa a quem for mexer no código.
 3. **A gravação de jogos exige o OBS instalado** e só foi exercitada contra um
    app D3D em tela cheia (`ffplay`), não contra um jogo de verdade com
    anti-cheat. O hook pode ser bloqueado por alguns deles.
+4. **A HUD no Linux não foi validada.** O coletor (`LinuxHudCollector`) lê o
+   estado de `captura-dia-video-paused` mais o `*.partial.mp4` em curso, e os
+   níveis dos buses do PipeWire com `parec`; a janela usa `-type dock`, sem
+   equivalente barato para clique atravessante em tkinter. O comportamento na
+   ausência de cada peça é degradar calado, nunca acusar falha inexistente.
 
 ## Como validar
 
@@ -93,6 +147,15 @@ Linux (nada pode quebrar):
 
 `--no-audio` importa: `audio_setup()` chama `audio-bus.sh setup`, que
 reconfigura o RecordBus ao vivo e atrapalha a captura em execução.
+
+A HUD tem dois modos que dispensam abrir um jogo:
+
+```bash
+.venv/bin/python -m app.capture.hud --probe   # estado lido, em JSON, sem janela
+.venv/bin/python -m app.capture.hud --demo    # janela com dados fabricados
+```
+
+O `--probe` é seguro com a captura rodando: só emite requisições de leitura.
 
 Windows:
 

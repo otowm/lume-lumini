@@ -450,6 +450,13 @@ _UNITS: dict[str, _UnitDef] = {
         kind="simple", restart=True, description="gravação seletiva de vídeo",
         argv=lambda _arg: [_python(), "-m", "app.capture.winvideo"],
     ),
+    # Fora de ``_PAUSABLE`` e de ``captura-dia.target`` de propósito: a HUD
+    # existe justamente para vigiar a gravação, então precisa continuar de pé
+    # exatamente quando as outras capturas são suspensas.
+    "captura-dia-hud.service": _UnitDef(
+        kind="simple", restart=True, description="HUD de gravação",
+        argv=lambda _arg: [_python(), "-m", "app.capture.hud"],
+    ),
     "lume.service": _UnitDef(kind="external", description="interface Lume"),
 }
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Lume - HUD de gravacao
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documentos/lume
+ExecStart=%h/Documentos/lume/.venv/bin/python -m app.capture.hud
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

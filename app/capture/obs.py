@@ -334,23 +334,35 @@ def stop() -> None:
 
 # --- cliente obs-websocket v5 ----------------------------------------------
 
+async def _identify(ws, secret: str, subscriptions: int | None = None) -> None:
+    """Faz o *hello/identify* do obs-websocket v5 sobre um socket já aberto.
+
+    ``subscriptions`` é a máscara de eventos desejada. Omitir mantém o padrão do
+    OBS (``All``), que de propósito **exclui** os eventos de alto volume — entre
+    eles ``InputVolumeMeters``, que só chega quando pedido explicitamente.
+    """
+    hello = json.loads(await ws.recv())
+    identify = {"op": 1, "d": {"rpcVersion": hello["d"]["rpcVersion"]}}
+    if subscriptions is not None:
+        identify["d"]["eventSubscriptions"] = subscriptions
+    if "authentication" in hello["d"]:
+        challenge = hello["d"]["authentication"]
+        digest = base64.b64encode(hashlib.sha256(
+            (secret + challenge["salt"]).encode()).digest()).decode()
+        identify["d"]["authentication"] = base64.b64encode(hashlib.sha256(
+            (digest + challenge["challenge"]).encode()).digest()).decode()
+    await ws.send(json.dumps(identify))
+    reply = json.loads(await ws.recv())
+    if reply.get("op") != 2:
+        raise ObsError(f"autenticação recusada pelo OBS: {reply}")
+
+
 async def _session(requests: list[tuple[str, dict]], port: int,
                    secret: str) -> list[dict]:
     import websockets
 
     async with websockets.connect(f"ws://127.0.0.1:{port}", max_size=None) as ws:
-        hello = json.loads(await ws.recv())
-        identify = {"op": 1, "d": {"rpcVersion": hello["d"]["rpcVersion"]}}
-        if "authentication" in hello["d"]:
-            challenge = hello["d"]["authentication"]
-            digest = base64.b64encode(hashlib.sha256(
-                (secret + challenge["salt"]).encode()).digest()).decode()
-            identify["d"]["authentication"] = base64.b64encode(hashlib.sha256(
-                (digest + challenge["challenge"]).encode()).digest()).decode()
-        await ws.send(json.dumps(identify))
-        reply = json.loads(await ws.recv())
-        if reply.get("op") != 2:
-            raise ObsError(f"autenticação recusada pelo OBS: {reply}")
+        await _identify(ws, secret)
 
         results: list[dict] = []
         for index, (request_type, data) in enumerate(requests):
@@ -383,6 +395,117 @@ def call(request_type: str, data: dict | None = None,
 def batch(requests: list[tuple[str, dict]], port: int = DEFAULT_PORT) -> list[dict]:
     """Várias requisições numa conexão só."""
     return asyncio.run(_session(requests, port, password()))
+
+
+# --- conexão persistente (medidores da HUD) ---------------------------------
+#
+# Máscaras de evento do obs-websocket v5. As três primeiras cabem em ``All``;
+# ``InputVolumeMeters`` e ``InputActiveStateChanged`` **não** — são classificadas
+# como alto volume e só chegam se pedidas nominalmente no Identify.
+EVENT_OUTPUTS = 1 << 6
+EVENT_INPUT_VOLUME_METERS = 1 << 16
+EVENT_INPUT_ACTIVE_STATE = 1 << 17
+
+#: O que a HUD precisa: estado da gravação, medidores e engate das capturas.
+HUD_SUBSCRIPTIONS = EVENT_OUTPUTS | EVENT_INPUT_VOLUME_METERS | EVENT_INPUT_ACTIVE_STATE
+
+
+async def _stream_session(on_event, requests, on_results, subscriptions: int,
+                          tick_seconds: float, should_stop, port: int,
+                          secret: str) -> None:
+    import websockets
+
+    async with websockets.connect(f"ws://127.0.0.1:{port}", max_size=None) as ws:
+        await _identify(ws, secret, subscriptions)
+        loop = asyncio.get_running_loop()
+        pending: dict[str, asyncio.Future] = {}
+        counter = 0
+
+        async def receive() -> None:
+            # Termina sozinho quando o OBS fecha o socket — é assim que a queda
+            # da instância vira reconexão lá em cima, sem precisar de timeout.
+            async for raw in ws:
+                message = json.loads(raw)
+                if message.get("op") == 5:
+                    on_event(message["d"].get("eventType", ""),
+                             message["d"].get("eventData") or {})
+                elif message.get("op") == 7:
+                    waiting = pending.pop(message["d"].get("requestId", ""), None)
+                    if waiting is not None and not waiting.done():
+                        waiting.set_result(message["d"])
+
+        async def ask(request_type: str, data: dict) -> dict | None:
+            nonlocal counter
+            counter += 1
+            rid = f"lume-hud{counter}"
+            waiting = loop.create_future()
+            pending[rid] = waiting
+            await ws.send(json.dumps({"op": 6, "d": {
+                "requestType": request_type, "requestId": rid, "requestData": data}}))
+            try:
+                payload = await asyncio.wait_for(waiting, 5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pending.pop(rid, None)
+                return None
+            if not (payload.get("requestStatus") or {}).get("result"):
+                return None
+            return payload.get("responseData") or {}
+
+        async def tick() -> None:
+            while True:
+                results = [await ask(request_type, data or {})
+                           for request_type, data in requests()]
+                on_results(results)
+                await asyncio.sleep(tick_seconds)
+
+        async def watch_stop() -> None:
+            while not should_stop():
+                await asyncio.sleep(0.2)
+
+        tasks = [asyncio.create_task(coro())
+                 for coro in (receive, tick, watch_stop)]
+        try:
+            done, unfinished = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            # Recolher o resultado das canceladas importa: quando o OBS fecha o
+            # socket, a tarefa de leitura periódica morre com ``ConnectionClosed``
+            # antes de ser cancelada, e sem isto o asyncio despeja um
+            # "Task exception was never retrieved" a cada parada.
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in done:
+            # Propaga a exceção real (socket caiu, OBS recusou) para quem chamou
+            # decidir se reconecta; parada pedida sai como retorno normal.
+            task.result()
+
+
+def stream(*, on_event, requests, on_results, should_stop,
+           subscriptions: int = HUD_SUBSCRIPTIONS, tick_seconds: float = 1.0,
+           port: int = DEFAULT_PORT) -> None:
+    """Mantém uma conexão viva com o OBS, entregando eventos e leituras.
+
+    Ao contrário de :func:`call`, que abre e fecha um socket por requisição,
+    aqui a conexão persiste — os medidores de volume chegam a ~20 Hz e não
+    sobreviveriam a um handshake por leitura.
+
+    Os quatro callbacks são **síncronos** de propósito: quem consome isto é a
+    HUD, que só precisa copiar números para dentro de uma estrutura protegida
+    por lock. Manter asyncio confinado a este módulo evita contaminar o resto do
+    app com corrotinas por causa de um detalhe de transporte.
+
+    - ``on_event(tipo, dados)`` — cada evento assinado em ``subscriptions``.
+    - ``requests()`` — devolve ``[(tipo, dados)]`` a cada ``tick_seconds``, para
+      o que não chega por evento (o estado inicial, sobretudo).
+    - ``on_results(resultados)`` — respostas na ordem pedida; ``None`` onde a
+      requisição falhou.
+    - ``should_stop()`` — consultado periodicamente para encerrar.
+
+    Bloqueia até a parada ser pedida ou a conexão cair (aí propaga o erro).
+    """
+    asyncio.run(_stream_session(on_event, requests, on_results, subscriptions,
+                                tick_seconds, should_stop, port, password()))
 
 
 # --- cena de captura --------------------------------------------------------

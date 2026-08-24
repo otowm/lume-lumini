@@ -1,7 +1,7 @@
 {
   ".codex/hooks.json": {
     "mtime": 1785991039.642168,
-    "ast_hash": "67f3590000507fc36f75d345633a8a59",
+    "ast_hash": "",
     "semantic_hash": ""
   },
   "app/backend/__init__.py": {
@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "app/backend/main.py": {
-    "mtime": 1787264329.4863863,
-    "ast_hash": "ab4eaeec8fd7219e2506e4f68a41564a",
+    "mtime": 1787531872.248706,
+    "ast_hash": "3f42d9ed230ccd7d0c414af6e0b43cb8",
     "semantic_hash": ""
   },
   "app/backend/main_paths.py": {
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1786595515.1383362,
-    "ast_hash": "1298f93254c883a147e2636bbf74d37e",
+    "mtime": 1787531728.5513532,
+    "ast_hash": "e50c25a9ef3000b46d5127938c35100f",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
@@ -65,13 +65,13 @@
     "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
   },
   "frontend/src/api.ts": {
-    "mtime": 1787264374.860221,
-    "ast_hash": "b1caf3af6e539897d1cc0a9829dacb49",
+    "mtime": 1787531599.5748303,
+    "ast_hash": "f861ff6e7c43c4af82f1f9f7c57e6571",
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1787265050.7616577,
-    "ast_hash": "da3f0e412c066c06fe17677e5c31c13c",
+    "mtime": 1787535621.3761117,
+    "ast_hash": "fa23ec73986c4a79ad20fe11d6bb075a",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -90,9 +90,9 @@
     "semantic_hash": ""
   },
   "install-lume.sh": {
-    "mtime": 1785447732.756731,
-    "ast_hash": "b4d5daa300b853d61b5de8fe23aaebe2",
-    "semantic_hash": "b4d5daa300b853d61b5de8fe23aaebe2"
+    "mtime": 1787524278.790301,
+    "ast_hash": "d75f472a6195034d49f3b622881097fa",
+    "semantic_hash": ""
   },
   "install-user.sh": {
     "mtime": 1784604930.5751808,
@@ -166,7 +166,7 @@
   },
   ".claude/settings.local.json": {
     "mtime": 1786751203.855872,
-    "ast_hash": "cf42a600b87f219cad499760861edfa1",
+    "ast_hash": "",
     "semantic_hash": ""
   },
   "app/backend/runtime.py": {
@@ -205,8 +205,8 @@
     "semantic_hash": ""
   },
   "app/backend/services.py": {
-    "mtime": 1786746450.1227174,
-    "ast_hash": "be47298807d1b42ebb64a07658a8b9ff",
+    "mtime": 1787524233.0039432,
+    "ast_hash": "b049c73c964ce4a97829aac2d3baac14",
     "semantic_hash": ""
   },
   "app/capture/imagediff.py": {
@@ -235,23 +235,23 @@
     "semantic_hash": ""
   },
   "HANDOFF.md": {
-    "mtime": 1785990805.3317964,
-    "ast_hash": "9a229f0ad77fd44f8be863a2e5e09f14",
+    "mtime": 1787534292.6622016,
+    "ast_hash": "ed2a03e9082ee6c62e44c4149f7c0d0b",
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1786746512.096138,
-    "ast_hash": "197e48c9571e2833e6872ad7e29d9bb6",
+    "mtime": 1787534267.588691,
+    "ast_hash": "9882848fb95d3ae70d9a38db459614de",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
-    "mtime": 1786497970.3153393,
-    "ast_hash": "c870da3afbc1f8dd22e4246b905c6de4",
+    "mtime": 1787525174.249815,
+    "ast_hash": "7e05022b3b0882c4c3afed9664c0bba3",
     "semantic_hash": ""
   },
   "app/capture/winvideo.py": {
-    "mtime": 1786500377.052242,
-    "ast_hash": "9c81973a75d54fe00a0d259f50b3ce8c",
+    "mtime": 1787530481.2399275,
+    "ast_hash": "6115c7b1ffbbdb17b2111ac74de2fb58",
     "semantic_hash": ""
   },
   "app/backend/audio_intelligence.py": {
@@ -296,7 +296,32 @@
   },
   ".claude/launch.json": {
     "mtime": 1786315602.2345886,
-    "ast_hash": "304ee13e9134c90b1fd0503885123181",
+    "ast_hash": "",
+    "semantic_hash": ""
+  },
+  "app/capture/hud.py": {
+    "mtime": 1787533994.9158344,
+    "ast_hash": "a0d393b0b1900ed8b6fa0f4287b810f4",
+    "semantic_hash": ""
+  },
+  "app/capture/hudsource.py": {
+    "mtime": 1787529826.5681603,
+    "ast_hash": "095cf95fa8b6e5b330fcf85b751a887c",
+    "semantic_hash": ""
+  },
+  "app/capture/hudstate.py": {
+    "mtime": 1787529805.7803528,
+    "ast_hash": "a862af9effcb9aa50b7236c0f6cc37c0",
+    "semantic_hash": ""
+  },
+  "app/capture/winhotkey.py": {
+    "mtime": 1787523433.9747357,
+    "ast_hash": "bb2fd7701111ec0917139126632110d3",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1787509805.5412927,
+    "ast_hash": "b4b929824b401b9cb1b0c0e76cf75be8",
     "semantic_hash": ""
   }
 }

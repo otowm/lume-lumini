@@ -32,3 +32,56 @@
   bottom: auto;
   transform: translate(-50%, -50%);
 }
+.playback-timeline > .trim-selection {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  transform: translateY(-50%);
+  border-inline: 2px solid #f0b45f;
+  border-radius: 3px;
+  background: rgba(240,180,95,.3);
+  pointer-events: none;
+}
+.timeline-zoom {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 7px;
+  background: rgba(20,22,32,.82);
+}
+.timeline-zoom button {
+  min-width: 23px;
+  width: 23px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+}
+.timeline-zoom span {
+  min-width: 25px;
+  text-align: center;
+  color: #f0b45f;
+}
+.playback-hud .timeline-pan {
+  min-width: 25px;
+  width: 25px;
+}
+.custom-video-stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #000;
+}
+.custom-video-stage:fullscreen > video {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  aspect-ratio: auto;
+  object-fit: contain;
+}
+.custom-video-stage:fullscreen .playback-hud,
+.custom-video-stage:fullscreen .custom-caption {
+  position: fixed;
+}
