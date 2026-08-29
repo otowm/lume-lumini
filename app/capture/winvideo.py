@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import get_backend
-from .base import parse_video_app_rule, read_patterns, read_shell_config
+from .base import parse_video_app_rule, read_patterns, read_shell_config, stable_app_label
 from .imagediff import thumbnail
 from .winhotkey import MarkerHotkey
 from . import obs
@@ -224,6 +224,7 @@ class VideoLoop:
         self.active_fps: int | None = None
         self.active_geometry: str | None = None
         self.active_capture_source: str | None = None
+        self.focus_grace_deadline = 0.0
         self._clip_lock = threading.Lock()
         # Preparar (copiar, configurar, montar a cena) custa segundos; fazer
         # isso a cada gravação atrasaria o início e perderia jogada. Só na
@@ -257,7 +258,7 @@ class VideoLoop:
 
     def _begin_game_session(self, session_key: str, window: str, mode: str) -> None:
         started = self._iso_time(self.session_started_at)
-        app = window.split(" | ", 1)[0].strip() or window.rsplit(" | ", 1)[-1].strip() or "Jogo"
+        app = stable_app_label(window) or "Jogo"
         self.game_session_key = session_key
         self._game_session_heartbeat = self.session_started_at
         try:
@@ -334,6 +335,7 @@ class VideoLoop:
                 # curso.
                 "markers": len(self.pending_markers),
                 "last_clip": self.last_clip_name,
+                "focus_grace_deadline": getattr(self, "focus_grace_deadline", 0.0) or None,
                 "event": self.last_event,
             }, ensure_ascii=False), encoding="utf-8")
         except OSError:
@@ -374,6 +376,18 @@ class VideoLoop:
             pass
         if existia:
             log(f"[sinal] liberado ({reason or 'sem motivo informado'})")
+
+    def _update_focus_grace(self, focused: bool, focus_lost_at: float) -> tuple[float, bool]:
+        """Atualiza o prazo publicado para a HUD e informa se ele venceu."""
+        if focused:
+            self.focus_grace_deadline = 0.0
+            return -1.0, False
+        now = time.monotonic()
+        if focus_lost_at < 0:
+            focus_lost_at = now
+            self.focus_grace_deadline = time.time() + self.settings.focus_grace
+        expired = now - focus_lost_at >= self.settings.focus_grace
+        return focus_lost_at, expired
 
     # --- marcadores -------------------------------------------------------
     @staticmethod
@@ -642,16 +656,16 @@ class VideoLoop:
                     # tempo visíveis para a HUD, e faz da data de modificação um
                     # batimento: sem segmentação (``VIDEO_SEGMENT_SECONDS=0``)
                     # isto aqui seria escrito uma única vez na sessão inteira.
-                    self._suspend_others(window)
                     elapsed = time.monotonic() - self.recording_started
                     if limit and elapsed >= limit:
                         break
                     current, rule = self._focused_window()
-                    if rule and rule[0] == "continuous" and self._same_app(window, current):
-                        focus_lost_at = -1.0
-                    elif focus_lost_at < 0:
-                        focus_lost_at = time.monotonic()
-                    elif time.monotonic() - focus_lost_at >= self.settings.focus_grace:
+                    focused = bool(rule and rule[0] == "continuous" and self._same_app(window, current))
+                    focus_lost_at, grace_expired = self._update_focus_grace(focused, focus_lost_at)
+                    # Publica novamente depois de observar o foco, para que a
+                    # HUD receba o prazo já nesta mesma volta.
+                    self._suspend_others(window)
+                    if grace_expired:
                         session_ended = True
                         break
                 self._stop_recording(window, session_key)
@@ -663,6 +677,7 @@ class VideoLoop:
         finally:
             self._finish_game_session()
             self.session_started_at = 0.0
+            self.focus_grace_deadline = 0.0
             with self._marker_lock:
                 self.session_active = False
                 if self.marker_queued_for_start:
@@ -682,19 +697,18 @@ class VideoLoop:
             focus_lost_at = -1.0
             while not self.stopping:
                 time.sleep(POLL_SECONDS)
-                self._suspend_others(window)
                 current, rule = self._focused_window()
-                if rule and rule[0] == "clips" and self._same_app(window, current):
-                    focus_lost_at = -1.0
-                elif focus_lost_at < 0:
-                    focus_lost_at = time.monotonic()
-                elif time.monotonic() - focus_lost_at >= self.settings.focus_grace:
+                focused = bool(rule and rule[0] == "clips" and self._same_app(window, current))
+                focus_lost_at, grace_expired = self._update_focus_grace(focused, focus_lost_at)
+                self._suspend_others(window)
+                if grace_expired:
                     break
         finally:
             self._stop_replay_buffer()
             self._release_others("buffer de clipes encerrado")
             self._finish_game_session()
             self.session_started_at = 0.0
+            self.focus_grace_deadline = 0.0
             self.session_active = False
             self.clip_save_queued = False
 

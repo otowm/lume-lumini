@@ -39,7 +39,8 @@ from ..capture.imagediff import compare_images
 from .database import connect, initialize, row_dict
 from .audio_intelligence import embedding_for_sample
 from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, MEDIA_ROOT, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source
-from .runtime import video_activity_flag, video_recording_flag
+from .runtime import pipeline_pause_flag, video_activity_flag, video_recording_flag
+from .retention import cleanup_processed_capture_media, cleanup_ready_days, cleanup_settings, save_cleanup_settings
 from .services import ActionResult, get_manager
 
 
@@ -229,6 +230,10 @@ class RetentionUpdate(BaseModel):
     preserved: bool
 
 
+class CleanupSettings(BaseModel):
+    enabled: bool
+
+
 def enroll_voice_identity(db, source_kind: str, source_id: int, speaker: dict, label: str, source: Path) -> dict:
     observation = db.execute(
         "SELECT embedding_json FROM speaker_observations WHERE source_kind=? AND source_id=? AND speaker_id=?",
@@ -357,6 +362,7 @@ class VideoSettings(BaseModel):
     retention_minutes: int = Field(ge=5,le=1440)
     delete_after_description: bool
     pause_other_captures: bool = True
+    focus_grace_seconds: int = Field(default=20, ge=0, le=3600)
     analysis_profile: Literal["fast", "balanced", "detailed", "custom"] = "detailed"
     scan_interval_seconds: float = Field(default=2.0, ge=0.5, le=30)
     max_keyframes: int = Field(default=80, ge=8, le=160)
@@ -609,7 +615,7 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
 
 
 @app.get("/api/ollama/models")
@@ -661,7 +667,7 @@ VIDEO_SAMPLE_GEOMETRY={settings.sample_geometry}
 VIDEO_RETENTION_MINUTES={settings.retention_minutes}
 DELETE_AFTER_DESCRIPTION={'true' if settings.delete_after_description else 'false'}
 PAUSE_OTHER_CAPTURES={'true' if settings.pause_other_captures else 'false'}
-VIDEO_FOCUS_GRACE_SECONDS=20
+VIDEO_FOCUS_GRACE_SECONDS={settings.focus_grace_seconds}
 VIDEO_ANALYSIS_PROFILE={settings.analysis_profile}
 VIDEO_SCAN_INTERVAL_SECONDS={settings.scan_interval_seconds}
 VIDEO_MAX_KEYFRAMES={settings.max_keyframes}
@@ -2110,6 +2116,9 @@ def cancel_video_session(session_id: int) -> dict:
         row = db.execute("SELECT status,job_unit FROM video_sessions WHERE id=?", (session_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Sessão não encontrada")
+    if row["job_unit"] == "lume-process.service":
+        result = cancel_pipeline(None)
+        return {**result, "id": session_id}
     if row["job_unit"]:
         service_action("stop", [row["job_unit"]], timeout=30)
     with connect() as db:
@@ -2257,6 +2266,9 @@ def cancel_video_analysis(video_id: int) -> dict:
         raise HTTPException(status_code=404, detail="Vídeo não encontrado")
     if row["status"] not in ("queued", "processing"):
         raise HTTPException(status_code=409, detail="A análise não está em andamento")
+    if row["job_unit"] == "lume-process.service":
+        result = cancel_pipeline(None)
+        return {**result, "id": video_id}
     if row["job_unit"]:
         result = service_action("stop", [row["job_unit"]], timeout=30)
         if result.returncode != 0 and not stop_target_is_already_gone(result):
@@ -2332,6 +2344,20 @@ def list_files(
         stat = path.stat()
         source_key = media_source_key(path)
         indexed = states.get(source_key, {})
+        if kind == "audio" and indexed.get("transcript_segments"):
+            # Registros produzidos antes do filtro novo também deixam de exibir
+            # créditos fantasmas, sem exigir uma transcrição cara novamente.
+            from .pipeline import filter_hallucinated_segments
+
+            original_segments = indexed["transcript_segments"]
+            clean_segments = filter_hallucinated_segments(original_segments)
+            if len(clean_segments) != len(original_segments):
+                indexed["transcript_segments"] = clean_segments
+                labels = {"microphone": "Você", "discord": "Discord", "system": "Outros sons"}
+                indexed["text"] = "\n".join(
+                    f"{labels.get(str(segment.get('source') or ''), 'Falante')}: {segment.get('text', '')}"
+                    for segment in clean_segments
+                ).strip()
         items.append({
             "name": path.name, "path": source_key, "kind": kind, "bytes": stat.st_size,
             "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
@@ -2433,63 +2459,35 @@ def _delete_media_sidecars(path: Path) -> None:
         path.with_suffix(path.suffix + suffix).unlink(missing_ok=True)
 
 
+@app.get("/api/settings/cleanup")
+def get_cleanup_settings() -> dict:
+    return cleanup_settings()
+
+
+@app.put("/api/settings/cleanup")
+def set_cleanup_settings(settings: CleanupSettings) -> dict:
+    return save_cleanup_settings(settings.enabled)
+
+
 @app.delete("/api/media/raw/unkept")
 def delete_unkept_raw_media() -> dict:
-    """Remove somente arquivos físicos não protegidos; análises prontas ficam."""
-    deleted = {"screen": 0, "audio": 0, "video": 0}
-    deleted_bytes = 0
-    skipped = {"preserved": 0, "active": 0}
-    audio_paths = list(AUDIO_DIR.glob("*.wav"))
-    newest_audio = max(audio_paths, key=lambda item: item.stat().st_mtime, default=None)
-    audio_recording = unit_state("captura-dia-audio.service")["active"]
-
+    """Executa manualmente a limpeza segura apenas de prints e áudios consolidados."""
+    if unit_state("lume-process.service")["active"]:
+        raise HTTPException(status_code=409, detail="Aguarde o processamento e os resumos terminarem antes da limpeza")
+    ready_days = cleanup_ready_days()
+    if any(
+        unit_state(f"lume-summary@{day}.service")["active"]
+        or unit_state(f"lume-hourly@{day}.service")["active"]
+        for day in ready_days
+    ):
+        raise HTTPException(status_code=409, detail="Um resumo ainda está utilizando as capturas; aguarde a conclusão")
     with connect() as db:
-        capture_states = {row["source_path"]: dict(row) for row in db.execute(
-            "SELECT id,kind,source_path,status,preserved FROM captures"
-        )}
-        for kind, paths in (("screen", list(SCREEN_DIR.glob("*.png"))), ("audio", audio_paths)):
-            for path in paths:
-                key = media_source_key(path)
-                state = capture_states.get(key)
-                if state and state["preserved"]:
-                    skipped["preserved"] += 1
-                    continue
-                if (state and state["status"] == "processing") or (kind == "audio" and path == newest_audio and audio_recording):
-                    skipped["active"] += 1
-                    continue
-                deleted_bytes += path.stat().st_size
-                path.unlink(missing_ok=True)
-                _delete_media_sidecars(path)
-                deleted[kind] += 1
-                if state and state["status"] != "done":
-                    db.execute("DELETE FROM captures WHERE id=?", (state["id"],))
-
-        video_states = {row["source_path"]: dict(row) for row in db.execute(
-            """SELECT v.id,v.source_path,v.status,v.preserved,v.session_id,
-                      coalesce(s.preserved,0) session_preserved
-               FROM video_segments v LEFT JOIN video_sessions s ON s.id=v.session_id"""
-        )}
-        roots = {VIDEO_DIR.resolve(), CLIPS_DIR.resolve()}
-        video_paths = [path for root in roots if root.is_dir() for path in root.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS]
-        for path in video_paths:
-            key = media_source_key(path)
-            state = video_states.get(key)
-            if state and (state["preserved"] or state["session_preserved"]):
-                skipped["preserved"] += 1
-                continue
-            if state and state["status"] in {"queued", "processing"}:
-                skipped["active"] += 1
-                continue
-            deleted_bytes += path.stat().st_size
-            path.unlink(missing_ok=True)
-            _delete_media_sidecars(path)
-            deleted["video"] += 1
-            if state and state["status"] != "done":
-                db.execute("DELETE FROM video_segments WHERE id=?", (state["id"],))
-    return {
-        "ok": True, "deleted": deleted, "deleted_total": sum(deleted.values()),
-        "deleted_bytes": deleted_bytes, "skipped": skipped,
-    }
+        sequence_active = db.execute(
+            "SELECT 1 FROM screen_sequence_jobs WHERE status IN ('queued','processing') LIMIT 1"
+        ).fetchone()
+    if sequence_active:
+        raise HTTPException(status_code=409, detail="Uma análise de sequência ainda está utilizando os prints")
+    return cleanup_processed_capture_media()
 
 
 @app.post("/api/pipeline/process-file")
@@ -2624,6 +2622,51 @@ def list_voice_identities() -> dict:
             "SELECT id,label,embedding_json,sample_count,created_at,updated_at FROM voice_identities ORDER BY label COLLATE NOCASE"
         ).fetchall()
     return {"items": voice_identity_payloads(rows)}
+
+
+def _speaker_without_identity(speaker: dict) -> dict:
+    """Volta uma amostra ao estado não identificado sem perder sua diarização."""
+    cleaned = dict(speaker)
+    for key in ("identity_id", "confidence", "identified", "confirmed"):
+        cleaned.pop(key, None)
+    source = str(cleaned.get("source") or "")
+    suffix = re.search(r"(\d+)$", str(cleaned.get("id") or ""))
+    cleaned["label"] = (
+        "Você" if source == "microphone" else
+        "Voz do Discord" if source == "discord" else
+        "Voz de outro conteúdo" if source == "system" else
+        f"Pessoa {suffix.group(1)}" if suffix else "Voz não identificada"
+    )
+    return cleaned
+
+
+@app.delete("/api/voice-identities/{identity_id}")
+def delete_voice_identity(identity_id: int) -> dict:
+    """Remove um perfil incorreto e solta as amostras para nova classificação."""
+    updated = {"audio": 0, "video": 0}
+    with connect() as db:
+        identity = db.execute("SELECT id,label FROM voice_identities WHERE id=?", (identity_id,)).fetchone()
+        if not identity:
+            raise HTTPException(status_code=404, detail="Perfil de voz não encontrado")
+        for source_kind, table in (("audio", "captures"), ("video", "video_segments")):
+            rows = db.execute(
+                f"SELECT id,speakers_json FROM {table} WHERE speakers_json!='[]'"
+            ).fetchall()
+            for row in rows:
+                speakers = json.loads(row["speakers_json"] or "[]")
+                changed = False
+                for index, speaker in enumerate(speakers):
+                    if speaker.get("identity_id") == identity_id:
+                        speakers[index] = _speaker_without_identity(speaker)
+                        changed = True
+                if changed:
+                    db.execute(
+                        f"UPDATE {table} SET speakers_json=? WHERE id=?",
+                        (json.dumps(speakers, ensure_ascii=False), row["id"]),
+                    )
+                    updated[source_kind] += 1
+        db.execute("DELETE FROM voice_identities WHERE id=?", (identity_id,))
+    return {"ok": True, "id": identity_id, "label": identity["label"], "updated": updated}
 
 
 @app.get("/api/captures/{capture_id}/speakers/{speaker_id}/sample")
@@ -2833,7 +2876,10 @@ def pipeline_status() -> dict:
         counts = {row["status"]: row["count"] for row in db.execute("SELECT status,count(*) count FROM captures GROUP BY status")}
         last = db.execute("SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1").fetchone()
     state = unit_state("lume-process.service")
-    return {"counts": counts, "last_run": dict(last) if last else None, "running": state["active"]}
+    return {
+        "counts": counts, "last_run": dict(last) if last else None,
+        "running": state["active"], "paused": pipeline_pause_flag().is_file(),
+    }
 
 
 @app.post("/api/ollama/unload")
@@ -2856,6 +2902,40 @@ def unload_ollama_models() -> dict:
     return {"ok": True, "models": models, "unloaded": len(models)}
 
 
+def capture_speed_stats(db, sample_size: int = 40) -> dict[str, dict[str, int]]:
+    """Média recente de análise por tipo, para estimar a duração da fila.
+
+    Só as últimas capturas entram na conta: o tempo depende do modelo e da
+    GPU em uso, então uma média histórica completa envelheceria rápido.
+    """
+    stats: dict[str, dict[str, int]] = {}
+    for kind in ("screen", "audio"):
+        row = db.execute(
+            """SELECT AVG(process_ms) average, COUNT(*) samples FROM (
+                 SELECT process_ms FROM captures
+                 WHERE kind=? AND status='done' AND process_ms IS NOT NULL AND process_ms>0
+                 ORDER BY processed_at DESC, id DESC LIMIT ?)""",
+            (kind, sample_size),
+        ).fetchone()
+        samples = int(row["samples"] or 0)
+        stats[kind] = {"avg_ms": round(row["average"]) if samples else 0, "samples": samples}
+    return stats
+
+
+def queue_eta_seconds(counts: dict[str, int], speed: dict[str, dict[str, int]]) -> int | None:
+    """Estimativa da fila restante; a execução do worker é sequencial."""
+    total = 0.0
+    for kind in ("audio", "screen"):
+        remaining = counts.get(kind, 0)
+        if not remaining:
+            continue
+        average = speed.get(kind, {}).get("avg_ms", 0)
+        if not average:
+            return None
+        total += remaining * average / 1000
+    return round(total) or None
+
+
 @app.get("/api/pipeline/queue")
 def pipeline_queue(
     limit: int = Query(default=200, ge=1, le=1000),
@@ -2866,6 +2946,7 @@ def pipeline_queue(
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", tracked_day):
         raise HTTPException(status_code=422, detail="Data inválida")
     process_running = unit_state("lume-process.service")["active"]
+    paused = pipeline_pause_flag().is_file()
     daily_state = unit_state(f"lume-summary@{tracked_day}.service")
     hourly_state = unit_state(f"lume-hourly@{tracked_day}.service")
     daily_running = daily_state["active"]
@@ -2886,19 +2967,34 @@ def pipeline_queue(
     sequence_running = any(row["status"] in ("queued", "processing") for row in sequence_rows)
     running = process_running or daily_running or hourly_running or video_running or sequence_running
     with connect() as db:
+        count_rows = db.execute(
+            """SELECT kind,status,COUNT(*) total FROM captures
+               WHERE status IN ('processing','pending','error')
+               GROUP BY kind,status"""
+        ).fetchall()
         rows = db.execute(
             """SELECT id,kind,source_path,captured_at,status,error FROM captures
                WHERE status IN ('processing','pending','error')
-               ORDER BY CASE status WHEN 'processing' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, captured_at LIMIT ?""",
+               ORDER BY CASE status WHEN 'processing' THEN 0 ELSE 1 END,
+                        CASE kind WHEN 'audio' THEN 0 ELSE 1 END,
+                        captured_at, id LIMIT ?""",
             (limit,),
         ).fetchall()
+        speed = capture_speed_stats(db)
+    counts = {"audio": 0, "screen": 0, "processing": 0, "pending": 0, "error": 0, "total": 0}
+    for row in count_rows:
+        amount = int(row["total"])
+        counts[row["kind"]] += amount
+        counts[row["status"]] += amount
+        counts["total"] += amount
+    speed_payload = {**speed, "eta_seconds": queue_eta_seconds(counts, speed)}
     items = []
     for position, row in enumerate(rows, 1):
         item = dict(row)
         item["name"] = media_source_name(item["source_path"])
         item["url"] = f"/api/{'screenshot' if item['kind'] == 'screen' else 'audio'}?path={item['source_path']}"
         item["position"] = position
-        item["stage"] = (("Transcrevendo áudio com Whisper" if item["kind"] == "audio" else "Analisando imagem com Qwen-VL") if running else "Execução interrompida; será recolocado na fila") if item["status"] == "processing" else ("Falhou; aguardando nova tentativa" if item["status"] == "error" else "Aguardando processamento")
+        item["stage"] = (("Transcrevendo áudio com Whisper" if item["kind"] == "audio" else "Analisando imagem com Qwen-VL") if running else "Execução interrompida; será recolocado na fila") if item["status"] == "processing" else ("Falhou; aguardando nova tentativa" if item["status"] == "error" else ("Pausado; aguardando retomada" if paused else "Aguardando processamento"))
         items.append(item)
     jobs = []
     if daily_running:
@@ -2938,7 +3034,56 @@ def pipeline_queue(
             "status": "error" if row["status"] == "error" else "processing", "error": row["error"],
         })
     phase = "processing" if process_running and items and any(item["status"] == "processing" for item in items) else ("summarizing" if jobs else "idle")
-    return {"items": items, "jobs": jobs, "total": len(items), "running": running, "phase": phase, "day": tracked_day}
+    return {
+        "items": items, "jobs": jobs, "total": counts["total"], "shown": len(items), "counts": counts,
+        "speed": speed_payload, "running": running, "worker_running": process_running, "paused": paused,
+        "phase": phase, "day": tracked_day,
+    }
+
+
+@app.post("/api/pipeline/pause")
+def pause_pipeline() -> dict:
+    """Interrompe o worker, mas preserva e reagenda tudo para retomada."""
+    flag = pipeline_pause_flag()
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("paused\n", encoding="utf-8")
+    if unit_state("lume-process.service")["active"]:
+        result = service_action("stop", ["lume-process.service"], timeout=30)
+        if result.returncode != 0:
+            flag.unlink(missing_ok=True)
+            raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao pausar processamento")
+    with connect() as db:
+        captures = db.execute(
+            "UPDATE captures SET status='pending',error='pausado; aguardando retomada' WHERE status='processing'"
+        ).rowcount
+        videos = db.execute(
+            """UPDATE video_segments SET status='queued',stage='Pausado; aguardando retomada',
+               error='' WHERE status='processing' AND job_unit='lume-process.service'"""
+        ).rowcount
+        sessions = db.execute(
+            """UPDATE video_sessions SET status='queued',stage='Pausada; aguardando retomada',
+               error='' WHERE status='processing' AND job_unit='lume-process.service'"""
+        ).rowcount
+        db.execute(
+            """UPDATE pipeline_runs SET status='paused',finished_at=CURRENT_TIMESTAMP,
+               error='pausado manualmente' WHERE status='running'"""
+        )
+    return {"ok": True, "paused": True, "requeued": captures + videos + sessions}
+
+
+@app.post("/api/pipeline/resume")
+def resume_pipeline() -> dict:
+    """Remove a pausa persistente e continua usando a mesma fila."""
+    flag = pipeline_pause_flag()
+    flag.unlink(missing_ok=True)
+    if unit_state("lume-process.service")["active"]:
+        return {"ok": True, "paused": False, "already_running": True}
+    result = service_action("start", ["lume-process.service"], timeout=20, no_block=True)
+    if result.returncode != 0:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("paused\n", encoding="utf-8")
+        raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao retomar processamento")
+    return {"ok": True, "paused": False, "already_running": False}
 
 
 @app.post("/api/pipeline/cancel")
@@ -2970,7 +3115,9 @@ def cancel_entire_queue() -> dict:
     today = datetime.now().astimezone().date().isoformat()
     with connect() as db:
         sequence_units = [row["job_unit"] for row in db.execute("SELECT job_unit FROM screen_sequence_jobs WHERE status IN ('queued','processing') AND job_unit<>''")]
-    result = service_action("stop", ["lume-process.service", f"lume-summary@{today}.service", f"lume-hourly@{today}.service", *sequence_units], timeout=30)
+        video_units = [row["job_unit"] for row in db.execute("SELECT job_unit FROM video_segments WHERE status IN ('queued','processing') AND job_unit<>''")]
+        session_units = [row["job_unit"] for row in db.execute("SELECT job_unit FROM video_sessions WHERE status IN ('queued','processing') AND job_unit<>''")]
+    result = service_action("stop", ["lume-process.service", f"lume-summary@{today}.service", f"lume-hourly@{today}.service", *video_units, *session_units, *sequence_units], timeout=30)
     if result.returncode != 0:
         raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao parar processamento")
     with connect() as db:
@@ -2979,7 +3126,10 @@ def cancel_entire_queue() -> dict:
                WHERE status IN ('pending','processing','error')"""
         ).rowcount
         db.execute("UPDATE pipeline_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP,error='fila cancelada manualmente' WHERE status='running'")
+        cancelled += db.execute("UPDATE video_segments SET status='cancelled',stage='Cancelado pelo usuário',error='fila cancelada manualmente' WHERE status IN ('queued','processing','error')").rowcount
+        cancelled += db.execute("UPDATE video_sessions SET status='cancelled',stage='Cancelada pelo usuário',error='fila cancelada manualmente' WHERE status IN ('queued','processing','error')").rowcount
         cancelled += db.execute("UPDATE screen_sequence_jobs SET status='cancelled',stage='Cancelado pelo usuário',error='fila cancelada manualmente' WHERE status IN ('queued','processing','error')").rowcount
+    pipeline_pause_flag().unlink(missing_ok=True)
     return {"ok": True, "cancelled": cancelled}
 
 
@@ -3013,7 +3163,9 @@ def pipeline_run(payload: PipelineRequest) -> dict:
 
 @app.post("/api/pipeline/enqueue-unprocessed")
 def enqueue_unprocessed() -> dict:
-    """Descobre arquivos ainda não indexados e inicia o fluxo da automação."""
+    """Enfileira toda mídia ainda não analisada e inicia o worker único."""
+    if pipeline_pause_flag().is_file():
+        raise HTTPException(status_code=409, detail="O worker está pausado; use Retomar worker para continuar a fila existente")
     if unit_state("lume-process.service")["active"]:
         raise HTTPException(status_code=409, detail="O processamento automático já está em execução")
     with connect() as db:
@@ -3029,7 +3181,72 @@ def enqueue_unprocessed() -> dict:
     # da API. A descoberta só registra arquivos; o worker faz a análise.
     from .pipeline import discover
     discovered = discover()
+    # A listagem também registra vídeos novos e associa automaticamente os
+    # clipes gravados às suas sessões. O retorno volumoso não é necessário aqui.
+    list_videos()
     with connect() as db:
+        # ``discover`` usa INSERT OR IGNORE, portanto uma captura removida ou
+        # cancelada anteriormente continua como ``skipped``. Recupere registros
+        # de qualquer data somente quando a mídia bruta ainda existir; entradas
+        # órfãs não devem ocupar a fila nem virar um erro do worker.
+        candidates = db.execute(
+            """SELECT id,status,source_path FROM captures
+               WHERE status NOT IN ('done','processing')"""
+        ).fetchall()
+        existing = [row for row in candidates if resolve_media_source(row["source_path"]).is_file()]
+        missing = [row for row in candidates if not resolve_media_source(row["source_path"]).is_file()]
+        requeued = sum(row["status"] not in ("pending", "error") for row in existing)
+        db.executemany(
+            "UPDATE captures SET status='pending',error='',processed_at=NULL WHERE id=?",
+            [(row["id"],) for row in existing],
+        )
+        db.executemany(
+            """UPDATE captures SET status='skipped',error='arquivo bruto não existe mais',
+               processed_at=CURRENT_TIMESTAMP WHERE id=?""",
+            [(row["id"],) for row in missing],
+        )
+        session_candidates = db.execute(
+            """SELECT s.id FROM video_sessions s
+               WHERE s.status NOT IN ('done','processing','queued')
+                 AND EXISTS(SELECT 1 FROM video_segments v WHERE v.session_id=s.id)"""
+        ).fetchall()
+        session_clips = db.execute(
+            """SELECT session_id,status,source_path FROM video_segments
+               WHERE session_id IN (SELECT id FROM video_sessions
+                 WHERE status NOT IN ('done','processing','queued'))"""
+        ).fetchall()
+        missing_session_ids = {
+            row["session_id"] for row in session_clips
+            if row["status"] != "done" and not resolve_media_source(row["source_path"]).is_file()
+        }
+        session_rows = [row for row in session_candidates if row["id"] not in missing_session_ids]
+        missing_sessions = [row for row in session_candidates if row["id"] in missing_session_ids]
+        video_rows = db.execute(
+            """SELECT id,source_path FROM video_segments
+               WHERE session_id IS NULL AND status NOT IN ('done','processing','queued')"""
+        ).fetchall()
+        available_videos = [row for row in video_rows if resolve_media_source(row["source_path"]).is_file()]
+        missing_videos = [row for row in video_rows if not resolve_media_source(row["source_path"]).is_file()]
+        db.executemany(
+            """UPDATE video_sessions SET status='queued',stage='Aguardando processamento geral',progress=0,
+               trace_json='[]',job_unit='lume-process.service',error='' WHERE id=?""",
+            [(row["id"],) for row in session_rows],
+        )
+        db.executemany(
+            """UPDATE video_sessions SET status='cancelled',stage='Clipe indisponível',
+               error='um ou mais arquivos brutos não existem mais' WHERE id=?""",
+            [(row["id"],) for row in missing_sessions],
+        )
+        db.executemany(
+            """UPDATE video_segments SET status='queued',stage='Aguardando processamento geral',progress=0,
+               trace_json='[]',job_unit='lume-process.service',error='' WHERE id=?""",
+            [(row["id"],) for row in available_videos],
+        )
+        db.executemany(
+            """UPDATE video_segments SET status='cancelled',stage='Arquivo indisponível',
+               error='arquivo bruto não existe mais' WHERE id=?""",
+            [(row["id"],) for row in missing_videos],
+        )
         queued = {
             row["kind"]: row["count"]
             for row in db.execute(
@@ -3042,11 +3259,16 @@ def enqueue_unprocessed() -> dict:
         raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao iniciar processamento")
     audio = int(queued.get("audio", 0))
     screen = int(queued.get("screen", 0))
+    videos = len(available_videos)
+    sessions = len(session_rows)
     return {
         "ok": True,
         "discovered": discovered,
-        "queued": {"audio": audio, "screen": screen, "total": audio + screen},
-        "note": "Arquivos pendentes adicionados; processamento iniciado em segundo plano",
+        "requeued": requeued,
+        "missing": len(missing) + len(missing_videos) + len(missing_sessions),
+        "queued": {"audio": audio, "screen": screen, "video": videos, "session": sessions,
+                   "total": audio + screen + videos + sessions},
+        "note": "Todos os arquivos não processados foram adicionados; processamento iniciado em segundo plano",
     }
 
 

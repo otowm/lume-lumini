@@ -10,28 +10,28 @@
     "semantic_hash": "68b329da9893e34099c7d8ad5cb9c940"
   },
   "app/backend/database.py": {
-    "mtime": 1787264309.024403,
-    "ast_hash": "fc11d73540687e4755eefa22837c8866",
+    "mtime": 1788019255.534053,
+    "ast_hash": "30508249bb3b0aae5c51d7655bb9a6a8",
     "semantic_hash": ""
   },
   "app/backend/main.py": {
-    "mtime": 1787531872.248706,
-    "ast_hash": "3f42d9ed230ccd7d0c414af6e0b43cb8",
+    "mtime": 1788022417.4774992,
+    "ast_hash": "e7b8e4512a457f100e18311b8260dafb",
     "semantic_hash": ""
   },
   "app/backend/main_paths.py": {
-    "mtime": 1786486921.7820115,
-    "ast_hash": "20fa844f22f1b114bb70ee34390b3aea",
+    "mtime": 1787627910.8235717,
+    "ast_hash": "13f9dc7df0a1ab5fed7ad6bb2aa14472",
     "semantic_hash": ""
   },
   "app/backend/pipeline.py": {
-    "mtime": 1787264309.127204,
-    "ast_hash": "8fae555286117971e9a809968eded574",
+    "mtime": 1788019281.218272,
+    "ast_hash": "cf346d40c100baab0151826e2452e76e",
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1787531728.5513532,
-    "ast_hash": "e50c25a9ef3000b46d5127938c35100f",
+    "mtime": 1788022420.2547286,
+    "ast_hash": "9f3d367b843e462d8adf1220b9f4862f",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
@@ -65,13 +65,13 @@
     "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
   },
   "frontend/src/api.ts": {
-    "mtime": 1787531599.5748303,
-    "ast_hash": "f861ff6e7c43c4af82f1f9f7c57e6571",
+    "mtime": 1788022418.8363843,
+    "ast_hash": "5a87a5e3720c405d50a01e8873181c7c",
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1787535621.3761117,
-    "ast_hash": "fa23ec73986c4a79ad20fe11d6bb075a",
+    "mtime": 1788022473.3132699,
+    "ast_hash": "a96ac4b054a18982376f2d48d0cad3ca",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -80,7 +80,7 @@
     "semantic_hash": "6774dc00ce6501abeaca72c87714097a"
   },
   "frontend/vite.config.ts": {
-    "mtime": 1785447732.8497303,
+    "mtime": 1788019725.301923,
     "ast_hash": "05869532f9b0348c50146060db9f5665",
     "semantic_hash": "05869532f9b0348c50146060db9f5665"
   },
@@ -170,8 +170,8 @@
     "semantic_hash": ""
   },
   "app/backend/runtime.py": {
-    "mtime": 1786215709.797012,
-    "ast_hash": "4643667bebeb2bf20900fcd21f80f8de",
+    "mtime": 1787786808.4390905,
+    "ast_hash": "0065e48affed191426ce49b220e358d2",
     "semantic_hash": ""
   },
   "app/capture/__init__.py": {
@@ -180,8 +180,8 @@
     "semantic_hash": ""
   },
   "app/capture/base.py": {
-    "mtime": 1786302093.3536103,
-    "ast_hash": "6cddbd7b9bf33f0ed0e864ddd983d80f",
+    "mtime": 1788023251.944843,
+    "ast_hash": "28a3a1e8417f13e758f2af7223a02062",
     "semantic_hash": ""
   },
   "app/capture/linux.py": {
@@ -235,13 +235,13 @@
     "semantic_hash": ""
   },
   "HANDOFF.md": {
-    "mtime": 1787534292.6622016,
-    "ast_hash": "ed2a03e9082ee6c62e44c4149f7c0d0b",
+    "mtime": 1787613593.2381034,
+    "ast_hash": "32a7b997825fb982573da4a7316e899f",
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1787534267.588691,
-    "ast_hash": "9882848fb95d3ae70d9a38db459614de",
+    "mtime": 1788023579.6522293,
+    "ast_hash": "95248f7427d66c6fd336592ef703e787",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": ""
   },
   "app/capture/winvideo.py": {
-    "mtime": 1787530481.2399275,
-    "ast_hash": "6115c7b1ffbbdb17b2111ac74de2fb58",
+    "mtime": 1788023306.3915832,
+    "ast_hash": "04d002e69fc56b0950dc4b9656d5afd2",
     "semantic_hash": ""
   },
   "app/backend/audio_intelligence.py": {
@@ -300,18 +300,18 @@
     "semantic_hash": ""
   },
   "app/capture/hud.py": {
-    "mtime": 1787533994.9158344,
-    "ast_hash": "a0d393b0b1900ed8b6fa0f4287b810f4",
+    "mtime": 1788023596.689147,
+    "ast_hash": "1bfb339b010cca9a8011ca39ba572948",
     "semantic_hash": ""
   },
   "app/capture/hudsource.py": {
-    "mtime": 1787529826.5681603,
-    "ast_hash": "095cf95fa8b6e5b330fcf85b751a887c",
+    "mtime": 1788023253.430746,
+    "ast_hash": "47795f0a539d5d8a5405bd4075ddda10",
     "semantic_hash": ""
   },
   "app/capture/hudstate.py": {
-    "mtime": 1787529805.7803528,
-    "ast_hash": "a862af9effcb9aa50b7236c0f6cc37c0",
+    "mtime": 1788023254.9216685,
+    "ast_hash": "af7028fbcfa2b325b08f164443a7daf0",
     "semantic_hash": ""
   },
   "app/capture/winhotkey.py": {
@@ -322,6 +322,11 @@
   "CLAUDE.md": {
     "mtime": 1787509805.5412927,
     "ast_hash": "b4b929824b401b9cb1b0c0e76cf75be8",
+    "semantic_hash": ""
+  },
+  "app/backend/retention.py": {
+    "mtime": 1787628391.1475346,
+    "ast_hash": "241dcde0259b03fedfeb535950295993",
     "semantic_hash": ""
   }
 }

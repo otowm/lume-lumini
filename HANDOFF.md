@@ -115,6 +115,26 @@ aqui fica só o que interessa a quem for mexer no código.
   entra como letreiro — a linha normal sobe, a do evento toma o lugar e depois
   volta; o recorte é o próprio canvas. No expandido ele vira uma faixa cuja
   altura cresce junto com a animação, sem o salto de antes.
+- **Transcrição é o custo dominante da análise de vídeo**, não a IA. Medido
+  nesta máquina: whisper roda a 0,14× do tempo real, então um capítulo de 33 min
+  custa ~13 min só de transcrição (3 faixas), contra ~2,7 min de keyframes e 23 s
+  de visão com 10 imagens. Um vídeo de 4h22 leva ~2h10 — não está travado, está
+  transcrevendo. Faixas mudas são puladas (`track_is_silent`): numa sessão sem
+  Discord isso corta um terço do tempo.
+- **Transcrever só o que tem som: um arquivo por bloco, nunca um só.** O whisper
+  processa em janelas de 30 s, então trechos curtos isolados desperdiçam janela e
+  a economia evapora (medido: 1,4x). Colar tudo num WAV só é pior ainda — com o
+  áudio comprimido 8x, um erro de tempo de 1,5 s do whisper vira **13 s** no eixo
+  original, e o defeito é silencioso: o texto sai certo e só o tempo está fora do
+  lugar. A saída é agrupar trechos **vizinhos** até encher uma janela, com teto de
+  alcance no eixo original. Medido: 2,7x mais rápido com desvio mediano de 0,08 s
+  e máximo de 0,65 s. `RemapToSourceTests` e `RegionGroupingTests` fixam isso.
+- **`_run_hidden` com `text=True` precisa de `encoding="utf-8"`.** O whisper
+  imprime UTF-8 e o locale do Windows é cp1252: sem isso qualquer acento na
+  transcrição derruba a chamada com `UnicodeDecodeError`.
+- **Legendas simultâneas precisam de `filter`, não `find`.** Microfone, Discord e
+  jogo se sobrepõem o tempo todo (108 sobreposições num vídeo medido), e `find`
+  devolvia quem tivesse *começado antes* — não quem importa mais.
 - **A HUD não é pausável.** Fica fora de `_PAUSABLE` e de `captura-dia.target`
   de propósito: ela existe para vigiar a gravação, então precisa continuar de pé
   exatamente quando as outras capturas são suspensas.

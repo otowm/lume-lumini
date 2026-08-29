@@ -14,6 +14,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def stable_app_label(window: str) -> str:
+    """Nome estável para ``<título> | <executável>``.
+
+    Alguns jogos, especialmente osu!, colocam a música atual no título. Quando
+    o título começa pelo próprio executável, o executável é a identidade útil;
+    nos demais casos preservamos o título amigável do jogo.
+    """
+    if not window:
+        return ""
+    title, separator, executable = window.rpartition(" | ")
+    if not separator:
+        return window.strip()
+    title = title.strip()
+    executable_name = Path(executable.strip()).stem
+    if executable_name and title.casefold().startswith(executable_name.casefold()):
+        return executable_name
+    return title or executable_name
+
+
 @dataclass
 class Monitor:
     """Um monitor físico: rótulo estável + geometria em pixels do desktop."""

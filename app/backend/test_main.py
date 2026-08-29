@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from app.backend import database, main as backend_main, pipeline
+from app.backend import database, main as backend_main, pipeline, retention
 from app.backend.audio_intelligence import consolidate_events, enrich_segments, identify_profiles, overlapping_sources, speaker_profiles
 from app.backend.main import atomic_write, captured_video_session, origin_allowed, parse_shell_config, rebuild_voice_identity, remote_client_allowed, selective_video_status, stop_target_is_already_gone, voice_identity_payloads
 from app.backend.services import ActionResult, SystemdServiceManager
@@ -277,15 +277,97 @@ class ConfigTests(unittest.TestCase):
              patch.object(database, "DB_PATH", Path(directory) / "lume.sqlite3"), \
              patch.object(backend_main, "unit_state", return_value={"active": False}), \
              patch.object(backend_main, "service_action", return_value=ActionResult(0)) as start, \
+             patch.object(backend_main, "list_videos", return_value={"items": [], "total": 0}), \
              patch.object(pipeline, "discover", return_value={"audio": 1, "screen": 2}):
             database.initialize()
+            pending_path = Path(directory) / "a.wav"
+            error_path = Path(directory) / "s.png"
+            old_path = Path(directory) / "old.wav"
+            video_path = Path(directory) / "video.mp4"
+            clip_path = Path(directory) / "clip.mp4"
+            for path in (pending_path, error_path, old_path, video_path, clip_path):
+                path.write_bytes(b"media")
             with database.connect() as db:
-                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio','a.wav','2026-08-09','pending')")
-                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen','s.png','2026-08-09','error')")
+                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio',?,'2026-08-09','pending')", (str(pending_path),))
+                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen',?,'2026-08-09','error')", (str(error_path),))
+                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio',?,'2026-08-01','skipped')", (str(old_path),))
+                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio','missing.wav','2026-07-30','error')")
+                db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen','done.png','2026-07-31','done')")
+                session_id = db.execute(
+                    "INSERT INTO video_sessions(name,status) VALUES('Sessão antiga','pending')"
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO video_segments(source_path,captured_at,status,session_id) VALUES(?,'2026-08-02','pending',?)",
+                    (str(clip_path), session_id),
+                )
+                db.execute(
+                    "INSERT INTO video_segments(source_path,captured_at,status) VALUES(?,'2026-08-03','pending')",
+                    (str(video_path),),
+                )
             result = backend_main.enqueue_unprocessed()
-        self.assertEqual(result["queued"], {"audio": 1, "screen": 1, "total": 2})
+            with database.connect() as db:
+                statuses = {
+                    row["source_path"]: row["status"]
+                    for row in db.execute("SELECT source_path,status FROM captures")
+                }
+                session_status = db.execute("SELECT status FROM video_sessions WHERE id=?", (session_id,)).fetchone()[0]
+                video_status = db.execute("SELECT status FROM video_segments WHERE source_path=?", (str(video_path),)).fetchone()[0]
+        self.assertEqual(result["queued"], {"audio": 2, "screen": 1, "video": 1, "session": 1, "total": 5})
         self.assertEqual(result["discovered"], {"audio": 1, "screen": 2})
+        self.assertEqual(result["requeued"], 1)
+        self.assertEqual(result["missing"], 1)
+        self.assertEqual(statuses[str(old_path)], "pending")
+        self.assertEqual(statuses["missing.wav"], "skipped")
+        self.assertEqual(statuses["done.png"], "done")
+        self.assertEqual(session_status, "queued")
+        self.assertEqual(video_status, "queued")
         start.assert_called_once_with("start", ["lume-process.service"], timeout=20, no_block=True)
+
+    def test_pipeline_processes_queued_videos_and_sessions_before_daily_summaries(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(database, "DB_PATH", Path(directory) / "lume.sqlite3"), \
+             patch.object(pipeline, "discover", return_value={"audio": 0, "screen": 0}), \
+             patch.object(pipeline, "process_video_session", return_value={"status": "done"}) as process_session, \
+             patch.object(pipeline, "process_video_specific", return_value={"status": "done"}) as process_video, \
+             patch.object(pipeline, "process_pending", side_effect=[0, 0]), \
+             patch.object(pipeline, "generate_visual_activities", return_value=0), \
+             patch.object(pipeline, "generate_hourly_summaries", return_value=0), \
+             patch.object(pipeline, "cleanup_settings", return_value={"enabled": True}), \
+             patch.object(pipeline, "mark_capture_cleanup_ready") as mark_cleanup_ready, \
+             patch.object(pipeline, "cleanup_processed_capture_media", return_value={"deleted_total": 2}) as cleanup_media, \
+             patch.object(pipeline, "generate_summary", return_value=True) as generate_summary:
+            database.initialize()
+            video_path = Path(directory) / "standalone.mp4"
+            clip_path = Path(directory) / "session-clip.mp4"
+            video_path.write_bytes(b"video")
+            clip_path.write_bytes(b"clip")
+            with database.connect() as db:
+                session_id = db.execute(
+                    "INSERT INTO video_sessions(name,status) VALUES('Sessão','queued')"
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO video_segments(source_path,captured_at,status,session_id) VALUES(?,'2026-08-01T10:00:00-03:00','pending',?)",
+                    (str(clip_path), session_id),
+                )
+                db.execute(
+                    "INSERT INTO video_segments(source_path,captured_at,status) VALUES(?,'2026-08-02T10:00:00-03:00','queued')",
+                    (str(video_path),),
+                )
+            result = pipeline.run_pipeline(10, 100, True)
+
+        process_session.assert_called_once_with(session_id)
+        process_video.assert_called_once_with(video_path)
+        summarized = {call.args[0] for call in generate_summary.call_args_list}
+        self.assertIn("2026-08-01", summarized)
+        self.assertIn("2026-08-02", summarized)
+        marked = {call.args[0] for call in mark_cleanup_ready.call_args_list}
+        self.assertIn("2026-08-01", marked)
+        self.assertIn("2026-08-02", marked)
+        cleanup_media.assert_called_once_with()
+        self.assertEqual(result["sessions"], 1)
+        self.assertEqual(result["videos"], 1)
+        self.assertEqual(result["video_errors"], 0)
+        self.assertEqual(result["cleanup"], {"deleted_total": 2})
 
     def test_selective_video_status_distinguishes_service_from_recording(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -545,33 +627,87 @@ class ConfigTests(unittest.TestCase):
     def test_raw_cleanup_keeps_marked_files_and_processed_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            screen_dir, audio_dir, video_dir, clips_dir = (root / name for name in ("screen", "audio", "video", "clips"))
+            screen_dir, audio_dir, video_dir, clips_dir = (root / name for name in ("screen", "sounds", "video", "clips-test"))
             for path in (screen_dir, audio_dir, video_dir, clips_dir):
                 path.mkdir()
             kept = screen_dir / "kept.png"; kept.write_bytes(b"kept")
             removed = screen_dir / "removed.png"; removed.write_bytes(b"removed")
+            audio = audio_dir / "removed.wav"; audio.write_bytes(b"audio")
             video = video_dir / "removed.mkv"; video.write_bytes(b"video")
             with (
                 patch.object(database, "DB_PATH", root / "lume.sqlite3"),
-                patch.object(backend_main, "SCREEN_DIR", screen_dir),
-                patch.object(backend_main, "AUDIO_DIR", audio_dir),
-                patch.object(backend_main, "VIDEO_DIR", video_dir),
-                patch.object(backend_main, "CLIPS_DIR", clips_dir),
+                patch.object(retention, "SCREEN_DIR", screen_dir),
+                patch.object(retention, "AUDIO_DIR", audio_dir),
                 patch.object(backend_main, "unit_state", return_value={"active": False}),
             ):
                 database.initialize()
                 with database.connect() as db:
                     db.execute("INSERT INTO captures(kind,source_path,captured_at,status,preserved) VALUES('screen',?,'2026-08-08T10:00:00-03:00','done',1)", (backend_main.media_source_key(kept),))
                     removed_id = db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen',?,'2026-08-08T10:01:00-03:00','done')", (backend_main.media_source_key(removed),)).lastrowid
+                    db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio',?,'2026-08-08T10:02:00-03:00','done')", (backend_main.media_source_key(audio),))
                     video_id = db.execute("INSERT INTO video_segments(source_path,captured_at,status) VALUES(?,'2026-08-08T10:02:00-03:00','done')", (backend_main.media_source_key(video),)).lastrowid
+                    db.execute("INSERT INTO summaries(day,narrative) VALUES('2026-08-08','Resumo pronto')")
+                self.assertTrue(retention.mark_capture_cleanup_ready("2026-08-08"))
                 result = backend_main.delete_unkept_raw_media()
                 self.assertTrue(kept.is_file())
                 self.assertFalse(removed.exists())
-                self.assertFalse(video.exists())
+                self.assertFalse(audio.exists(), result)
+                self.assertTrue(video.exists())
                 self.assertEqual(result["deleted_total"], 2)
                 with database.connect() as db:
                     self.assertIsNotNone(db.execute("SELECT id FROM captures WHERE id=?", (removed_id,)).fetchone())
                     self.assertIsNotNone(db.execute("SELECT id FROM video_segments WHERE id=?", (video_id,)).fetchone())
+
+    def test_raw_cleanup_waits_when_a_day_changed_after_its_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            screen_dir, audio_dir = root / "screen", root / "audio"
+            screen_dir.mkdir(); audio_dir.mkdir()
+            first = screen_dir / "first.png"; first.write_bytes(b"first")
+            later = screen_dir / "later.png"; later.write_bytes(b"later")
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"), \
+                 patch.object(retention, "SCREEN_DIR", screen_dir), \
+                 patch.object(retention, "AUDIO_DIR", audio_dir):
+                database.initialize()
+                with database.connect() as db:
+                    db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen',?,'2026-08-08T10:00:00-03:00','done')", (str(first),))
+                    db.execute("INSERT INTO summaries(day,narrative) VALUES('2026-08-08','Resumo')")
+                self.assertTrue(retention.mark_capture_cleanup_ready("2026-08-08"))
+                with database.connect() as db:
+                    db.execute("INSERT INTO captures(kind,source_path,captured_at,status) VALUES('screen',?,'2026-08-08T11:00:00-03:00','done')", (str(later),))
+                result = retention.cleanup_processed_capture_media()
+            self.assertEqual(result["deleted_total"], 0)
+            self.assertEqual(result["skipped"]["not_ready"], 2)
+            self.assertTrue(first.exists())
+            self.assertTrue(later.exists())
+
+    def test_cleanup_setting_can_be_enabled_and_disabled(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(retention, "CLEANUP_CONFIG", Path(directory) / "cleanup.conf"):
+            self.assertEqual(retention.cleanup_settings(), {"enabled": False})
+            self.assertEqual(retention.save_cleanup_settings(True), {"enabled": True})
+            self.assertEqual(retention.cleanup_settings(), {"enabled": True})
+            self.assertEqual(retention.save_cleanup_settings(False), {"enabled": False})
+            self.assertEqual(retention.cleanup_settings(), {"enabled": False})
+
+    def test_cleanup_reconciles_a_legacy_audio_day_with_complete_summaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            screen_dir, audio_dir = root / "screen", root / "sounds"
+            screen_dir.mkdir(); audio_dir.mkdir()
+            audio = audio_dir / "complete.wav"; audio.write_bytes(b"audio")
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"), \
+                 patch.object(retention, "SCREEN_DIR", screen_dir), \
+                 patch.object(retention, "AUDIO_DIR", audio_dir):
+                database.initialize()
+                with database.connect() as db:
+                    db.execute("INSERT INTO captures(kind,source_path,captured_at,status,processed_at) VALUES('audio',?,'2026-08-08T10:00:00-03:00','done','2026-08-09 10:00:00')", (str(audio),))
+                    db.execute("INSERT INTO hourly_summaries(hour,title,narrative,source_count,generated_at) VALUES('2026-08-08T10','Hora','Pronta',1,'2026-08-09 11:00:00')")
+                    db.execute("INSERT INTO summaries(day,narrative,generated_at) VALUES('2026-08-08','Resumo','2026-08-09 12:00:00')")
+                result = retention.cleanup_processed_capture_media()
+            self.assertEqual(result["ready_days"], ["2026-08-08"])
+            self.assertEqual(result["deleted"], {"screen": 0, "audio": 1})
+            self.assertFalse(audio.exists())
         self.assertEqual(daily_narrative_target(10), "2 a 4 parágrafos")
 
     def test_summary_generation_rejects_a_day_without_processed_sources(self):
@@ -692,6 +828,38 @@ class ConfigTests(unittest.TestCase):
                 profile = db.execute("SELECT id FROM voice_identities WHERE id=?", (identity_id,)).fetchone()
             self.assertIsNone(profile)
 
+    def test_deleting_voice_profile_unlinks_samples_without_deleting_observations(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(database, "DB_PATH", Path(directory) / "lume.sqlite3"):
+            database.initialize()
+            with database.connect() as db:
+                identity_id = db.execute(
+                    "INSERT INTO voice_identities(label,embedding_json) VALUES('Eu e Laura','[1,0]')"
+                ).lastrowid
+                capture_id = db.execute(
+                    "INSERT INTO captures(kind,source_path,captured_at,speakers_json) VALUES('audio','/a.wav','2026-01-01',?)",
+                    (json.dumps([{"id": "discord_1", "label": "Eu e Laura", "source": "discord", "identity_id": identity_id, "identified": True, "confirmed": True}]),),
+                ).lastrowid
+                db.execute(
+                    "INSERT INTO speaker_observations VALUES('audio',?,?,?)",
+                    (capture_id, "discord_1", "[1,0]"),
+                )
+
+            result = backend_main.delete_voice_identity(identity_id)
+
+            with database.connect() as db:
+                profile = db.execute("SELECT id FROM voice_identities WHERE id=?", (identity_id,)).fetchone()
+                row = db.execute("SELECT speakers_json FROM captures WHERE id=?", (capture_id,)).fetchone()
+                observation = db.execute(
+                    "SELECT 1 FROM speaker_observations WHERE source_kind='audio' AND source_id=? AND speaker_id='discord_1'",
+                    (capture_id,),
+                ).fetchone()
+            speaker = json.loads(row["speakers_json"])[0]
+            self.assertTrue(result["ok"])
+            self.assertIsNone(profile)
+            self.assertEqual(speaker["label"], "Voz do Discord")
+            self.assertNotIn("identity_id", speaker)
+            self.assertIsNotNone(observation)
+
     def test_known_voice_is_only_applied_above_safe_threshold(self):
         profiles = [{"id": "speaker_1", "label": "Pessoa 1"}, {"id": "speaker_2", "label": "Pessoa 2"}]
         embeddings = {"speaker_1": [1.0, 0.0], "speaker_2": [0.6, 0.8]}
@@ -716,6 +884,18 @@ class ConfigTests(unittest.TestCase):
             {"start": 5, "end": 6, "text": "sim"},
         ]
         self.assertEqual(filter_hallucinated_segments(segments), segments)
+
+    def test_sonia_subtitle_credit_is_removed_even_when_it_only_appears_twice(self):
+        segments = [
+            {"start": 0, "end": 1, "text": "Legenda por Sônia Ruberti"},
+            {"start": 30, "end": 31, "text": "Legenda por Sonia Ruberti."},
+            {"start": 32, "end": 34, "text": "Esta fala é real"},
+        ]
+        self.assertEqual(filter_hallucinated_segments(segments), [segments[-1]])
+
+    def test_real_sentence_about_subtitles_is_preserved(self):
+        segment = {"start": 0, "end": 2, "text": "Eu ativei a legenda por causa do barulho"}
+        self.assertEqual(filter_hallucinated_segments([segment]), [segment])
 
     def test_common_audio_persists_timestamps_speakers_and_events(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -852,6 +1032,112 @@ class ConfigTests(unittest.TestCase):
                     row = db.execute("SELECT status,error FROM captures WHERE id=?", (capture_id,)).fetchone()
             self.assertEqual(row["status"], "skipped")
             self.assertEqual(row["error"], "removido manualmente da fila")
+
+    def test_pipeline_queue_matches_audio_first_processing_order_and_reports_full_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "lume.sqlite3"
+            stopped = {"active": False, "active_state": "inactive", "sub_state": "dead", "enabled_state": "disabled", "pid": "0"}
+            with patch.object(database, "DB_PATH", db_path), patch.object(backend_main, "unit_state", return_value=stopped):
+                database.initialize()
+                with database.connect() as db:
+                    db.executemany(
+                        "INSERT INTO captures(kind,source_path,captured_at,status) VALUES(?,?,?,?)",
+                        [
+                            ("screen", "media:telas/older.png", "2026-08-07T10:00:00-03:00", "pending"),
+                            ("audio", "media:audio/newer.wav", "2026-08-24T10:00:00-03:00", "pending"),
+                            ("audio", "media:audio/retry.wav", "2026-08-25T10:00:00-03:00", "error"),
+                        ],
+                    )
+                result = backend_main.pipeline_queue(limit=2, day="2026-08-26")
+            self.assertEqual([item["kind"] for item in result["items"]], ["audio", "audio"])
+            self.assertEqual(result["total"], 3)
+            self.assertEqual(result["shown"], 2)
+            self.assertEqual(result["counts"]["audio"], 2)
+            self.assertEqual(result["counts"]["screen"], 1)
+            self.assertEqual(result["counts"]["error"], 1)
+
+    def test_queue_reports_recent_average_per_kind_and_estimates_the_remaining_time(self):
+        """A média vem do tempo real medido, não do intervalo entre capturas."""
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "lume.sqlite3"
+            stopped = {"active": False, "active_state": "inactive", "sub_state": "dead", "enabled_state": "disabled", "pid": "0"}
+            with patch.object(database, "DB_PATH", db_path), patch.object(backend_main, "unit_state", return_value=stopped):
+                database.initialize()
+                with database.connect() as db:
+                    db.executemany(
+                        "INSERT INTO captures(kind,source_path,captured_at,status,process_ms,processed_at) VALUES(?,?,?,?,?,?)",
+                        [
+                            ("screen", "media:telas/a.png", "2026-08-26T10:00:00-03:00", "done", 20000, "2026-08-26T10:01:00"),
+                            ("screen", "media:telas/b.png", "2026-08-26T10:02:00-03:00", "done", 16000, "2026-08-26T10:03:00"),
+                            ("audio", "media:audio/a.wav", "2026-08-26T10:04:00-03:00", "done", 4000, "2026-08-26T10:05:00"),
+                            ("screen", "media:telas/c.png", "2026-08-26T10:06:00-03:00", "pending", None, None),
+                            ("screen", "media:telas/d.png", "2026-08-26T10:07:00-03:00", "pending", None, None),
+                            ("audio", "media:audio/b.wav", "2026-08-26T10:08:00-03:00", "pending", None, None),
+                        ],
+                    )
+                result = backend_main.pipeline_queue(limit=10, day="2026-08-26")
+            self.assertEqual(result["speed"]["screen"], {"avg_ms": 18000, "samples": 2})
+            self.assertEqual(result["speed"]["audio"], {"avg_ms": 4000, "samples": 1})
+            self.assertEqual(result["speed"]["eta_seconds"], 40)
+
+    def test_queue_omits_the_estimate_while_a_kind_has_no_measured_analysis(self):
+        """Sem amostra do tipo pendente, um palpite atrapalharia mais que ajudar."""
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "lume.sqlite3"
+            stopped = {"active": False, "active_state": "inactive", "sub_state": "dead", "enabled_state": "disabled", "pid": "0"}
+            with patch.object(database, "DB_PATH", db_path), patch.object(backend_main, "unit_state", return_value=stopped):
+                database.initialize()
+                with database.connect() as db:
+                    db.executemany(
+                        "INSERT INTO captures(kind,source_path,captured_at,status,process_ms,processed_at) VALUES(?,?,?,?,?,?)",
+                        [
+                            ("audio", "media:audio/a.wav", "2026-08-26T10:00:00-03:00", "done", 4000, "2026-08-26T10:01:00"),
+                            ("screen", "media:telas/c.png", "2026-08-26T10:02:00-03:00", "pending", None, None),
+                        ],
+                    )
+                result = backend_main.pipeline_queue(limit=10, day="2026-08-26")
+            self.assertEqual(result["speed"]["screen"], {"avg_ms": 0, "samples": 0})
+            self.assertIsNone(result["speed"]["eta_seconds"])
+
+    def test_pause_pipeline_stops_worker_and_preserves_active_item_for_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db_path = root / "lume.sqlite3"
+            pause_flag = root / "paused"
+            active = {"active": True, "active_state": "active", "sub_state": "running", "enabled_state": "enabled", "pid": "1"}
+            with patch.object(database, "DB_PATH", db_path), \
+                 patch.object(backend_main, "pipeline_pause_flag", return_value=pause_flag), \
+                 patch.object(backend_main, "unit_state", return_value=active), \
+                 patch.object(backend_main, "service_action", return_value=ActionResult(0)) as action:
+                database.initialize()
+                with database.connect() as db:
+                    capture_id = db.execute(
+                        "INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio','media:audio/a.wav','2026-08-26','processing')"
+                    ).lastrowid
+                    run_id = db.execute("INSERT INTO pipeline_runs(status) VALUES('running')").lastrowid
+                result = backend_main.pause_pipeline()
+                with database.connect() as db:
+                    capture = db.execute("SELECT status,error FROM captures WHERE id=?", (capture_id,)).fetchone()
+                    run = db.execute("SELECT status,error FROM pipeline_runs WHERE id=?", (run_id,)).fetchone()
+            self.assertTrue(result["paused"])
+            self.assertTrue(pause_flag.is_file())
+            self.assertEqual(capture["status"], "pending")
+            self.assertIn("retomada", capture["error"])
+            self.assertEqual(run["status"], "paused")
+            action.assert_called_once_with("stop", ["lume-process.service"], timeout=30)
+
+    def test_resume_pipeline_clears_pause_and_restarts_same_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pause_flag = Path(directory) / "paused"
+            pause_flag.write_text("paused\n", encoding="utf-8")
+            inactive = {"active": False, "active_state": "inactive", "sub_state": "dead", "enabled_state": "enabled", "pid": "0"}
+            with patch.object(backend_main, "pipeline_pause_flag", return_value=pause_flag), \
+                 patch.object(backend_main, "unit_state", return_value=inactive), \
+                 patch.object(backend_main, "service_action", return_value=ActionResult(0)) as action:
+                result = backend_main.resume_pipeline()
+            self.assertFalse(result["paused"])
+            self.assertFalse(pause_flag.exists())
+            action.assert_called_once_with("start", ["lume-process.service"], timeout=20, no_block=True)
 
     def test_parse_only_known_keys(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1104,6 +1390,176 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result["game_state"]["player_side"], "TR")
 
 
+class SilentTrackTests(unittest.TestCase):
+    """Faixas mudas não valem uma transcrição.
+
+    Numa sessão sem Discord a faixa dele é zero absoluto do início ao fim e
+    ainda assim custava o mesmo whisper que uma faixa cheia de fala — cerca de
+    um terço do tempo de cada capítulo. O limiar é conservador de propósito:
+    fala baixa passa longe dele.
+    """
+
+    def _wav(self, directory: Path, amplitude: int, name: str = "t.wav") -> Path:
+        import wave
+        from array import array
+
+        path = Path(directory) / name
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            samples = array("h", [amplitude if index % 2 else -amplitude for index in range(16000)])
+            handle.writeframes(samples.tobytes())
+        return path
+
+    def test_digital_silence_is_skipped(self):
+        from app.backend.pipeline import track_is_silent
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(track_is_silent(self._wav(Path(directory), 0)))
+
+    def test_quiet_speech_is_still_transcribed(self):
+        """-40 dBFS é fala baixa de verdade; pular isso perderia conversa."""
+        from app.backend.pipeline import track_is_silent, track_peak_dbfs
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._wav(Path(directory), 328)  # ~-40 dBFS
+            self.assertAlmostEqual(track_peak_dbfs(path), -40, delta=1.5)
+            self.assertFalse(track_is_silent(path))
+
+    def test_inaudible_noise_is_skipped(self):
+        from app.backend.pipeline import track_is_silent
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(track_is_silent(self._wav(Path(directory), 20)))  # ~-64 dBFS
+
+    def test_an_unreadable_file_is_never_assumed_silent(self):
+        """Na dúvida, transcreve: perder fala é pior que gastar tempo."""
+        from app.backend.pipeline import track_is_silent
+
+        with tempfile.TemporaryDirectory() as directory:
+            broken = Path(directory) / "quebrado.wav"
+            broken.write_bytes(b"nao sou um wav")
+            self.assertFalse(track_is_silent(broken))
+
+
+class SpeechRegionTests(unittest.TestCase):
+    """Detecção dos trechos com som, sobre amostras sintéticas."""
+
+    def _samples(self, plano: list[tuple[float, int]], rate: int = 16000):
+        import numpy
+
+        partes = [numpy.full(int(rate * segundos), valor, dtype="<i2") for segundos, valor in plano]
+        return numpy.concatenate(partes) if partes else numpy.zeros(0, dtype="<i2")
+
+    def test_finds_the_loud_stretch_between_silences(self):
+        from app.backend.pipeline import speech_regions
+
+        samples = self._samples([(2.0, 0), (1.0, 8000), (2.0, 0)])
+        regions = speech_regions(samples, 16000, pad_seconds=0.0, min_region_seconds=0.1)
+        self.assertEqual(len(regions), 1)
+        start, end = regions[0]
+        self.assertAlmostEqual(start, 2.0, delta=0.1)
+        self.assertAlmostEqual(end, 3.0, delta=0.1)
+
+    def test_silence_yields_no_regions(self):
+        from app.backend.pipeline import speech_regions
+
+        self.assertEqual(speech_regions(self._samples([(3.0, 0)]), 16000), [])
+
+    def test_padding_widens_the_region_without_leaving_the_track(self):
+        """A folga não pode gerar tempo negativo nem passar do fim do áudio."""
+        from app.backend.pipeline import speech_regions
+
+        samples = self._samples([(0.2, 8000), (1.0, 0), (0.2, 8000)])
+        for start, end in speech_regions(samples, 16000, pad_seconds=0.5, min_region_seconds=0.05):
+            self.assertGreaterEqual(start, 0.0)
+            self.assertLessEqual(end, samples.size / 16000 + 1e-6)
+
+    def test_short_gaps_are_merged_into_one_region(self):
+        from app.backend.pipeline import speech_regions
+
+        samples = self._samples([(1.0, 8000), (0.5, 0), (1.0, 8000)])
+        regions = speech_regions(samples, 16000, merge_gap_seconds=2.0,
+                                 pad_seconds=0.0, min_region_seconds=0.1)
+        self.assertEqual(len(regions), 1)
+
+
+class RegionGroupingTests(unittest.TestCase):
+    """Blocos que enchem uma janela do whisper sem esticar o eixo do tempo.
+
+    O whisper processa em janelas de 30 s, então trechos curtos isolados
+    desperdiçam janela; mas agrupar trechos distantes amplifica qualquer erro de
+    tempo na volta ao eixo original. Os dois tetos existem por isso.
+    """
+
+    def test_neighbours_are_packed_together(self):
+        from app.backend.pipeline import group_regions
+
+        groups = group_regions([(0, 2), (3, 5), (6, 8)], audible_limit=25, span_limit=75)
+        self.assertEqual(len(groups), 1)
+
+    def test_audible_limit_starts_a_new_block(self):
+        from app.backend.pipeline import group_regions
+
+        # Dois trechos de 6 s cabem em 15 s; o terceiro passaria de 18 s.
+        groups = group_regions([(0, 6), (7, 13), (14, 20)], audible_limit=15, span_limit=999)
+        self.assertEqual([len(group) for group in groups], [2, 1])
+
+    def test_distant_regions_never_share_a_block(self):
+        """É o teto que impede um erro de 1 s virar 20 s ao voltar ao original."""
+        from app.backend.pipeline import group_regions
+
+        groups = group_regions([(0, 2), (500, 502)], audible_limit=25, span_limit=75)
+        self.assertEqual(len(groups), 2)
+
+    def test_every_region_survives_the_grouping(self):
+        from app.backend.pipeline import group_regions
+
+        regions = [(index * 7.0, index * 7.0 + 3.0) for index in range(20)]
+        grouped = [region for group in group_regions(regions) for region in group]
+        self.assertEqual(grouped, regions)
+
+
+class RemapToSourceTests(unittest.TestCase):
+    """Voltar os tempos do bloco para o eixo do áudio original.
+
+    É a parte que, errada, corrompe tudo em silêncio: o texto continuaria certo
+    e só o tempo estaria fora do lugar, sem nada acusar.
+    """
+
+    REGIONS = [(10.0, 12.0), (50.0, 53.0)]
+
+    def _remap(self, start: float, end: float) -> tuple[float, float]:
+        from app.backend.pipeline import remap_to_source
+
+        item = remap_to_source([{"start": start, "end": end, "text": "x"}], self.REGIONS)[0]
+        return item["start"], item["end"]
+
+    def test_first_region_maps_to_its_own_offset(self):
+        self.assertEqual(self._remap(0.0, 1.0), (10.0, 11.0))
+
+    def test_second_region_continues_after_the_first(self):
+        # 2 s de áudio no bloco já foram gastos pelo primeiro trecho.
+        self.assertEqual(self._remap(2.5, 3.0), (50.5, 51.0))
+
+    def test_time_past_the_end_is_clamped_to_the_last_region(self):
+        start, end = self._remap(99.0, 99.0)
+        self.assertLessEqual(end, 53.0)
+        self.assertGreaterEqual(start, 50.0)
+
+    def test_a_segment_stretched_over_a_cut_keeps_its_order(self):
+        """Fim antes do início quebraria a ordenação e a legenda."""
+        start, end = self._remap(1.9, 2.2)
+        self.assertLessEqual(start, end)
+
+    def test_without_regions_the_times_are_left_alone(self):
+        from app.backend.pipeline import remap_to_source
+
+        original = [{"start": 3.0, "end": 4.0, "text": "x"}]
+        self.assertEqual(remap_to_source(original, []), original)
+
+
 class VideoSettingsRoundTripTests(unittest.TestCase):
     """Salvar as preferências não pode apagar chaves silenciosamente.
 
@@ -1136,13 +1592,14 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
             "VIDEO_ENABLED=true\nVIDEO_FPS=60\nVIDEO_GEOMETRY=1920x1080\n"
             "VIDEO_HUD_ENABLED=true\nVIDEO_HUD_PLACEMENT=both\n"
             "VIDEO_HUD_CORNER=bottom-left\nVIDEO_HUD_HOTKEY=Ctrl+F9\n"
-            "VIDEO_HUD_SOUND=false\n"
+            "VIDEO_HUD_SOUND=false\nVIDEO_FOCUS_GRACE_SECONDS=45\n"
         )
         self.assertTrue(after["hud_enabled"])
         self.assertEqual(after["hud_placement"], "both")
         self.assertEqual(after["hud_corner"], "bottom-left")
         self.assertEqual(after["hud_hotkey"], "Ctrl+F9")
         self.assertFalse(after["hud_sound"])
+        self.assertEqual(after["focus_grace_seconds"], 45)
 
     def test_config_without_hud_keys_gets_usable_defaults(self):
         """Uma instalação antiga não pode ficar sem HUD nem quebrar ao salvar."""
@@ -1150,6 +1607,7 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
         self.assertTrue(after["hud_enabled"])
         self.assertEqual(after["hud_placement"], "second")
         self.assertEqual(after["hud_hotkey"], "Ctrl+Shift+F8")
+        self.assertEqual(after["focus_grace_seconds"], 20)
 
 
 if __name__ == "__main__":

@@ -74,8 +74,11 @@ export type QueueItem = {
   id:number; kind:"screen"|"audio"; name:string; captured_at:string;
   status:"processing"|"pending"|"error"; error:string; position:number; stage:string; url:string;
 };
+export type QueueCounts = {audio:number;screen:number;processing:number;pending:number;error:number;total:number};
+export type QueueSpeed = {screen:{avg_ms:number;samples:number};audio:{avg_ms:number;samples:number};eta_seconds:number|null};
 export type AnalysisTrace = {time:string;kind:string;chapter?:number;title?:string;detail:string;evidence?:string[];interpretation?:string};
 export type QueueJob = {id:string;stage:string;kind:"summary"|"hourly"|"video"|"video_session"|"screen_sequence";status?:"error"|"processing";video_id?:number;session_id?:number;sequence_id?:number;title?:string;progress?:number;trace?:AnalysisTrace[];error?:string;ai_thinking?:string;ai_content?:string;ai_metrics?:{model?:string;status?:string;prompt_tokens?:number;generated_tokens?:number;total_duration_ms?:number;eval_duration_ms?:number}};
+export type PipelineQueue = {items:QueueItem[];jobs:QueueJob[];total:number;shown?:number;counts?:QueueCounts;speed?:QueueSpeed;running:boolean;worker_running?:boolean;paused?:boolean;phase:"idle"|"processing"|"summarizing";day:string};
 
 export type HourSummary = {
   hour:string; title:string; narrative:string; tags:string[]; source_count:number; model:string; generated_at:string;
@@ -84,13 +87,14 @@ export type HourSummary = {
 export type ActivityFrame = {id:number;captured_at:string;title:string;text:string;preserved:boolean;available:boolean;url:string};
 export type ActivitySession = {id:number;activity_key:string;day:string;app:string;title:string;narrative:string;events:string[];tags:string[];capture_ids:number[];key_capture_ids:number[];key_frames:ActivityFrame[];started_at:string;ended_at:string;source_count:number;model:string;generated_at:string};
 export type ScheduleSettings = {time:string;enabled:boolean;next_run:string};
+export type CleanupSettings = {enabled:boolean};
 export type StorageSettings = {
   root:string; directories:{screen:string;audio:string;video:string;clips:string};
   disk:{total:number;used:number;free:number}; candidates:StorageCandidate[]; restart_required?:boolean;
 };
 export type StorageCandidate = {root:string;disk:{total:number;used:number;free:number}};
 export type OllamaModel = {name:string;size:number;modified_at:string;capabilities:string[]};
-export type VideoSettings = {enabled:boolean;codec:"h264"|"hevc";capture_mode:"continuous"|"clips";replay_seconds:number;fps:number;geometry:string;segment_seconds:number;sample_frames:number;sample_geometry:string;retention_minutes:number;delete_after_description:boolean;pause_other_captures:boolean;analysis_profile:"fast"|"balanced"|"detailed"|"custom";scan_interval_seconds:number;max_keyframes:number;web_search_enabled:boolean;searxng_url:string;web_search_safety_limit:number;thinking_enabled:boolean;vision_model:string;text_model:string;marker_hotkey:string;marker_preroll_seconds:number;hud_enabled:boolean;hud_placement:"game"|"second"|"both";hud_corner:"top-left"|"top-right"|"bottom-left"|"bottom-right";hud_hotkey:string;hud_sound:boolean;patterns:string[];pattern_modes:Record<string,"continuous"|"clips">;pattern_fps:Record<string,number>;pattern_geometry:Record<string,string>;pattern_sources:Record<string,"game"|"window">;service?:{active:boolean}};
+export type VideoSettings = {enabled:boolean;codec:"h264"|"hevc";capture_mode:"continuous"|"clips";replay_seconds:number;fps:number;geometry:string;segment_seconds:number;sample_frames:number;sample_geometry:string;retention_minutes:number;delete_after_description:boolean;pause_other_captures:boolean;focus_grace_seconds:number;analysis_profile:"fast"|"balanced"|"detailed"|"custom";scan_interval_seconds:number;max_keyframes:number;web_search_enabled:boolean;searxng_url:string;web_search_safety_limit:number;thinking_enabled:boolean;vision_model:string;text_model:string;marker_hotkey:string;marker_preroll_seconds:number;hud_enabled:boolean;hud_placement:"game"|"second"|"both";hud_corner:"top-left"|"top-right"|"bottom-left"|"bottom-right";hud_hotkey:string;hud_sound:boolean;patterns:string[];pattern_modes:Record<string,"continuous"|"clips">;pattern_fps:Record<string,number>;pattern_geometry:Record<string,string>;pattern_sources:Record<string,"game"|"window">;service?:{active:boolean}};
 export type VideoMarker = {id:number;video_id:number;offset_seconds:number;title:string;ai_generated:number;created_at:string};
 export type WebSource = {title:string;url:string;snippet:string;query?:string};
 export type VideoChapter = {start?:number;end?:number;time:string;title:string;summary:string;events:string[];transcript:string;evidence?:string[];interpretation?:string;tags?:string[];app?:string;game?:string;audio_events?:AudioEvent[];web_findings?:string;web_sources?:WebSource[]};
@@ -140,6 +144,8 @@ export const api = {
   saveSettings: (settings: ScreenSettings) => request("/api/settings/screen", { method: "PUT", body: JSON.stringify(settings) }),
   schedule: () => request<ScheduleSettings>("/api/settings/schedule"),
   saveSchedule: (settings:{time:string;enabled:boolean}) => request<ScheduleSettings>("/api/settings/schedule", {method:"PUT",body:JSON.stringify(settings)}),
+  cleanupSettings: () => request<CleanupSettings>("/api/settings/cleanup"),
+  saveCleanupSettings: (settings:CleanupSettings) => request<CleanupSettings>("/api/settings/cleanup", {method:"PUT",body:JSON.stringify(settings)}),
   storage: () => request<StorageSettings>("/api/settings/storage"),
   saveStorage: (root:string) => request<StorageSettings>("/api/settings/storage", {method:"PUT",body:JSON.stringify({root})}),
   videoSettings: () => request<VideoSettings>("/api/settings/video"),
@@ -167,6 +173,7 @@ export const api = {
   renameVideoSpeaker: (videoId:number,speakerId:string,label:string) => request<{ok:boolean}>(`/api/videos/${videoId}/speakers/${speakerId}`,{method:"PUT",body:JSON.stringify({label})}),
   renameCaptureSpeaker: (captureId:number,speakerId:string,label:string) => request<{ok:boolean}>(`/api/captures/${captureId}/speakers/${speakerId}`,{method:"PUT",body:JSON.stringify({label})}),
   voiceIdentities: () => request<{items:VoiceIdentity[]}>("/api/voice-identities"),
+  deleteVoiceIdentity: (identityId:number) => request<{ok:boolean;id:number;label:string;updated:{audio:number;video:number}}>(`/api/voice-identities/${identityId}`,{method:"DELETE"}),
   preserveVideo: (path:string) => request<{ok:boolean;path:string}>("/api/videos/preserve",{method:"POST",body:JSON.stringify({path})}),
   testAudio: () => request<{ format: Record<string, string>; mean_db: string; max_db: string; silent: boolean }>("/api/test/audio?seconds=5", { method: "POST" }),
   testScreen: () => request<{ captured: boolean; privacy_skip: boolean; message?: string; paths?: string[] }>("/api/test/screen?save=true", { method: "POST" }),
@@ -179,13 +186,15 @@ export const api = {
   deleteCapture: (id:number) => request<{ok:boolean;id:number;file_deleted:boolean}>(`/api/captures/${id}`, {method:"DELETE"}),
   summary: (day: string) => request<{summary: DaySummary|null}>(`/api/summary/${day}`),
   pipelineStatus: () => request<{counts: Record<string,number>; running: boolean}>("/api/pipeline/status"),
-  pipelineQueue: (day?:string) => request<{items:QueueItem[];jobs:QueueJob[];total:number;running:boolean;phase:"idle"|"processing"|"summarizing";day:string}>(`/api/pipeline/queue?limit=300${day?`&day=${encodeURIComponent(day)}`:""}`),
+  pipelineQueue: (day?:string) => request<PipelineQueue>(`/api/pipeline/queue?limit=300${day?`&day=${encodeURIComponent(day)}`:""}`),
   unloadOllama: () => request<{ok:boolean;models:string[];unloaded:number}>("/api/ollama/unload",{method:"POST"}),
   cancelPipeline: (day?:string) => request<{ok:boolean}>(`/api/pipeline/cancel${day?`?day=${encodeURIComponent(day)}`:""}`, {method:"POST"}),
+  pausePipeline: () => request<{ok:boolean;paused:boolean;requeued:number}>("/api/pipeline/pause", {method:"POST"}),
+  resumePipeline: () => request<{ok:boolean;paused:boolean;already_running:boolean}>("/api/pipeline/resume", {method:"POST"}),
   cancelEntireQueue: () => request<{ok:boolean;cancelled:number}>("/api/pipeline/queue", {method:"DELETE"}),
   cancelQueueItem: (id:number) => request<{ok:boolean}>(`/api/pipeline/queue/${id}`, {method:"DELETE"}),
   runPipeline: () => request("/api/pipeline/run", {method:"POST", body:JSON.stringify({limit_audio:10,limit_screen:100,summarize:true})}),
-  enqueueUnprocessed: () => request<{ok:boolean;discovered:{audio:number;screen:number};queued:{audio:number;screen:number;total:number};note:string}>("/api/pipeline/enqueue-unprocessed", {method:"POST"}),
+  enqueueUnprocessed: () => request<{ok:boolean;discovered:{audio:number;screen:number};requeued:number;missing:number;queued:{audio:number;screen:number;video:number;session:number;total:number};note:string}>("/api/pipeline/enqueue-unprocessed", {method:"POST"}),
   generateSummary: (day:string) => request(`/api/summary/${day}/generate`, {method:"POST"}),
   timeline: (day:string) => request<{hours:HourSummary[];source_hours:{hour:string;count:number}[];running:boolean}>(`/api/timeline/${day}`),
   activities: (day:string) => request<{items:ActivitySession[];day:string;running:boolean}>(`/api/activities/${day}`),
@@ -194,7 +203,7 @@ export const api = {
   deleteFile: (file:RawFile) => request<{ok:boolean;id:number|null;file_deleted:boolean}>(`/api/files?kind=${file.kind}&path=${encodeURIComponent(file.path)}`, {method:"DELETE"}),
   deleteUnprocessedFiles: () => request<{ok:boolean;deleted:{screen:number;audio:number};deleted_total:number;skipped:{done:number;processing:number;recording:number}}>("/api/files/unprocessed/all", {method:"DELETE"}),
   setRetention: (kind:"screen"|"audio"|"video"|"session",id:number,preserved:boolean) => request<{ok:boolean;preserved:boolean}>(`/api/retention/${kind}/${id}`,{method:"PUT",body:JSON.stringify({preserved})}),
-  deleteUnkeptRawMedia: () => request<{ok:boolean;deleted:{screen:number;audio:number;video:number};deleted_total:number;deleted_bytes:number;skipped:{preserved:number;active:number}}>("/api/media/raw/unkept",{method:"DELETE"}),
+  deleteUnkeptRawMedia: () => request<{ok:boolean;deleted:{screen:number;audio:number};deleted_total:number;deleted_bytes:number;ready_days:string[];skipped:{preserved:number;not_ready:number;active:number;missing:number}}>("/api/media/raw/unkept",{method:"DELETE"}),
   processFile: (file:RawFile) => request<{status:string;title?:string}>("/api/pipeline/process-file", {method:"POST",body:JSON.stringify({kind:file.kind,path:file.path})}),
   testScreenSequence: (paths:string[]) => request<{ok:boolean;status:string;id:number}>("/api/test/screen-sequence", {method:"POST",body:JSON.stringify({paths})}),
   screenSequenceResult: (id:number) => request<{id:number;status:string;stage:string;progress:number;error:string;result:ScreenSequenceResult}>(`/api/test/screen-sequence/${id}`),

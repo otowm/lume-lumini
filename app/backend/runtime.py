@@ -47,6 +47,11 @@ def video_activity_flag() -> Path:
     return runtime_dir() / "lume-video-active"
 
 
+def pipeline_pause_flag() -> Path:
+    """Sinal persistente de que o worker principal não deve iniciar."""
+    return runtime_dir() / "lume-process-paused"
+
+
 @contextmanager
 def exclusive_lock(path: Path) -> Iterator[bool]:
     """Trava exclusiva e não-bloqueante sobre ``path``.

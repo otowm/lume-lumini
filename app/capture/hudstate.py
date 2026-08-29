@@ -113,6 +113,8 @@ class HudSnapshot:
     app: str = ""
     window: str = ""
     elapsed_seconds: float = 0.0
+    #: Tempo restante depois de sair do jogo antes de encerrar a captura.
+    focus_grace_remaining: float | None = None
 
     output_bytes: int = 0
     #: Há quanto tempo ``output_bytes`` não cresce.
@@ -213,6 +215,12 @@ def evaluate(snapshot: HudSnapshot) -> HudStatus:
             "travada", "fail", "Gravação travada",
             f"O arquivo não cresce há {snapshot.bytes_stalled_seconds:.0f}s."))
 
+    if snapshot.focus_grace_remaining is not None:
+        remaining = max(0, math.ceil(snapshot.focus_grace_remaining))
+        alerts.append(Alert(
+            "fora-do-jogo", "warn", f"Fora do jogo · para em {remaining}s",
+            "Volte ao jogo para manter a gravação ativa."))
+
     for meter in snapshot.meters:
         alerts.extend(_meter_alerts(meter))
 
@@ -221,6 +229,8 @@ def evaluate(snapshot: HudSnapshot) -> HudStatus:
     level = worst_level([alert.level for alert in alerts])
     if level == "fail":
         headline = alerts[0].text
+    elif snapshot.focus_grace_remaining is not None:
+        headline = f"Fora do jogo · para em {max(0, math.ceil(snapshot.focus_grace_remaining))}s"
     elif snapshot.buffering:
         headline = "Clipes armados"
     else:

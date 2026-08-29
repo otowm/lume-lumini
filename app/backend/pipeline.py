@@ -7,10 +7,12 @@ import hashlib
 import json
 import re
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,11 +20,14 @@ import wave
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy
+
 from ..capture.imagediff import compare_images
 from .audio_intelligence import analyze_video_audio
 from .database import connect, initialize
 from .main_paths import AUDIO_DIR, CONFIG_DIR, SCREEN_DIR, VIDEO_DIR, media_source_key, resolve_media_source
-from .runtime import exclusive_lock, runtime_dir
+from .retention import cleanup_processed_capture_media, cleanup_settings, mark_capture_cleanup_ready
+from .runtime import exclusive_lock, pipeline_pause_flag, runtime_dir
 
 DEFAULT_WHISPER_BIN = (
     Path.home() / "whisper.cpp" / "build" / "bin"
@@ -42,6 +47,11 @@ MAX_VISION_IMAGES_PER_REQUEST = 16
 
 def _run_hidden(*args, **kwargs):
     kwargs.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if kwargs.get("text"):
+        # O whisper imprime UTF-8; sem isto o Python decodifica pelo locale do
+        # Windows (cp1252) e estoura em qualquer acento da transcrição.
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     return subprocess.run(*args, **kwargs)
 
 
@@ -301,7 +311,20 @@ def adaptive_web_research(facts: str, user_context: str, config: dict[str, str],
 
 
 def normalized_transcript_text(value: str) -> str:
-    return " ".join(re.findall(r"[\wÀ-ÿ]+", value.casefold(), re.UNICODE))
+    folded = unicodedata.normalize("NFKD", value.casefold())
+    folded = "".join(character for character in folded if not unicodedata.combining(character))
+    return " ".join(re.findall(r"[a-z0-9]+", folded, re.UNICODE))
+
+
+# Créditos de legendagem que o Whisper.cpp costuma emitir sobre silêncio e
+# ruído ambiente. São assinaturas completas e estreitas de propósito: remover
+# qualquer frase que apenas contenha a palavra "legenda" apagaria fala real.
+_KNOWN_WHISPER_HALLUCINATIONS = {
+    "legenda por sonia ruberti",
+    "legendas por sonia ruberti",
+    "legendas pela comunidade amara org",
+    "subtitles by the amara org community",
+}
 
 
 def filter_hallucinated_segments(segments: list[dict]) -> list[dict]:
@@ -328,7 +351,8 @@ def filter_hallucinated_segments(segments: list[dict]) -> list[dict]:
         start = end
     return [
         item for index, item in enumerate(segments)
-        if keys[index] and keys[index] not in pathological and index not in rejected
+        if (keys[index] and keys[index] not in _KNOWN_WHISPER_HALLUCINATIONS
+            and keys[index] not in pathological and index not in rejected)
     ]
 
 
@@ -412,7 +436,264 @@ def compact_saved_capture(path: Path, capture_id: int) -> bool:
         return False
 
 
+#: Pico abaixo disto: a faixa não tem nada para transcrever. Conservador de
+#: propósito — fala baixa costuma passar de -40 dBFS, então só silêncio digital
+#: e ruído inaudível caem aqui.
+SILENT_TRACK_PEAK_DBFS = -55.0
+
+
+def track_peak_dbfs(path: Path) -> float:
+    """Pico de um WAV PCM 16 bits, em dBFS. ``-inf`` vira o piso -99."""
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getsampwidth() != 2:
+                return 0.0  # formato inesperado: não arrisca pular a faixa
+            frames = handle.readframes(handle.getnframes())
+    except (wave.Error, OSError):
+        return 0.0
+    if not frames:
+        return -99.0
+    samples = numpy.frombuffer(frames, dtype="<i2")
+    if not samples.size:
+        return -99.0
+    peak = int(numpy.abs(samples.astype(numpy.int32)).max())
+    return 20 * math.log10(peak / 32768) if peak > 0 else -99.0
+
+
+def track_is_silent(path: Path) -> bool:
+    """A faixa está muda o bastante para transcrevê-la ser desperdício?
+
+    Numa sessão sem Discord a faixa dele é zero absoluto do início ao fim, e
+    ainda assim custa o mesmo tempo de whisper que uma faixa cheia de fala —
+    cerca de um terço do custo do capítulo. Pior: sobre silêncio o whisper
+    alucina, e o resultado precisa ser filtrado depois de gerado.
+    """
+    return track_peak_dbfs(path) < SILENT_TRACK_PEAK_DBFS
+
+
+# --- transcrever só o que tem som ------------------------------------------
+#
+# Transcrever é a etapa mais cara da análise: o whisper roda a ~0,14x do tempo
+# real e é chamado uma vez por faixa. Numa gravação de jogo a maior parte do
+# tempo ninguém fala, e transcrever silêncio custa o mesmo que transcrever
+# conversa — além de produzir alucinação, que depois precisa ser filtrada.
+#
+# A saída é condensar: encontrar os trechos com som, colá-los num único WAV,
+# rodar o whisper **uma vez** sobre ele e devolver os tempos ao eixo original.
+# Uma chamada por trecho seria pior que o problema — cada invocação paga ~20 s
+# de carregamento do modelo.
+
+#: RMS por quadro abaixo disto conta como silêncio. Conservador: fala baixa de
+#: verdade fica bem acima, e perder fala é muito pior que economizar menos.
+SPEECH_THRESHOLD_DBFS = -50.0
+#: Janela de análise do envelope.
+SPEECH_FRAME_SECONDS = 0.03
+#: Folga antes e depois de cada trecho, para não cortar ataque nem cauda.
+SPEECH_PAD_SECONDS = 0.4
+#: Silêncio menor que isto não vale um corte: emenda os trechos vizinhos.
+#: Generoso de propósito — trechos maiores dão ao whisper contexto suficiente
+#: para acertar o tempo, e reduzem o número de arquivos por capítulo. A 4 s a
+#: economia medida cai de 88% para 83%, o que é barato pela precisão.
+SPEECH_MERGE_GAP_SECONDS = 4.0
+#: Trecho isolado menor que isto é estalo, não fala.
+SPEECH_MIN_REGION_SECONDS = 0.3
+#: Acima desta fração de áudio audível, condensar não compensa o risco: manda
+#: a faixa inteira, como antes.
+SPEECH_MAX_COVERAGE = 0.85
+
+
+def speech_regions(samples, rate: int, threshold_dbfs: float = SPEECH_THRESHOLD_DBFS,
+                   frame_seconds: float = SPEECH_FRAME_SECONDS,
+                   pad_seconds: float = SPEECH_PAD_SECONDS,
+                   merge_gap_seconds: float = SPEECH_MERGE_GAP_SECONDS,
+                   min_region_seconds: float = SPEECH_MIN_REGION_SECONDS) -> list[tuple[float, float]]:
+    """Trechos ``(início, fim)`` em segundos onde há som acima do limiar.
+
+    Função pura sobre as amostras: é o miolo da condensação e dá para verificar
+    com áudio sintético, sem whisper nem arquivo.
+    """
+    if rate <= 0 or samples is None or len(samples) == 0:
+        return []
+    frame = max(1, int(rate * frame_seconds))
+    usable = len(samples) // frame * frame
+    if usable == 0:
+        return []
+    blocks = samples[:usable].astype(numpy.float32).reshape(-1, frame)
+    rms = numpy.sqrt(numpy.square(blocks).mean(axis=1))
+    loud = rms >= 32768 * (10 ** (threshold_dbfs / 20))
+    duration = len(samples) / rate
+
+    regions: list[list[float]] = []
+    for index in numpy.flatnonzero(loud):
+        start = index * frame / rate
+        end = start + frame / rate
+        if regions and start - regions[-1][1] <= merge_gap_seconds:
+            regions[-1][1] = end
+        else:
+            regions.append([start, end])
+    if not regions:
+        return []
+
+    padded: list[list[float]] = []
+    for start, end in regions:
+        start, end = max(0.0, start - pad_seconds), min(duration, end + pad_seconds)
+        # A folga pode encostar um trecho no outro; emendar evita cortes de 20 ms.
+        if padded and start <= padded[-1][1]:
+            padded[-1][1] = max(padded[-1][1], end)
+        else:
+            padded.append([start, end])
+    return [(start, end) for start, end in padded if end - start >= min_region_seconds]
+
+
+def remap_to_source(segments: list[dict], regions: list[tuple[float, float]]) -> list[dict]:
+    """Devolve os tempos do áudio condensado para o eixo do áudio original.
+
+    Sem isto todo segmento sairia com o tempo errado — e errado em silêncio,
+    porque o texto continuaria correto e nada acusaria a falha.
+    """
+    if not regions:
+        return segments
+    marks: list[tuple[float, float, float]] = []
+    cursor = 0.0
+    for start, end in regions:
+        length = max(0.0, end - start)
+        marks.append((cursor, cursor + length, start))
+        cursor += length
+
+    def locate(value: float) -> float:
+        value = max(0.0, min(value, cursor))
+        for condensed_start, condensed_end, source_start in marks:
+            if value <= condensed_end:
+                return source_start + (value - condensed_start)
+        return marks[-1][2] + (marks[-1][1] - marks[-1][0])
+
+    remapped = []
+    for segment in segments:
+        start = locate(float(segment.get("start", 0)))
+        end = locate(float(segment.get("end", 0)))
+        # Um segmento que o whisper tenha esticado por cima de um corte volta
+        # com fim antes do início; manter a ordem importa mais que a duração.
+        remapped.append({**segment, "start": start, "end": max(start, end)})
+    return remapped
+
+
+#: Arquivos por chamada do whisper. Ele aceita vários e carrega o modelo uma vez
+#: só; o limite existe para a linha de comando não estourar no Windows.
+WHISPER_BATCH_FILES = 48
+
+#: O whisper processa em janelas de 30 s: um arquivo de 6 s custa quase o mesmo
+#: que um de 30 s. Por isso trechos vizinhos são colados até encher uma janela —
+#: senão a economia evapora em janelas quase vazias.
+SPEECH_CHUNK_AUDIBLE_SECONDS = 25.0
+#: Mas só trechos **vizinhos**: quanto mais tempo original um grupo cobre, mais
+#: um erro de tempo do whisper é amplificado ao voltar para o eixo real. Este
+#: teto segura a amplificação em poucas vezes.
+SPEECH_CHUNK_SPAN_SECONDS = 75.0
+
+
+def group_regions(regions: list[tuple[float, float]],
+                  audible_limit: float = SPEECH_CHUNK_AUDIBLE_SECONDS,
+                  span_limit: float = SPEECH_CHUNK_SPAN_SECONDS) -> list[list[tuple[float, float]]]:
+    """Agrupa trechos vizinhos em blocos que caibam numa janela do whisper.
+
+    Dois tetos: quanto de áudio audível cabe num bloco (para não desperdiçar
+    janela) e quanto do eixo original ele pode cobrir (para o erro de tempo não
+    ser amplificado na volta). Função pura, testável sem áudio.
+    """
+    groups: list[list[tuple[float, float]]] = []
+    for region in regions:
+        if groups:
+            current = groups[-1]
+            audible = sum(end - start for start, end in current) + (region[1] - region[0])
+            span = region[1] - current[0][0]
+            if audible <= audible_limit and span <= span_limit:
+                current.append(region)
+                continue
+        groups.append([region])
+    return groups
+
+
 def _whisper_segments(path: Path, output: Path, language: str) -> list[dict]:
+    """Transcreve um WAV mono 16 kHz, pulando os trechos sem som.
+
+    Cada trecho vira um arquivo próprio e todos vão numa mesma invocação do
+    whisper, que aceita vários e carrega o modelo uma vez. O caminho óbvio —
+    colar os trechos num WAV só — foi tentado e **não funciona**: com o áudio
+    comprimido 8x, um erro de tempo de 1,5 s do whisper vira 13 s no eixo
+    original. Um arquivo por trecho mantém o erro dentro do trecho, porque o
+    início dele é conhecido exatamente.
+    """
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getnchannels() != 1 or handle.getsampwidth() != 2:
+                return _whisper_run(path, output, language)
+            rate = handle.getframerate()
+            frames = handle.readframes(handle.getnframes())
+    except (wave.Error, OSError):
+        return _whisper_run(path, output, language)
+
+    samples = numpy.frombuffer(frames, dtype="<i2")
+    if not samples.size:
+        return _whisper_run(path, output, language)
+    duration = samples.size / rate
+    regions = speech_regions(samples, rate)
+    audible = sum(end - start for start, end in regions)
+    if not regions or audible >= duration * SPEECH_MAX_COVERAGE:
+        return _whisper_run(path, output, language)
+
+    groups = group_regions(regions)
+    directory = output.parent / f"{output.name}-falas"
+    directory.mkdir(parents=True, exist_ok=True)
+    blocks: list[tuple[Path, list[tuple[float, float]]]] = []
+    try:
+        for index, group in enumerate(groups):
+            piece = directory / f"t{index:04d}.wav"
+            with wave.open(str(piece), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(rate)
+                for start, end in group:
+                    out.writeframes(samples[int(start * rate):int(end * rate)].tobytes())
+            blocks.append((piece, group))
+        segments: list[dict] = []
+        for batch in range(0, len(blocks), WHISPER_BATCH_FILES):
+            current = blocks[batch:batch + WHISPER_BATCH_FILES]
+            _whisper_batch([piece for piece, _group in current], language)
+            for piece, group in current:
+                found = _read_whisper_json(piece.with_name(piece.name + ".json"))
+                segments.extend(remap_to_source(found, group))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    segments.sort(key=lambda item: item["start"])
+    return filter_hallucinated_segments(segments)
+
+
+def _whisper_batch(files: list[Path], language: str) -> None:
+    command = [str(WHISPER_BIN), "-m", str(WHISPER_MODEL), "-l", language, "-t", "4", "-oj",
+               *[str(item) for item in files]]
+    result = _run_hidden(command, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout)[-2000:])
+
+
+def _read_whisper_json(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    segments = []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for segment in payload.get("transcription", []):
+        offsets = segment.get("offsets") or {}
+        start_ms, end_ms = offsets.get("from"), offsets.get("to")
+        if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)):
+            segments.append({
+                "start": float(start_ms) / 1000,
+                "end": float(end_ms) / 1000,
+                "text": str(segment.get("text") or "").strip(),
+            })
+    return segments
+
+
+def _whisper_run(path: Path, output: Path, language: str) -> list[dict]:
     command = [
         str(WHISPER_BIN), "-m", str(WHISPER_MODEL), "-f", str(path),
         "-l", language, "-t", "4", "-otxt", "-oj", "-of", str(output),
@@ -420,20 +701,7 @@ def _whisper_segments(path: Path, output: Path, language: str) -> list[dict]:
     result = _run_hidden(command, capture_output=True, text=True, timeout=1800)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout)[-2000:])
-    segments = []
-    json_path = output.with_suffix(".json")
-    if json_path.is_file():
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-        for segment in payload.get("transcription", []):
-            offsets = segment.get("offsets") or {}
-            start_ms, end_ms = offsets.get("from"), offsets.get("to")
-            if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)):
-                segments.append({
-                    "start": float(start_ms) / 1000,
-                    "end": float(end_ms) / 1000,
-                    "text": str(segment.get("text") or "").strip(),
-                })
-    return filter_hallucinated_segments(segments)
+    return filter_hallucinated_segments(_read_whisper_json(output.with_suffix(".json")))
 
 
 def merge_source_transcripts(microphone: list[dict], system: list[dict]) -> list[dict]:
@@ -669,6 +937,7 @@ def analyze_video_chapter(path: Path, start: float, end: float, index: int, tota
     images = extract_adaptive_keyframes(path, start, end, scan_interval, keyframe_limit, geometry, directory, index)
     update_video_progress(path, f"Capítulo {index+1}/{total}: transcrevendo áudio", base_progress + 3)
     transcription = {"text": "", "segments": []}
+    labels = {"microphone": "Você", "discord": "Discord", "system": "Áudio do sistema"}
     if audio_stream_count(path) >= 4:
         source_tracks: dict[str, list[dict]] = {}
         for source, stream_index in (("microphone", 1), ("discord", 2), ("system", 3)):
@@ -680,12 +949,21 @@ def analyze_video_chapter(path: Path, start: float, end: float, index: int, tota
             ], capture_output=True, text=True, timeout=300)
             source_tracks[source] = []
             if extract.returncode == 0 and audio.is_file() and audio.stat().st_size > 44:
+                if track_is_silent(audio):
+                    update_video_progress(
+                        path, f"Capítulo {index+1}/{total}: faixa {labels[source]} está muda",
+                        base_progress + 3)
+                    continue
+                # Sem isto o estágio fica parado em "transcrevendo áudio" por
+                # vários minutos por faixa, o que se lê como travado.
+                update_video_progress(
+                    path, f"Capítulo {index+1}/{total}: transcrevendo {labels[source]}",
+                    base_progress + 3)
                 try:
                     source_tracks[source] = transcribe(audio, language="auto")["segments"]
                 except RuntimeError:
                     pass
         transcription["segments"] = merge_transcript_sources(source_tracks)
-        labels = {"microphone": "Você", "discord": "Discord", "system": "Áudio do sistema"}
         transcription["text"] = "\n".join(f"{labels[item['source']]}: {item['text']}" for item in transcription["segments"])
     else:
         audio = directory / f"chapter-{index:02d}.wav"
@@ -1621,6 +1899,14 @@ def process_pending(kind: str, limit: int) -> int:
             current = db.execute("SELECT status FROM captures WHERE id=?", (capture_id,)).fetchone()
         if not current or current["status"] not in ("pending", "error"):
             continue
+        if not path.is_file():
+            with connect() as db:
+                db.execute(
+                    """UPDATE captures SET status='skipped',error='arquivo bruto não existe mais',
+                       processed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending','error')""",
+                    (capture_id,),
+                )
+            continue
         if kind == "screen":
             key = monitor_key(path)
             with connect() as db:
@@ -1642,21 +1928,23 @@ def process_pending(kind: str, limit: int) -> int:
         if not claimed:
             continue
         try:
-            if not path.is_file():
-                raise RuntimeError("arquivo não existe mais")
+            # O tempo medido aqui alimenta a média por tipo mostrada na fila.
+            started = time.monotonic()
             result = transcribe(path) if kind == "audio" else describe_screen(path)
             if kind == "audio":
                 intelligence = analyze_video_audio(path, result.get("segments", []), known_voice_profiles())
                 result.update(segments=intelligence["segments"], speakers=intelligence["speakers"], audio_events=intelligence["events"])
+            elapsed_ms = round((time.monotonic() - started) * 1000)
             with connect() as db:
                 saved = db.execute(
                     """UPDATE captures SET status='done',title=?,text=?,app=?,tags_json=?,duration_seconds=?,
-                       model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',processed_at=CURRENT_TIMESTAMP
+                       model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',
+                       process_ms=?,processed_at=CURRENT_TIMESTAMP
                        WHERE id=? AND status='processing'""",
                     (result["title"], result["text"], result["app"], json.dumps(result.get("tags", []), ensure_ascii=False),
                      result.get("duration"), WHISPER_MODEL.name if kind == "audio" else vision_model(), sha256(path),
                      json.dumps(result.get("segments", []), ensure_ascii=False), json.dumps(result.get("speakers", []), ensure_ascii=False),
-                     json.dumps(result.get("audio_events", []), ensure_ascii=False), capture_id),
+                     json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, capture_id),
                 )
                 if kind == "audio" and saved.rowcount:
                     save_speaker_observations(db, "audio", capture_id, intelligence.get("speaker_embeddings", {}))
@@ -1685,18 +1973,21 @@ def process_specific(path: Path) -> dict:
             return {"status": "already-done", "id": row["id"]}
         db.execute("UPDATE captures SET status='processing',error='' WHERE id=?", (row["id"],))
     try:
+        started = time.monotonic()
         result = transcribe(path) if kind == "audio" else describe_screen(path)
         if kind == "audio":
             intelligence = analyze_video_audio(path, result.get("segments", []), known_voice_profiles())
             result.update(segments=intelligence["segments"], speakers=intelligence["speakers"], audio_events=intelligence["events"])
+        elapsed_ms = round((time.monotonic() - started) * 1000)
         with connect() as db:
             db.execute(
                 """UPDATE captures SET status='done',title=?,text=?,app=?,tags_json=?,duration_seconds=?,
-                   model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',processed_at=CURRENT_TIMESTAMP WHERE id=?""",
+                   model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',
+                   process_ms=?,processed_at=CURRENT_TIMESTAMP WHERE id=?""",
                 (result["title"], result["text"], result["app"], json.dumps(result.get("tags", []), ensure_ascii=False),
                  result.get("duration"), WHISPER_MODEL.name if kind == "audio" else vision_model(), sha256(path),
                  json.dumps(result.get("segments", []), ensure_ascii=False), json.dumps(result.get("speakers", []), ensure_ascii=False),
-                 json.dumps(result.get("audio_events", []), ensure_ascii=False), row["id"]),
+                 json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, row["id"]),
             )
             if kind == "audio":
                 save_speaker_observations(db, "audio", row["id"], intelligence.get("speaker_embeddings", {}))
@@ -1823,18 +2114,65 @@ def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool) -> dict:
     with connect() as db:
         db.execute("UPDATE captures SET status='pending',error='interrompido; reagendado' WHERE status='processing'")
         db.execute("UPDATE pipeline_runs SET status='interrupted',finished_at=CURRENT_TIMESTAMP,error='execução anterior interrompida' WHERE status='running'")
-    with connect() as db:
+        capture_days = {
+            row["day"] for row in db.execute(
+                """SELECT DISTINCT substr(captured_at,1,10) day FROM captures
+                   WHERE status IN ('pending','error')"""
+            ) if row["day"]
+        }
+        video_jobs = [dict(row) for row in db.execute(
+            """SELECT 'session' kind,s.id id,min(v.captured_at) captured_at,'' source_path
+               FROM video_sessions s JOIN video_segments v ON v.session_id=s.id
+               WHERE s.status='queued' GROUP BY s.id
+               UNION ALL
+               SELECT 'video' kind,id,captured_at,source_path FROM video_segments
+               WHERE session_id IS NULL AND status='queued'
+               ORDER BY captured_at"""
+        )]
         run_id = db.execute("INSERT INTO pipeline_runs(status) VALUES('running')").lastrowid
     try:
+        videos = 0
+        sessions = 0
+        video_errors = 0
+        video_days = {job["captured_at"][:10] for job in video_jobs if job.get("captured_at")}
+        # Vídeos e sessões entram primeiro porque a consolidação diária os
+        # consulta como fontes. O lock global garante uso sequencial da GPU.
+        for job in video_jobs:
+            try:
+                if job["kind"] == "session":
+                    process_video_session(int(job["id"]))
+                    sessions += 1
+                else:
+                    process_video_specific(resolve_media_source(job["source_path"]))
+                    videos += 1
+            except Exception as exc:
+                video_errors += 1
+                print(f"[pipeline] falha em {job['kind']} {job['id']}: {exc}", file=sys.stderr)
         audio = process_pending("audio", limit_audio)
         screen = process_pending("screen", limit_screen)
         today = datetime.now().astimezone().date().isoformat()
-        activities = generate_visual_activities(today) if summarize else 0
-        hourly = generate_hourly_summaries(today) if summarize else 0
-        summary = generate_summary(today) if summarize else False
+        summary_days = sorted(capture_days | video_days | {today}) if summarize else []
+        activities = 0
+        hourly = 0
+        summarized_days = []
+        for day in summary_days:
+            activities += generate_visual_activities(day)
+            hourly += generate_hourly_summaries(day)
+            if generate_summary(day):
+                summarized_days.append(day)
+                mark_capture_cleanup_ready(day)
         with connect() as db:
             db.execute("UPDATE pipeline_runs SET status='done',finished_at=CURRENT_TIMESTAMP,audio_count=?,screen_count=? WHERE id=?", (audio, screen, run_id))
-        return {"discovered": discovered, "audio": audio, "screen": screen, "activities": activities, "hourly": hourly, "summary": summary}
+        cleanup = None
+        if cleanup_settings()["enabled"]:
+            try:
+                cleanup = cleanup_processed_capture_media()
+            except Exception as exc:
+                print(f"[cleanup] limpeza automática falhou sem afetar o processamento: {exc}", file=sys.stderr)
+        return {"discovered": discovered, "audio": audio, "screen": screen, "videos": videos,
+                "sessions": sessions, "video_errors": video_errors, "activities": activities,
+                "hourly": hourly, "summary": bool(summarized_days), "summarized_days": summarized_days,
+                "cleanup": cleanup}
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE pipeline_runs SET status='error',finished_at=CURRENT_TIMESTAMP,error=? WHERE id=?", (str(exc)[-2000:], run_id))
@@ -1927,11 +2265,21 @@ def main() -> None:
         elif args.hourly_only:
             result = {"activities": generate_visual_activities(args.hourly_only, force=True), "hourly": generate_hourly_summaries(args.hourly_only, force=True), "day": args.hourly_only}
         elif args.summary_only:
-            result = {"summary": generate_summary(args.summary_only), "day": args.summary_only}
+            activities = generate_visual_activities(args.summary_only)
+            hourly = generate_hourly_summaries(args.summary_only)
+            summary = generate_summary(args.summary_only)
+            if summary:
+                mark_capture_cleanup_ready(args.summary_only)
+            cleanup = cleanup_processed_capture_media() if summary and cleanup_settings()["enabled"] else None
+            result = {"summary": summary, "activities": activities, "hourly": hourly,
+                      "cleanup": cleanup, "day": args.summary_only}
         elif args.file:
             result = process_specific(args.file.resolve())
         else:
-            result = discover() if args.discover_only else run_pipeline(args.limit_audio, args.limit_screen, not args.no_summary)
+            result = discover() if args.discover_only else (
+                {"status": "paused"} if pipeline_pause_flag().is_file()
+                else run_pipeline(args.limit_audio, args.limit_screen, not args.no_summary)
+            )
         print(json.dumps(result, ensure_ascii=False))
 
 

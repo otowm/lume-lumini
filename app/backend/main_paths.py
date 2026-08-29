@@ -32,6 +32,7 @@ def _config_dir() -> Path:
 
 CONFIG_DIR = _config_dir()
 STORAGE_CONFIG = CONFIG_DIR / "storage.conf"
+CLEANUP_CONFIG = CONFIG_DIR / "cleanup.conf"
 
 
 def configured_storage_root() -> Path:

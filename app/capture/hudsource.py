@@ -39,7 +39,7 @@ from array import array
 from datetime import datetime
 from pathlib import Path
 
-from .base import read_shell_config
+from .base import read_shell_config, stable_app_label
 from .hudstate import SILENCE_DB, SOUND_FLOOR_DB, HudSnapshot, Meter, to_db
 from ..backend.main_paths import CONFIG_DIR, MEDIA_ROOT, VIDEO_DIR
 from ..backend.runtime import runtime_dir, video_activity_flag
@@ -340,6 +340,7 @@ class WindowsHudCollector(HudCollector):
             app=_app_label(flag.get("window", "")),
             window=flag.get("window", ""),
             elapsed_seconds=_elapsed(flag),
+            focus_grace_remaining=_focus_grace_remaining(flag),
             output_bytes=written,
             bytes_stalled_seconds=stalled,
             video_hooked=hooked,
@@ -563,13 +564,14 @@ def _elapsed(flag: dict) -> float:
 
 def _app_label(window: str) -> str:
     """Nome curto do app a partir de ``"<título> | <executável>"``."""
-    if not window:
-        return ""
-    title, separator, executable = window.rpartition(" | ")
-    if not separator:
-        return window.strip()
-    name = title.strip() or executable.strip()
-    return name.removesuffix(".exe")
+    return stable_app_label(window)
+
+
+def _focus_grace_remaining(flag: dict) -> float | None:
+    deadline = flag.get("focus_grace_deadline")
+    if not isinstance(deadline, (int, float)) or deadline <= 0:
+        return None
+    return max(0.0, float(deadline) - time.time())
 
 
 #: Nome que ``bin/game-video-loop`` dá ao segmento: ``%F_%H-%M-%S_<monitor>.mp4``.

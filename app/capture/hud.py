@@ -46,9 +46,6 @@ from .hudsource import VIDEO_CONFIG, get_collector
 
 IS_WINDOWS = os.name == "nt"
 
-#: Quanto tempo a HUD fica expandida depois de uma mudança de estado.
-EXPAND_SECONDS = 6.0
-
 # Redesenhar custa ~4 ms (o Canvas do tkinter recria os itens a cada volta), o
 # que a 60 quadros por segundo daria uns 20% de um núcleo — caro demais para
 # uma barra de estado rodando durante um jogo. Daí três cadências:
@@ -602,17 +599,18 @@ class HudPanel:
 class Hud:
     """Laço da interface: coleta, avalia, desenha e avisa."""
 
+    DISPLAY_MODES = ("compact", "expanded", "hidden")
+
     def __init__(self, settings: HudSettings, collector=None, demo=None) -> None:
         self.settings = settings
         self.collector = collector
         self.demo = demo
-        self.pinned = False
+        self.display_mode = "compact"
         self.stopping = False
         self._panels: list[HudPanel] = []
         self._targets: list[int] = []
         self._levels: dict[str, float] = {}
         self._last_draw = time.monotonic()
-        self._expanded_until = 0.0
         self._signature: tuple | None = None
         self._sounded_at: dict[str, float] = {}
         self._placement_checked_at = 0.0
@@ -638,10 +636,10 @@ class Hud:
 
     @staticmethod
     def _signature_of(snapshot: HudSnapshot, status: HudStatus) -> tuple:
-        """O que caracteriza uma *mudança de estado* digna de expandir a HUD.
+        """O que caracteriza uma mudança que precisa ser anunciada.
 
         De propósito não inclui os medidores nem o tempo: eles mudam sempre, e a
-        HUD ficaria permanentemente aberta.
+        HUD repetiria o mesmo aviso continuamente.
         """
         return (status.level, snapshot.recording, snapshot.buffering, snapshot.app,
                 tuple(alert.key for alert in status.alerts))
@@ -684,6 +682,20 @@ class Hud:
             _alert_sound()
             log(f"[hud] {alert.text}: {alert.detail}")
             break  # um aviso por vez; uma sirene de falhas seria pior que nada
+
+    def _should_show(self, snapshot: HudSnapshot, status: HudStatus,
+                     event: tuple[str, str, EventFrame] | None) -> bool:
+        if self.display_mode == "hidden":
+            # Oculto não significa surdo: qualquer aviso e toda confirmação
+            # pontual ainda precisam atravessar o modo discreto.
+            return bool(status.alerts) or event is not None
+        return (snapshot.active or self.display_mode == "expanded"
+                or bool(status.failing) or event is not None)
+
+    def _should_expand(self, status: HudStatus) -> bool:
+        return (self.display_mode == "expanded"
+                or (self.display_mode in {"compact", "hidden"}
+                    and bool(status.alerts)))
 
     # --- painéis ----------------------------------------------------------
     def _sync_panels(self, root) -> None:
@@ -728,18 +740,16 @@ class Hud:
             signature = self._signature_of(snapshot, status)
             if signature != self._signature:
                 self._signature = signature
-                self._expanded_until = time.monotonic() + EXPAND_SECONDS
                 self._announce(status)
 
-            visible = snapshot.active or self.pinned or bool(status.failing) or event is not None
+            visible = self._should_show(snapshot, status, event)
             if visible:
                 self._sync_panels(root)
                 # O evento **não** entra aqui de propósito: confirmar um
                 # marcador não é motivo para abrir o painel inteiro por cima do
                 # jogo. Ele aparece no formato que estiver valendo — no
                 # compacto, trocando a linha; no expandido, na faixa de baixo.
-                expanded = (self.pinned or status.level == "fail"
-                            or time.monotonic() < self._expanded_until)
+                expanded = self._should_expand(status)
                 for panel in self._panels:
                     panel.show()
                     panel.render(snapshot, status, self._levels, expanded, event)
@@ -755,8 +765,10 @@ class Hud:
         root.after(delay, self._tick, root)
 
     def toggle(self) -> None:
-        self.pinned = not self.pinned
-        log(f"[hud] {'fixada' if self.pinned else 'liberada'}")
+        current = self.DISPLAY_MODES.index(self.display_mode)
+        self.display_mode = self.DISPLAY_MODES[(current + 1) % len(self.DISPLAY_MODES)]
+        labels = {"compact": "compacto", "expanded": "expandido", "hidden": "oculto"}
+        log(f"[hud] modo {labels[self.display_mode]}")
 
     def stop(self, _signum=None, _frame=None) -> None:
         self.stopping = True

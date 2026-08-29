@@ -782,6 +782,14 @@ class HudStateTests(unittest.TestCase):
         status = evaluate(self._recording(meters=[mic]))
         self.assertEqual([alert.level for alert in status.alerts], ["warn"])
 
+    def test_alt_tab_countdown_is_a_visible_warning(self):
+        from app.capture.hudstate import evaluate
+
+        status = evaluate(self._recording(focus_grace_remaining=12.2))
+        self.assertEqual(status.level, "warn")
+        self.assertEqual(status.headline, "Fora do jogo · para em 13s")
+        self.assertIn("fora-do-jogo", {alert.key for alert in status.alerts})
+
     def test_silent_optional_sources_stay_quiet(self):
         # Discord fechado é o caso normal de quem joga sozinho.
         from app.capture.hudstate import Meter
@@ -871,6 +879,54 @@ class HudPlacementTests(unittest.TestCase):
             self.assertLessEqual(y + 140, self.SECOND.y + self.SECOND.height, corner)
 
 
+class HudDisplayModeTests(unittest.TestCase):
+    def _hud(self):
+        from app.capture.hud import Hud
+
+        return Hud(SimpleNamespace(sound=False), demo=lambda: None)
+
+    def test_hotkey_cycles_compact_expanded_hidden(self):
+        hud = self._hud()
+        self.assertEqual(hud.display_mode, "compact")
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "expanded")
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "hidden")
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "compact")
+
+    def test_hidden_mode_only_surfaces_alerts_and_events(self):
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        hud.display_mode = "hidden"
+        snapshot = HudSnapshot(recording=True)
+        healthy = HudStatus("ok", "Gravando")
+        warning = HudStatus("warn", "Gravando", [Alert("mic", "warn", "Microfone")])
+        event = ("marker", "Marcador", SimpleNamespace())
+
+        self.assertFalse(hud._should_show(snapshot, healthy, None))
+        self.assertTrue(hud._should_show(snapshot, warning, None))
+        self.assertTrue(hud._should_show(snapshot, healthy, event))
+        self.assertTrue(hud._should_expand(warning))
+
+    def test_compact_mode_stays_compact_without_an_alert(self):
+        from app.capture.hudstate import HudStatus
+
+        hud = self._hud()
+        self.assertFalse(hud._should_expand(HudStatus("ok", "Clipes armados")))
+
+    def test_compact_mode_expands_only_while_an_alert_exists(self):
+        from app.capture.hudstate import Alert, HudStatus
+
+        hud = self._hud()
+        warning = HudStatus("warn", "Microfone sem sinal",
+                            [Alert("mic", "warn", "Microfone sem sinal")])
+
+        self.assertTrue(hud._should_expand(warning))
+        self.assertFalse(hud._should_expand(HudStatus("ok", "Clipes armados")))
+
+
 class VideoActivityFlagTests(unittest.TestCase):
     """O sinal de atividade tem um significado só, e ele é caro de errar.
 
@@ -919,7 +975,43 @@ class VideoActivityFlagTests(unittest.TestCase):
             first = json.loads(loop.activity_flag.read_text(encoding="utf-8"))["event"]
             loop._note_event("marker", "Marcador 1")
             second = json.loads(loop.activity_flag.read_text(encoding="utf-8"))["event"]
-            self.assertEqual(second["seq"], first["seq"] + 1)
+        self.assertEqual(second["seq"], first["seq"] + 1)
+
+    def test_focus_loss_publishes_a_deadline_and_focus_cancels_it(self):
+        from app.capture.winvideo import VideoLoop
+
+        loop = object.__new__(VideoLoop)
+        loop.settings = SimpleNamespace(focus_grace=20)
+        loop.focus_grace_deadline = 0.0
+        with unittest.mock.patch("app.capture.winvideo.time.monotonic", side_effect=[100.0, 105.0]), \
+             unittest.mock.patch("app.capture.winvideo.time.time", return_value=1_000.0):
+            lost_at, expired = loop._update_focus_grace(False, -1.0)
+            self.assertFalse(expired)
+            self.assertEqual(loop.focus_grace_deadline, 1020.0)
+            _lost_at, expired = loop._update_focus_grace(False, lost_at)
+            self.assertFalse(expired)
+        reset_at, expired = loop._update_focus_grace(True, lost_at)
+        self.assertEqual(reset_at, -1.0)
+        self.assertFalse(expired)
+        self.assertEqual(loop.focus_grace_deadline, 0.0)
+
+
+class StableAppLabelTests(unittest.TestCase):
+    def test_osu_song_title_collapses_to_executable_name(self):
+        from app.capture.base import stable_app_label
+
+        self.assertEqual(
+            stable_app_label("osu! - dj TAKA - quaver [Reform's Extra] | osu!.exe"),
+            "osu!",
+        )
+
+    def test_friendly_title_survives_when_it_differs_from_executable(self):
+        from app.capture.base import stable_app_label
+
+        self.assertEqual(
+            stable_app_label("Counter-Strike 2 | cs2.exe"),
+            "Counter-Strike 2",
+        )
 
 
 class HudEventAnimationTests(unittest.TestCase):

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS captures (
   error TEXT NOT NULL DEFAULT '',
   sha256 TEXT NOT NULL DEFAULT '',
   preserved INTEGER NOT NULL DEFAULT 0,
+  process_ms INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   processed_at TEXT
 );
@@ -94,6 +95,12 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   audio_count INTEGER NOT NULL DEFAULT 0,
   screen_count INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS capture_cleanup_ready (
+  day TEXT PRIMARY KEY,
+  capture_count INTEGER NOT NULL,
+  latest_processed_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS screen_sequence_jobs (
   id INTEGER PRIMARY KEY,
@@ -279,6 +286,8 @@ def initialize() -> None:
         capture_columns = {row["name"] for row in db.execute("PRAGMA table_info(captures)")}
         if "preserved" not in capture_columns:
             db.execute("ALTER TABLE captures ADD COLUMN preserved INTEGER NOT NULL DEFAULT 0")
+        if "process_ms" not in capture_columns:
+            db.execute("ALTER TABLE captures ADD COLUMN process_ms INTEGER")
         for name in ("transcript_segments_json", "speakers_json", "audio_events_json"):
             if name not in capture_columns:
                 db.execute(f"ALTER TABLE captures ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'")
