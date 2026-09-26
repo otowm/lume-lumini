@@ -84,6 +84,16 @@ class MarkerHotkey:
             return modifiers, 0x70 + int(key[1:]) - 1
         if len(key) == 1 and (key.isalpha() or key.isdigit()):
             return modifiers, ord(key)
+        if key in {"[", "]"}:
+            # VkKeyScan usa o layout ativo (inclusive ABNT2), não a posição US.
+            scan = ctypes.windll.user32.VkKeyScanW(ord(key))
+            if scan & 0xffff == 0xffff:
+                return None
+            layout_modifiers = (scan >> 8) & 0xff
+            modifiers |= ((0x4 if layout_modifiers & 1 else 0)
+                          | (0x2 if layout_modifiers & 2 else 0)
+                          | (0x1 if layout_modifiers & 4 else 0))
+            return modifiers, scan & 0xff
         return None
 
     def start(self) -> None:

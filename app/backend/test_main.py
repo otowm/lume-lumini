@@ -2300,6 +2300,11 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
     simplesmente desaparece no primeiro save, e o defeito só aparece depois.
     """
 
+    def test_detected_control_bracket_survives_saving(self):
+        saved = self._round_trip("VIDEO_MARKER_HOTKEY='Ctrl+['\nVIDEO_MARKER_KEY_CODE=BracketRight\n")
+        self.assertEqual(saved["marker_hotkey"], "Ctrl+[")
+        self.assertEqual(saved["marker_key_code"], "BracketRight")
+
     def _round_trip(self, initial: str) -> dict:
         from fastapi import BackgroundTasks
 

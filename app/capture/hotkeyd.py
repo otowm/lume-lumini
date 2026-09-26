@@ -68,7 +68,17 @@ KEY_CODES: dict[str, int] = {
     **{letter: code for letter, code in zip("ASDFGHJKL", range(30, 39))},
     **{letter: code for letter, code in zip("ZXCVBNM", range(44, 51))},
     **{digit: code for digit, code in zip("1234567890", range(2, 12))},
+    "[": 26, "]": 27,
 }
+
+MODIFIER_KEYS = {29: "CTRL", 97: "CTRL", 42: "SHIFT", 54: "SHIFT",
+                 56: "ALT", 100: "ALT", 125: "WIN", 126: "WIN"}
+MODIFIER_NAMES = {"CTRL": "CTRL", "CONTROL": "CTRL", "SHIFT": "SHIFT",
+                  "ALT": "ALT", "WIN": "WIN", "META": "WIN", "SUPER": "WIN"}
+PHYSICAL_KEYS = {**{f"Key{k}": v for k, v in KEY_CODES.items() if len(k) == 1 and k.isalpha()},
+                 **{f"Digit{k}": v for k, v in KEY_CODES.items() if k.isdigit()},
+                 **{k: v for k, v in KEY_CODES.items() if k.startswith("F")},
+                 "BracketLeft": 26, "BracketRight": 27}
 
 
 def log(message: str) -> None:
@@ -86,19 +96,14 @@ def daemon_flag() -> Path:
     return runtime_dir() / "lume-hotkey-daemon"
 
 
-def parse_key(spec: str) -> int | None:
-    """Código evdev da tecla de um atalho como ``F8``.
-
-    Modificadores são ignorados de propósito: o atalho de gravação é uma tecla
-    só, e aceitar ``Ctrl+F8`` aqui daria a impressão falsa de que a combinação
-    inteira está sendo observada.
-    """
+def parse_key(spec: str, physical_code: str = "") -> int | None:
+    """Tecla evdev; a detecção no navegador preserva a posição em layouts ABNT."""
     key = ""
     for part in (spec or "").replace("-", "+").split("+"):
         token = part.strip().upper()
         if token and token not in {"ALT", "CTRL", "CONTROL", "SHIFT", "WIN", "META", "SUPER"}:
             key = token
-    return KEY_CODES.get(key)
+    return PHYSICAL_KEYS.get(physical_code) or KEY_CODES.get(key)
 
 
 class HoldDetector:
@@ -165,6 +170,38 @@ def keyboard_devices() -> list[str]:
     return sorted(seen)
 
 
+class ShortcutDetector(HoldDetector):
+    """Reconhece a combinação inteira antes de iniciar um toque ou segurada."""
+
+    def __init__(self, spec: str, hold_seconds: float = DEFAULT_HOLD_SECONDS,
+                 physical_code: str = "") -> None:
+        super().__init__(hold_seconds)
+        self.code = parse_key(spec, physical_code)
+        self.modifiers = {MODIFIER_NAMES[part.strip().upper()]
+                          for part in spec.replace("-", "+").split("+")
+                          if part.strip().upper() in MODIFIER_NAMES}
+        self.pressed: dict[int, set[int]] = {}
+
+    def feed_key(self, key: int, value: int, now: float, device: int = 0) -> str | None:
+        pressed = self.pressed.setdefault(device, set())
+        if value == 0:
+            pressed.discard(key)
+        else:
+            pressed.add(key)
+        modifiers = {MODIFIER_KEYS[k] for keys in self.pressed.values()
+                     for k in keys if k in MODIFIER_KEYS}
+        if modifiers != self.modifiers:
+            self._pressed_at = None
+            self._fired = False
+            return None
+        return self.feed(value, now) if key == self.code else None
+
+    def forget_device(self, device: int) -> None:
+        self.pressed.pop(device, None)
+        self._pressed_at = None
+        self._fired = False
+
+
 class HotkeyDaemon:
     def __init__(self, hold_seconds: float | None = None, key_spec: str | None = None) -> None:
         values = read_shell_config(VIDEO_CONFIG)
@@ -175,7 +212,8 @@ class HotkeyDaemon:
             except (TypeError, ValueError):
                 hold_seconds = DEFAULT_HOLD_SECONDS
         self.hold_seconds = hold_seconds if hold_seconds > 0 else DEFAULT_HOLD_SECONDS
-        self.detector = HoldDetector(self.hold_seconds)
+        physical_code = "" if key_spec else values.get("VIDEO_MARKER_KEY_CODE", "")
+        self.detector = ShortcutDetector(self.key_spec, self.hold_seconds, physical_code)
         self.stopping = False
         self._handles: dict[int, tuple[str, object]] = {}
         self._pid: int | None = None
@@ -228,6 +266,7 @@ class HotkeyDaemon:
             if path not in wanted:
                 handle.close()  # type: ignore[union-attr]
                 del self._handles[fd]
+                self.detector.forget_device(fd)
         open_paths = {path for path, _handle in self._handles.values()}
         for path in wanted:
             if path in open_paths:
@@ -248,14 +287,15 @@ class HotkeyDaemon:
         except OSError:
             handle.close()  # type: ignore[union-attr]
             del self._handles[fd]
+            self.detector.forget_device(fd)
             return
         if not data:
             return
         for offset in range(0, len(data) - _EVENT_SIZE + 1, _EVENT_SIZE):
             _sec, _usec, kind, key, value = struct.unpack_from(_EVENT_FORMAT, data, offset)
-            if kind != _EV_KEY or key != code:
+            if kind != _EV_KEY:
                 continue
-            action = self.detector.feed(value, time.monotonic())
+            action = self.detector.feed_key(key, value, time.monotonic(), fd)
             if action:
                 self._deliver(action)
 
@@ -263,7 +303,7 @@ class HotkeyDaemon:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
 
-        code = parse_key(self.key_spec)
+        code = self.detector.code
         if code is None:
             log(f"atalho sem tecla reconhecida: {self.key_spec!r}")
             return 2

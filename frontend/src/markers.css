@@ -104,3 +104,7 @@
 .video-selected .video-selection-indicator{background:var(--accent);color:var(--bg)}
 .video-selected .video-selection-indicator b{background:var(--bg);color:var(--accent);border-color:var(--bg)}
 .video-result{max-width:1040px;margin:0 auto 14px}
+.hotkey-field { display: grid; gap: 8px; }
+.hotkey-field label { display: grid; gap: 8px; }
+.hotkey-field button { justify-self: start; }
+.hotkey-field small { color: var(--muted); }

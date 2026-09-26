@@ -65,7 +65,7 @@ ALLOWED_CONFIG = {
     "VIDEO_SAMPLE_FRAMES","VIDEO_SAMPLE_GEOMETRY","VIDEO_RETENTION_MINUTES","DELETE_AFTER_DESCRIPTION","PAUSE_OTHER_CAPTURES",
     "VIDEO_ANALYSIS_PROFILE","VIDEO_SCAN_INTERVAL_SECONDS","VIDEO_MAX_KEYFRAMES","VIDEO_FOCUS_GRACE_SECONDS",
     "VIDEO_WEB_SEARCH_ENABLED","SEARXNG_URL","VIDEO_WEB_SEARCH_SAFETY_LIMIT","AI_THINKING_ENABLED",
-    "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
+    "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_KEY_CODE","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
     "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND",
     "VIDEO_RESOLVE_FPS","VIDEO_RESOLVE_START_TIMECODE",
 }
@@ -488,7 +488,8 @@ class VideoSettings(BaseModel):
     thinking_enabled: bool = False
     vision_model: str = Field(default="qwen3-vl-ctx:latest", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$")
     text_model: str = Field(default="qwen3.5:9b", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$")
-    marker_hotkey: str = Field(default="F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
+    marker_hotkey: str = Field(default="F8", pattern=r"^[A-Za-z0-9+_\[\]-]{1,40}$")
+    marker_key_code: str = Field(default="", pattern=r"^(Key[A-Z]|Digit[0-9]|F([1-9]|1[0-2])|BracketLeft|BracketRight)?$")
     # Tempo com o atalho abaixado que abre uma gravação longa no modo clipes.
     # Abaixo de 0,2s qualquer toque viraria gravação; acima de 3s ninguém
     # segura tanto sem achar que o atalho não pegou.
@@ -753,7 +754,7 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_key_code":config.get("VIDEO_MARKER_KEY_CODE",""),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
 
 
 @app.get("/api/ollama/models")
@@ -816,6 +817,7 @@ AI_THINKING_ENABLED={'true' if settings.thinking_enabled else 'false'}
 LUME_VISION_MODEL={shlex.quote(settings.vision_model)}
 LUME_TEXT_MODEL={shlex.quote(settings.text_model)}
 VIDEO_MARKER_HOTKEY={shlex.quote(settings.marker_hotkey)}
+VIDEO_MARKER_KEY_CODE={shlex.quote(settings.marker_key_code)}
 VIDEO_HOTKEY_HOLD_SECONDS={settings.hotkey_hold_seconds}
 VIDEO_MARKER_PREROLL_SECONDS={settings.marker_preroll_seconds}
 VIDEO_HUD_ENABLED={'true' if settings.hud_enabled else 'false'}

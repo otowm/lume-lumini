@@ -70,6 +70,11 @@ gravaria ou não.
 **3. Jogue.** Uma faixa fina aparece no canto da tela (a HUD) mostrando que está
 gravando, e cada ação toca um som de confirmação.
 
+Para trocar o F8, abra **Ajustes → Vídeo seletivo → Detectar atalho** e
+pressione a combinação desejada, por exemplo **Ctrl + [**. Depois clique em
+**Salvar configurações**. Use a detecção para registrar a posição correta da
+tecla no seu teclado; **Esc** cancela a detecção.
+
 | No modo Clipes | Faz |
 |---|---|
 | **Tocar F8** | salva o último minuto |

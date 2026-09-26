@@ -306,7 +306,7 @@ class HoldDetectorTests(unittest.TestCase):
         from app.capture import hotkeyd
 
         daemon = object.__new__(hotkeyd.HotkeyDaemon)
-        daemon.detector = hotkeyd.HoldDetector(hold_seconds=0.0)
+        daemon.detector = hotkeyd.ShortcutDetector("F8", hold_seconds=0.0)
         delivered = []
         daemon._deliver = delivered.append
 

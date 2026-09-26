@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "app/backend/main.py": {
-    "mtime": 1790441897.2230074,
-    "ast_hash": "7d804bfd72f575a25c51c174d40ee274",
+    "mtime": 1790445889.1182477,
+    "ast_hash": "35defc6e88dc2961a77b762e75da75ee",
     "semantic_hash": ""
   },
   "app/backend/main_paths.py": {
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1790440156.0527637,
-    "ast_hash": "a02a03d52ff057a5aefe7d482514157c",
+    "mtime": 1790445944.601312,
+    "ast_hash": "741c2f516ae4effbfd408c20d63b024c",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
@@ -60,18 +60,18 @@
     "semantic_hash": ""
   },
   "frontend/package.json": {
-    "mtime": 1784607094.1515768,
-    "ast_hash": "d32dfc76f8a7ea89812c39332e28fd43",
-    "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
+    "mtime": 1790446080.3155468,
+    "ast_hash": "27710f1d0730cc9100b1d1eaadbeaf60",
+    "semantic_hash": ""
   },
   "frontend/src/api.ts": {
-    "mtime": 1790440201.3202288,
-    "ast_hash": "156908f1c79f1ff950f337f49e87801f",
+    "mtime": 1790445889.1187596,
+    "ast_hash": "f970e8ab9db733f80e21d2e0189643f6",
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1790443069.5206451,
-    "ast_hash": "b1bd297f14c6ab225a81b3f52c9e3011",
+    "mtime": 1790445944.5994656,
+    "ast_hash": "3d9e99636ceb0cdbed0ab1575639d84b",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1790390730.028027,
-    "ast_hash": "ae7846825b36f589cd9e62f49a81bcbb",
+    "mtime": 1790445889.0409956,
+    "ast_hash": "c0d8e545acca3bdd40e626554ca2e0b2",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -315,8 +315,8 @@
     "semantic_hash": ""
   },
   "app/capture/winhotkey.py": {
-    "mtime": 1789942542.116228,
-    "ast_hash": "7ebbde0a95fde7a17c5255ba511f0705",
+    "mtime": 1790446080.3162348,
+    "ast_hash": "6d99bb53d161cc8c637c863e3fa4c2ea",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -370,8 +370,8 @@
     "semantic_hash": ""
   },
   "app/capture/hotkeyd.py": {
-    "mtime": 1789942292.1719687,
-    "ast_hash": "9f21a32bd60a09d377f7a589f889cd7e",
+    "mtime": 1790445985.6032279,
+    "ast_hash": "65553c23d2db17cadc872e93b299af8a",
     "semantic_hash": ""
   },
   "app/backend/laya.py": {
@@ -410,8 +410,8 @@
     "semantic_hash": ""
   },
   "LUMINI.md": {
-    "mtime": 1790443069.3984165,
-    "ast_hash": "cc081858fbe41eb8ef933c286594d82c",
+    "mtime": 1790446080.5063815,
+    "ast_hash": "9d1bafda5b509b8a42230a979f09b12e",
     "semantic_hash": ""
   },
   "requirements-ia.txt": {
@@ -427,6 +427,21 @@
   "app/backend/test_windows_startup.py": {
     "mtime": 1790443028.2395465,
     "ast_hash": "68175d65a7ab03d0c052fb3b4608d317",
+    "semantic_hash": ""
+  },
+  "app/backend/test_hotkey_chords.py": {
+    "mtime": 1790446080.3165014,
+    "ast_hash": "dd899f8363d0a25ce2ed8870c10f4f73",
+    "semantic_hash": ""
+  },
+  "frontend/src/HotkeyInput.tsx": {
+    "mtime": 1790445944.213619,
+    "ast_hash": "caf5ebee13b95491b1078989f35c05af",
+    "semantic_hash": ""
+  },
+  "frontend/tests/settings.mjs": {
+    "mtime": 1790446080.3159244,
+    "ast_hash": "6a06a4c8b047100e4e2e6892b753bf13",
     "semantic_hash": ""
   }
 }
