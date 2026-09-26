@@ -12,7 +12,7 @@ Não tem nuvem, não tem conta, não tem nada rodando fora da sua máquina.
 ## Instalar no Linux (CachyOS, KDE Plasma)
 
 ```bash
-git clone <endereço do repositório> lumini
+git clone https://github.com/otowm/lume-lumini.git lumini
 cd lumini
 ./instalar-lumini.sh
 ```
