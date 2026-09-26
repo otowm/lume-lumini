@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import time
 from pathlib import Path, PurePosixPath
 
 HOME = Path.home()
@@ -33,6 +34,7 @@ def _config_dir() -> Path:
 CONFIG_DIR = _config_dir()
 STORAGE_CONFIG = CONFIG_DIR / "storage.conf"
 CLEANUP_CONFIG = CONFIG_DIR / "cleanup.conf"
+PROMPTS_CONFIG = CONFIG_DIR / "prompts.json"
 
 
 def configured_storage_root() -> Path:
@@ -55,6 +57,12 @@ AUDIO_DIR = MEDIA_ROOT / "audio"
 SCREEN_DIR = MEDIA_ROOT / "telas"
 VIDEO_DIR = MEDIA_ROOT / "video-buffer"
 CLIPS_DIR = MEDIA_ROOT / "clips"
+EDIT_DIR = MEDIA_ROOT / "edicao"
+# Derivados (miniaturas, faixas de áudio, versões leves) moram fora dos
+# diretórios de mídia de propósito: o que está em `video-buffer` aparece na
+# biblioteca, e um cache não é vídeo do usuário. Fica aqui, e não em `main.py`,
+# porque `sharing.py` também precisa dele e não pode importar o `main`.
+MEDIA_CACHE_DIR = MEDIA_ROOT / ".lume-cache"
 DB_PATH = Path(os.environ.get("CAPTURA_DIA_DB_PATH", MEDIA_ROOT / "lume.sqlite3")).expanduser()
 SCREEN_CONFIG = CONFIG_DIR / "tela.conf"
 SENSITIVE_FILE = CONFIG_DIR / "janelas-sensiveis.txt"
@@ -63,6 +71,22 @@ SCREEN_BIN = Path(os.environ.get("CAPTURA_DIA_SCREEN_BIN", HOME / "bin/captura-t
 
 MEDIA_PATH_PREFIX = "media:"
 MEDIA_DIRECTORIES = {"audio", "telas", "video-buffer", "clips"}
+
+
+def unlink_with_retry(path: Path, attempts: int = 30, delay: float = 0.1) -> bool:
+    """Remove um arquivo, aguardando handles transitórios do FFmpeg/player no Windows."""
+    attempts = max(1, attempts)
+    for attempt in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(delay)
+    return False
 
 
 def media_source_key(raw: str | Path) -> str:
@@ -100,6 +124,19 @@ def resolve_media_source(raw: str | Path) -> Path:
         relative = PurePosixPath(key[len(MEDIA_PATH_PREFIX):])
         return MEDIA_ROOT.joinpath(*relative.parts).resolve()
     return Path(raw).expanduser().resolve()
+
+
+def video_game_label(source_path: str, fallback: str = "") -> tuple[str, str]:
+    """Prefer the recorded window title over an AI-generated app guess."""
+    source = resolve_media_source(source_path)
+    sidecar = source.with_suffix(source.suffix + ".window")
+    if sidecar.is_file():
+        window = sidecar.read_text(encoding="utf-8", errors="replace").strip()
+        title, separator, executable = window.rpartition(" | ")
+        label = (title if separator else window).strip() or executable.strip()
+        if label:
+            return label, "window"
+    return fallback.strip(), "analysis" if fallback.strip() else "unknown"
 
 
 def media_source_name(raw: str | Path) -> str:

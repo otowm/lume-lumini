@@ -1,4 +1,4 @@
-fastapi==0.139.2
-uvicorn[standard]>=0.35,<1
-numpy==2.3.3
-sherpa-onnx==1.13.4
+# O Lume completo é o gravador mais a análise. Quem quer só gravar instala
+# `requirements-lumini.txt`.
+-r requirements-lumini.txt
+-r requirements-ia.txt

@@ -16,6 +16,7 @@ from pathlib import Path
 import uvicorn
 
 from .main_paths import MEDIA_ROOT
+from .mode import e_lumini
 
 
 def _backend_is_running(host: str, port: int) -> bool:
@@ -40,14 +41,17 @@ def _hide_console() -> None:
 
 def main() -> None:
     probe_host = "127.0.0.1"
-    host = os.environ.get("LUME_HOST", "0.0.0.0")
+    host = os.environ.get("LUME_BIND_HOST") or os.environ.get("LUME_HOST", "0.0.0.0")
     port = int(os.environ.get("LUME_PORT", "8876"))
     if _backend_is_running(probe_host, port):
         return
     # A aplicação valida também o IP de origem e o cabeçalho Host. Escutar em
     # todas as interfaces não concede acesso ao Wi-Fi/LAN comum.
-    os.environ.setdefault("LUME_REMOTE_NETWORKS", "172.27.0.0/16,10.28.4.0/24")
-    os.environ.setdefault("LUME_REMOTE_HOSTS", "172.27.181.179,10.28.4.6")
+    if e_lumini():
+        os.environ.setdefault("LUME_REMOTE_NETWORKS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+    else:
+        os.environ.setdefault("LUME_REMOTE_NETWORKS", "172.27.0.0/16,10.28.4.0/24")
+        os.environ.setdefault("LUME_REMOTE_HOSTS", "172.27.181.179,10.28.4.6")
     _hide_console()
     log_dir = MEDIA_ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

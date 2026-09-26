@@ -1,6 +1,14 @@
-# Uma expressão regular por linha, aplicada ao título e à classe da janela ativa.
+# Uma expressão regular por linha, aplicada à classe da janela ativa.
 # Jogos Proton/X11 usam classes como steam_app_730; "Steam" sozinho também
 # corresponde à loja e à biblioteca e, por isso, não deve ser usado.
+# O título não entra na busca por padrão: um vídeo do navegador com o nome do
+# jogo no título ("mrekk | osu! ...") iniciaria a gravação. Para casar pelo
+# título mesmo assim, prefixe a regra com "title:"; "class:" (ou "exe:", o nome
+# usado no Windows) força a classe.
+# O prefixo [continuous|clips fps=N geometry=WxH] vale por app: em "clips" nada
+# vai para o disco até o atalho pedir os últimos VIDEO_REPLAY_SECONDS segundos.
+# Para conferir uma janela sem gravar: ~/bin/captura-video-loop.sh --match
+# (responde "grava <janela> <regra> <modo>" ou "ignora").
 steam_app_[0-9]+
 gamescope
 Lutris

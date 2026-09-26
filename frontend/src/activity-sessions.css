@@ -127,3 +127,25 @@
   .activity-overview { align-items: stretch; flex-direction: column; }
   .activity-filmstrip button { width: 145px; flex-basis: 145px; }
 }
+
+.activity-card-heading{min-width:0}
+.visual-activity header h2{font-size:17px;line-height:1.4;overflow-wrap:anywhere}
+.visual-activity header span,.visual-activity header small{font-size:11px}
+.activity-story p{font-size:14px;line-height:1.7;max-width:85ch}
+.activity-overview span{font-size:12px;line-height:1.5}
+.activity-filters{display:flex;gap:12px;align-items:end;margin:20px 0 8px}
+.activity-filters label{display:flex;flex-direction:column;gap:7px;min-width:0;flex:1}
+.activity-filters label:first-child{flex:2}
+.activity-filters label>span{font-size:11px;color:var(--muted)}
+.activity-filters input,.activity-filters select{width:100%;box-sizing:border-box;padding:10px 12px;font:inherit;font-size:12px;color:var(--text);background:var(--surface2);border:1px solid var(--divider);border-radius:9px}
+.activity-filters input:focus-visible,.activity-filters select:focus-visible,.visual-activities button:focus-visible,.visual-activities summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.activity-result-count,.activity-progress{font-size:12px;color:var(--muted);line-height:1.6}
+.activity-result-count{display:flex;align-items:center;gap:15px;margin:8px 0 18px}
+.activity-read-more,.activity-more-frames{padding:5px 0;border:0;background:transparent;color:var(--accent3);cursor:pointer;font-size:12px;text-align:left}
+.activity-read-more{margin-bottom:8px}
+.activity-more-frames{margin:5px 15px 12px}
+.visual-activity>details{font-size:12px;margin-top:14px}
+.visual-activity>details summary{cursor:pointer;padding:5px 0}
+.activity-empty{padding:38px 24px;text-align:center;border:1px dashed var(--divider);border-radius:12px;background:var(--surface2)}
+.activity-empty p{font-size:13px;color:var(--muted);line-height:1.6}
+@media(max-width:720px){.activity-filters{flex-wrap:wrap}.activity-filters label:first-child{flex-basis:100%}.activity-filters label{flex-basis:calc(50% - 6px)}.activity-story p{font-size:13px}.visual-activity header h2{font-size:15px}}

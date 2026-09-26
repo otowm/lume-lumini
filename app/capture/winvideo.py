@@ -23,16 +23,15 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
-from . import get_backend
-from .base import parse_video_app_rule, read_patterns, read_shell_config, stable_app_label
+from . import gamesession, get_backend
+from .base import parse_video_app_rule, read_patterns, read_shell_config
 from .imagediff import thumbnail
-from .winhotkey import MarkerHotkey
+from .winhotkey import DEFAULT_HOLD_SECONDS, MarkerHotkey
 from . import obs
 from ..backend.main_paths import CONFIG_DIR, VIDEO_DIR
-from ..backend.database import connect, initialize
+from ..backend.database import initialize
 from ..backend.runtime import video_activity_flag, video_recording_flag
 
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
@@ -81,6 +80,11 @@ class Settings:
             self.capture_mode = "continuous"
         self.replay_seconds = self._int(values, "VIDEO_REPLAY_SECONDS", 60)
         self.hotkey = values.get("VIDEO_MARKER_HOTKEY", "F8")
+        try:
+            hold = float(values.get("VIDEO_HOTKEY_HOLD_SECONDS", DEFAULT_HOLD_SECONDS))
+        except (TypeError, ValueError):
+            hold = DEFAULT_HOLD_SECONDS
+        self.hold_seconds = hold if hold > 0 else DEFAULT_HOLD_SECONDS
         self.patterns = [p for p in (self._compile(p, self.capture_mode, self.fps, self.geometry) for p in read_patterns(VIDEO_APPS)) if p]
         self._mtimes = (self._mtime(VIDEO_CONFIG), self._mtime(VIDEO_APPS))
 
@@ -196,6 +200,64 @@ def looks_blank(video: Path) -> bool:
     return (max(thumb) - min(thumb)) < MIN_LUMINANCE_SPREAD
 
 
+def media_duration(video: Path) -> float:
+    """Duração em segundos, ou 0 quando o ffprobe não souber dizer."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(video)],
+        check=False, capture_output=True, text=True, timeout=30,
+        creationflags=_HIDDEN_PROCESS)
+    try:
+        return max(0.0, float(result.stdout.strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def cut_head(source: Path, destination: Path, seconds: float) -> bool:
+    """Guarda só os primeiros ``seconds`` do arquivo, copiando os streams.
+
+    Cortar pelo fim é exato com cópia de streams; cortar pelo começo cairia no
+    quadro-chave anterior e repetiria segundos já vistos. É por isso que a
+    mesclagem de dois clipes recorta o começo do que já existe em vez de
+    recortar o começo do que acabou de chegar.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(source), "-t", f"{seconds:.3f}", "-c", "copy", str(destination)],
+            check=False, capture_output=True, timeout=600,
+            creationflags=_HIDDEN_PROCESS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"[clipe] falha ao recortar: {exc}")
+        return False
+    return result.returncode == 0 and destination.is_file()
+
+
+def concat_videos(destination: Path, *parts: Path) -> bool:
+    """Emenda os pedaços num arquivo só, copiando os streams.
+
+    Os dois vêm do mesmo OBS, com o mesmo codec e as mesmas faixas, então não há
+    o que recodificar — e recodificar uma partida inteira só para juntar dois
+    pedaços custaria mais do que a gravação toda.
+    """
+    listing = destination.with_suffix(destination.suffix + ".concat.txt")
+    try:
+        listing.write_text(
+            "".join(f"file '{part.as_posix()}'\n" for part in parts), encoding="utf-8")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-c", "copy", str(destination)],
+            check=False, capture_output=True, timeout=600,
+            creationflags=_HIDDEN_PROCESS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"[longa] falha ao emendar: {exc}")
+        return False
+    finally:
+        listing.unlink(missing_ok=True)
+    return result.returncode == 0 and destination.is_file()
+
+
 class VideoLoop:
     def __init__(self, once: bool = False, max_wait: float | None = None) -> None:
         self.backend = get_backend()
@@ -217,6 +279,22 @@ class VideoLoop:
         self.clip_session_key = ""
         self.clip_window = ""
         self.last_clip_name = ""
+        # Dois atalhos dentro da mesma janela de replay descrevem um trecho só:
+        # o segundo clipe começa antes do fim do primeiro, e publicar os dois
+        # deixaria a mesma jogada em dois arquivos. Enquanto a janela pode
+        # receber outro atalho o clipe espera fora do buffer que o Lume observa,
+        # e é publicado já mesclado quando ela fecha.
+        self.pending_clip: Path | None = None
+        self.pending_clip_at = 0.0
+        self.clips_saved = 0
+        # Gravação longa: no modo clipes, segurar o atalho salva o pré-roll que
+        # está no Replay Buffer e deixa o OBS gravando dali em diante, até a
+        # próxima segurada. Os dois pedaços saem emendados num arquivo só.
+        self.long_recording = False
+        self.long_started_at = 0.0
+        self.long_started = 0.0
+        self.long_clip: Path | None = None
+        self.long_markers: list[float] = []
         self.active_window = ""
         self.last_event: dict | None = None
         self.event_seq = 0
@@ -237,6 +315,37 @@ class VideoLoop:
     def stop(self, _signum=None, _frame=None) -> None:
         self.stopping = True
 
+    #: Janelas que não são "o usuário foi fazer outra coisa": a barra de
+    #: tarefas, o menu Iniciar, o alternador de tarefas e as notificações tomam
+    #: o foco por alguns instantes sozinhas. Contá-las como saída era o que
+    #: fazia a HUD anunciar "Fora do jogo" com o jogo na frente — o mesmo
+    #: defeito que o laço do Linux tinha com o painel do Plasma.
+    SHELL_WINDOW_CLASSES = frozenset({
+        "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow",
+        "XamlExplorerHostIslandWindow", "MultitaskingViewFrame",
+        "ForegroundStaging", "TaskSwitcherWnd", "TaskSwitcherOverlayWnd",
+    })
+
+    def _focus_state(self, window: str, mode: str) -> str:
+        """``jogo``, ``na-tela`` ou ``fora`` — a mesma pergunta do laço Linux.
+
+        Três respostas, e não duas, porque "não é o jogo" reunia coisas
+        diferentes demais. ``GetForegroundWindow`` devolve 0 no meio de um
+        Alt+Tab e durante transições da área de trabalho, e aí ``na-tela``
+        significa "não sei": a contagem não começa nem anda. Quem sai do jogo
+        de verdade continua caindo em ``fora``.
+        """
+        title, window_class, executable = foreground_details()
+        current = f"{title} | {executable}" if title or executable else ""
+        if not current:
+            return "na-tela"
+        rule = self.settings.capture_rule_for_details(title, window_class, executable)
+        if rule and rule[0] == mode and self._same_app(window, current):
+            return "jogo"
+        if window_class in self.SHELL_WINDOW_CLASSES:
+            return "na-tela"
+        return "fora"
+
     def _focused_window(self) -> tuple[str, tuple[str, int, str] | None]:
         """Janela atual e resultado das regras usando campos separados."""
         title, window_class, executable = foreground_details()
@@ -252,27 +361,11 @@ class VideoLoop:
         return (first_title or first).casefold() == (current_title or current).casefold()
 
     # --- sinalização para o supervisor -----------------------------------
-    @staticmethod
-    def _iso_time(timestamp: float) -> str:
-        return datetime.fromtimestamp(timestamp).astimezone().isoformat()
-
     def _begin_game_session(self, session_key: str, window: str, mode: str) -> None:
-        started = self._iso_time(self.session_started_at)
-        app = stable_app_label(window) or "Jogo"
         self.game_session_key = session_key
         self._game_session_heartbeat = self.session_started_at
         try:
-            with connect() as db:
-                db.execute(
-                    """INSERT INTO game_activity_sessions(
-                           session_key,app,window,capture_mode,started_at,last_seen_at,ended_at,duration_seconds)
-                       VALUES(?,?,?,?,?,?,NULL,0)
-                       ON CONFLICT(session_key) DO UPDATE SET
-                         app=excluded.app,window=excluded.window,capture_mode=excluded.capture_mode,
-                         started_at=excluded.started_at,last_seen_at=excluded.last_seen_at,
-                         ended_at=NULL,duration_seconds=0""",
-                    (session_key, app[:200], window[:1000], mode, started, started),
-                )
+            gamesession.begin(session_key, window, mode, self.session_started_at)
         except sqlite3.Error as exc:
             log(f"[aviso] falha ao iniciar contagem persistente: {exc}")
 
@@ -280,30 +373,16 @@ class VideoLoop:
         if not self.game_session_key:
             return
         now = time.time()
-        if now - self._game_session_heartbeat < 10:
+        if now - self._game_session_heartbeat < gamesession.HEARTBEAT_SECONDS:
             return
-        with connect() as db:
-            db.execute(
-                """UPDATE game_activity_sessions
-                   SET last_seen_at=?,
-                       duration_seconds=MAX(0,(julianday(?)-julianday(started_at))*86400.0)
-                   WHERE session_key=? AND ended_at IS NULL""",
-                (self._iso_time(now), self._iso_time(now), self.game_session_key),
-            )
+        gamesession.heartbeat(self.game_session_key, now)
         self._game_session_heartbeat = now
 
     def _finish_game_session(self) -> None:
         if not self.game_session_key or not self.session_started_at:
             return
-        ended = time.time()
-        duration = max(0.0, ended - self.session_started_at)
         try:
-            with connect() as db:
-                db.execute(
-                    """UPDATE game_activity_sessions
-                       SET last_seen_at=?,ended_at=?,duration_seconds=? WHERE session_key=?""",
-                    (self._iso_time(ended), self._iso_time(ended), duration, self.game_session_key),
-                )
+            duration = gamesession.finish(self.game_session_key, self.session_started_at)
             log(f"[tempo] sessão de jogo registrada: {duration / 60:.1f} min")
         except sqlite3.Error as exc:
             log(f"[aviso] falha ao finalizar contagem persistente: {exc}")
@@ -334,7 +413,10 @@ class VideoLoop:
                 # vida: um sinal parado significa laço morto, não gravação em
                 # curso.
                 "markers": len(self.pending_markers),
+                "clips": self.clips_saved,
                 "last_clip": self.last_clip_name,
+                "long_recording": self.long_recording,
+                "long_started_at": self.long_started_at or None,
                 "focus_grace_deadline": getattr(self, "focus_grace_deadline", 0.0) or None,
                 "event": self.last_event,
             }, ensure_ascii=False), encoding="utf-8")
@@ -377,32 +459,55 @@ class VideoLoop:
         if existia:
             log(f"[sinal] liberado ({reason or 'sem motivo informado'})")
 
-    def _update_focus_grace(self, focused: bool, focus_lost_at: float) -> tuple[float, bool]:
+    def _update_focus_grace(self, state: str, focus_lost_at: float) -> tuple[float, bool]:
         """Atualiza o prazo publicado para a HUD e informa se ele venceu."""
-        if focused:
+        now = time.monotonic()
+        if state == "jogo":
             self.focus_grace_deadline = 0.0
             return -1.0, False
-        now = time.monotonic()
+        if state == "na-tela":
+            # Segura o que estiver valendo: uma contagem já em curso fica onde
+            # está, empurrada volta a volta, em vez de correr enquanto o menu
+            # Iniciar está aberto.
+            if focus_lost_at >= 0:
+                focus_lost_at = min(now, focus_lost_at + POLL_SECONDS)
+                self.focus_grace_deadline = time.time() + max(
+                    0.0, self.settings.focus_grace - (now - focus_lost_at))
+            return focus_lost_at, False
         if focus_lost_at < 0:
             focus_lost_at = now
-            self.focus_grace_deadline = time.time() + self.settings.focus_grace
-        expired = now - focus_lost_at >= self.settings.focus_grace
-        return focus_lost_at, expired
+        self.focus_grace_deadline = time.time() + max(
+            0.0, self.settings.focus_grace - (now - focus_lost_at))
+        return focus_lost_at, now - focus_lost_at >= self.settings.focus_grace
 
     # --- marcadores -------------------------------------------------------
-    @staticmethod
-    def _confirmation_sound() -> None:
+    #: Cada confirmação tem um desenho melódico próprio, porque quem está
+    #: jogando escuta sem olhar: o aceite de sempre sobe uma quinta, a gravação
+    #: longa abre com um arpejo subindo e fecha com o mesmo arpejo descendo.
+    _SOUNDS = {
+        "ok": ((1046, 80), (1318, 110)),
+        "long_start": ((784, 70), (1046, 70), (1318, 150)),
+        "long_stop": ((1318, 70), (1046, 70), (784, 150)),
+    }
+
+    @classmethod
+    def _confirmation_sound(cls, variant: str = "ok") -> None:
         """Confirma uma ação aceita sem depender da interface estar em foco."""
         if sys.platform != "win32":
             return
         try:
             import winsound
-            winsound.Beep(1046, 80)
-            winsound.Beep(1318, 110)
+            for frequency, duration in cls._SOUNDS.get(variant, cls._SOUNDS["ok"]):
+                winsound.Beep(frequency, duration)
         except (ImportError, RuntimeError, OSError):
             pass
 
     def hotkey_pressed(self) -> None:
+        # Durante uma gravação longa o toque volta a ser marcador: salvar um
+        # clipe do que já está sendo gravado inteiro não diria nada.
+        if self.long_recording:
+            self.add_marker()
+            return
         if (self.active_capture_mode or self.settings.capture_mode) == "clips":
             if self.clip_buffer_active:
                 # Salvar leva segundos (o OBS só informa o arquivo depois de
@@ -419,6 +524,19 @@ class VideoLoop:
                 log("[clipe] ignorado: nenhum jogo monitorado está ativo")
             return
         self.add_marker()
+
+    def hotkey_held(self) -> None:
+        """Segurar: abre a gravação longa e, na segurada seguinte, a fecha."""
+        if (self.active_capture_mode or self.settings.capture_mode) != "clips":
+            self._note_event("ignored", "Segurar só vale no modo clipes")
+            return
+        if self.long_recording:
+            self.stop_long_recording()
+        elif self.clip_buffer_active:
+            self.start_long_recording()
+        else:
+            self._note_event("ignored", "Nenhum jogo monitorado")
+            log("[longa] ignorado: nenhum buffer de clipes ativo")
 
     def add_marker(self) -> None:
         """Anota o instante atual da gravação.
@@ -456,8 +574,100 @@ class VideoLoop:
                 self.marker_queued_for_start = False
                 log("[marcador] transição aplicada em 0.0s")
 
-    def save_replay_clip(self) -> Path | None:
-        """Salva o Replay Buffer atual e vincula o arquivo à sessão do jogo."""
+    # --- gravação longa ---------------------------------------------------
+    def start_long_recording(self) -> None:
+        """Guarda o pré-roll e começa a gravar em paralelo ao Replay Buffer."""
+        # A gravação longa tem pré-roll próprio: o clipe que esperava não é
+        # estendido por ela, e ficar pendente só atrasaria a publicação dele.
+        self.flush_pending_clip()
+        self.long_started_at = time.time()
+        self.long_started = time.monotonic()
+        self.long_markers = []
+        self.long_clip = None
+        self._note_event("long_started", "Gravação longa iniciada")
+        self._confirmation_sound("long_start")
+        # A ordem importa: o pré-roll primeiro, senão o clipe sairia com o
+        # começo da própria gravação dentro dele.
+        self.long_clip = self._save_replay_file()
+        if self.long_clip is None:
+            log("[longa] o pré-roll não saiu; grava-se só do atalho em diante")
+        try:
+            obs.call("StartRecord")
+        except (obs.ObsError, OSError) as exc:
+            log(f"[longa] o OBS recusou iniciar a gravação: {exc}")
+            self._note_event("long_failed", "O OBS recusou gravar")
+            self.long_clip = None
+            return
+        self.long_recording = True
+        # Sem evento: "gravando tudo" é estado permanente, e é o ponto vermelho
+        # da HUD que o mostra. Como faixa, ele só roubaria o lugar do marcador.
+        self._publish_activity()
+        log("[longa] gravação longa iniciada com pré-roll de "
+            f"{self.settings.replay_seconds}s")
+
+    def stop_long_recording(self) -> Path | None:
+        """Encerra a gravação longa e emenda o pré-roll na frente dela."""
+        if not self.long_recording:
+            return None
+        self.long_recording = False
+        self._note_event("long_saving", "Fechando gravação longa…")
+        self._confirmation_sound("long_stop")
+        try:
+            result = obs.call("StopRecord")
+        except (obs.ObsError, OSError) as exc:
+            log(f"[longa] falha ao encerrar a gravação: {exc}")
+            self._note_event("long_failed", "O OBS não encerrou a gravação")
+            return None
+        recorded = Path(result.get("outputPath", ""))
+        clip, self.long_clip = self.long_clip, None
+        markers, self.long_markers = self.long_markers, []
+        if not recorded.is_file():
+            log("[aviso] o OBS não devolveu arquivo da gravação longa")
+            self._note_event("long_failed", "O OBS não devolveu arquivo")
+            return None
+
+        final, offset = recorded, 0.0
+        if clip is not None and clip.is_file():
+            joined = recorded.with_name(f"{recorded.stem}-completo{recorded.suffix}")
+            if concat_videos(joined, clip, recorded):
+                offset = media_duration(clip)
+                clip.unlink(missing_ok=True)
+                recorded.unlink(missing_ok=True)
+                final = joined
+            else:
+                # Emendar falhou: os dois pedaços valem mais soltos do que
+                # perdidos. O clipe entra como arquivo próprio da sessão.
+                log("[longa] não consegui emendar o pré-roll; os dois ficam separados")
+                self._write_sidecars(clip)
+        self._write_sidecars(final, markers=[value + offset for value in markers])
+        self.last_clip_name = final.name
+        size_mb = final.stat().st_size / 1024 / 1024
+        log(f"[longa] {final.name} ({size_mb:.1f} MB)")
+        self._note_event("long_saved", f"Gravação longa salva · {final.name}")
+        print(final, flush=True)
+        return final
+
+    def _write_sidecars(self, path: Path, markers: list[float] | None = None) -> None:
+        """Janela, sessão e marcadores ao lado do arquivo, como nos segmentos."""
+        try:
+            path.with_suffix(path.suffix + ".window").write_text(
+                self.clip_window, encoding="utf-8")
+            path.with_suffix(path.suffix + ".session").write_text(
+                f"{self.clip_session_key}\n{self.clip_window}\n", encoding="utf-8")
+            if markers:
+                path.with_suffix(path.suffix + ".markers").write_text(
+                    "".join(f"{value:.1f}\n" for value in markers), encoding="utf-8")
+        except OSError as exc:
+            log(f"[aviso] falha ao escrever sidecars de {path.name}: {exc}")
+
+    def _save_replay_file(self) -> Path | None:
+        """Pede o Replay Buffer ao OBS e devolve o arquivo que ele escreveu.
+
+        Separado de :meth:`save_replay_clip` porque a gravação longa também
+        precisa do pré-roll, mas ele não é um clipe da sessão: vai virar o
+        começo do arquivo emendado, e adotá-lo aqui o deixaria também solto no
+        buffer, contado duas vezes.
+        """
         with self._clip_lock:
             if not self.clip_buffer_active:
                 log("[clipe] ignorado: Replay Buffer não está ativo")
@@ -487,19 +697,163 @@ class VideoLoop:
                     break
                 time.sleep(0.15)
             if path is None:
-                log("[clipe] o OBS aceitou o F8, mas não informou o arquivo salvo")
+                log("[clipe] o OBS aceitou o atalho, mas não informou o arquivo salvo")
                 self._note_event("clip_failed", "O OBS não informou o arquivo")
                 return None
+            return path
 
-            path.with_suffix(path.suffix + ".window").write_text(self.clip_window, encoding="utf-8")
-            path.with_suffix(path.suffix + ".session").write_text(
-                f"{self.clip_session_key}\n{self.clip_window}\n", encoding="utf-8")
-            self.clip_save_queued = False
+    def _pending_dir(self) -> Path:
+        directory = VIDEO_DIR.parent / ".clipe-pendente"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def save_replay_clip(self) -> Path | None:
+        """Salva o Replay Buffer atual, estendendo o clipe anterior se houver.
+
+        O arquivo não vai direto para o buffer do Lume: enquanto outro atalho
+        ainda puder estendê-lo — a janela dura o mesmo tanto que o replay — ele
+        espera fora dele, e é publicado já mesclado quando a janela fecha.
+        """
+        # O instante do atalho, e não o do arquivo: o clipe cobre os segundos
+        # *anteriores* a ele, e é essa borda que decide se dois pedidos se
+        # sobrepõem. O OBS leva segundos para informar o arquivo salvo.
+        now = time.time()
+        path = self._save_replay_file()
+        if path is None:
+            return None
+        self.clip_save_queued = False
+        merged = self._merge_pending_clip(path, now)
+        if merged is not None:
+            total = media_duration(merged)
+            log(f"[clipe] atalho dentro da janela de replay; {merged.name} "
+                f"estendido para {total:.0f}s")
+            self._note_event("clip_merged",
+                             f"Clipe estendido · {total / 60:.0f}:{total % 60:02.0f}")
+            self._confirmation_sound()
+            return merged
+        # Sem sobreposição: o que esperava vira arquivo do buffer e o novo
+        # assume a vez.
+        self.flush_pending_clip()
+        pending = self._pending_dir() / f"clipe{path.suffix}"
+        try:
+            pending.unlink(missing_ok=True)
+            path.replace(pending)
+        except OSError as exc:
+            log(f"[clipe] falha ao guardar {path.name}: {exc}")
+            self._write_sidecars(path)
             self.last_clip_name = path.name
-            log(f"[clipe] últimos {self.settings.replay_seconds}s salvos em {path.name}")
             self._note_event("clip_saved", f"Clipe salvo · {self.settings.replay_seconds}s")
             self._confirmation_sound()
             return path
+        self.pending_clip = pending
+        self.pending_clip_at = now
+        self.clips_saved += 1
+        log(f"[clipe] últimos {self.settings.replay_seconds}s salvos; "
+            f"aguardando a janela de mesclagem")
+        self._note_event("clip_saved", f"Clipe salvo · {self.settings.replay_seconds}s")
+        self._confirmation_sound()
+        return pending
+
+    def _rescue_stale_pending_clip(self) -> None:
+        """Sobra de uma queda abrupta: um clipe salvo que não foi publicado.
+
+        De que sessão ele era já não se sabe, e inventar isso o penduraria na
+        partida errada — vai para o buffer sem sidecars, como vídeo solto, que
+        ainda é melhor do que perdido.
+        """
+        directory = VIDEO_DIR.parent / ".clipe-pendente"
+        if not directory.is_dir():
+            return
+        for leftover in sorted(directory.iterdir()):
+            try:
+                if not leftover.is_file():
+                    continue
+                # Pedaços de uma emenda interrompida no meio não servem a ninguém.
+                if leftover.stem.endswith(("-inicio", "-uniao")):
+                    leftover.unlink(missing_ok=True)
+                    continue
+                target = VIDEO_DIR / leftover.name
+                counter = 1
+                while target.exists():
+                    target = VIDEO_DIR / f"{leftover.stem}-{counter}{leftover.suffix}"
+                    counter += 1
+                leftover.replace(target)
+                log(f"[clipe] pendente de uma execução anterior publicado em {target.name}")
+            except OSError as exc:
+                log(f"[aviso] falha ao recuperar {leftover.name}: {exc}")
+
+    def _merge_pending_clip(self, incoming: Path, now: float) -> Path | None:
+        """Estende o clipe que espera, quando o pedido novo se sobrepõe a ele.
+
+        O pendente termina no atalho anterior; o novo cobre os segundos
+        anteriores a este. Se o começo do novo cai dentro do pendente, o trecho
+        em comum não pode aparecer duas vezes — e o corte sai do *fim* do
+        pendente, porque só esse lado é exato com cópia de streams.
+        """
+        pending = self.pending_clip
+        if pending is None or not pending.is_file():
+            return None
+        pending_seconds = media_duration(pending)
+        incoming_seconds = media_duration(incoming)
+        delta = now - self.pending_clip_at
+        if pending_seconds <= 0 or incoming_seconds <= 0 or delta >= incoming_seconds:
+            return None
+        head = pending_seconds + delta - incoming_seconds
+        if head < 0.2:
+            # O clipe novo contém o pendente inteiro: não há começo a preservar.
+            try:
+                pending.unlink(missing_ok=True)
+                incoming.replace(pending)
+            except OSError as exc:
+                log(f"[clipe] falha ao substituir o clipe pendente: {exc}")
+                return None
+        else:
+            start = pending.with_name(f"{pending.stem}-inicio{pending.suffix}")
+            union = pending.with_name(f"{pending.stem}-uniao{pending.suffix}")
+            if not (cut_head(pending, start, head)
+                    and concat_videos(union, start, incoming)):
+                # Emendar falhou: os dois pedaços valem mais soltos do que
+                # perdidos, cada um como clipe próprio da sessão.
+                log("[clipe] não consegui mesclar os clipes vizinhos; seguem separados")
+                start.unlink(missing_ok=True)
+                union.unlink(missing_ok=True)
+                return None
+            try:
+                union.replace(pending)
+            except OSError as exc:
+                log(f"[clipe] falha ao adotar o clipe mesclado: {exc}")
+                union.unlink(missing_ok=True)
+                return None
+            start.unlink(missing_ok=True)
+            incoming.unlink(missing_ok=True)
+        # O arquivo começa onde começava — só o fim andou —, então o nome segue
+        # valendo; a espera reabre a partir deste atalho.
+        self.pending_clip_at = now
+        return pending
+
+    def flush_pending_clip(self) -> Path | None:
+        """Publica no buffer o clipe que esperava por uma mesclagem."""
+        pending, self.pending_clip = self.pending_clip, None
+        self.pending_clip_at = 0.0
+        if pending is None or not pending.is_file():
+            return None
+        target = VIDEO_DIR / pending.name
+        counter = 1
+        while target.exists():
+            target = VIDEO_DIR / f"{pending.stem}-{counter}{pending.suffix}"
+            counter += 1
+        try:
+            VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+            pending.replace(target)
+        except OSError as exc:
+            log(f"[clipe] falha ao publicar {pending.name}: {exc}")
+            return None
+        self._write_sidecars(target)
+        self.last_clip_name = target.name
+        log(f"[clipe] {target.name} publicado no buffer")
+        self._publish_activity()
+        print(target, flush=True)
+        return target
 
     # --- gravação ---------------------------------------------------------
     #: Tempo para o hook do Game Capture injetar antes de valer a pena gravar.
@@ -659,9 +1013,8 @@ class VideoLoop:
                     elapsed = time.monotonic() - self.recording_started
                     if limit and elapsed >= limit:
                         break
-                    current, rule = self._focused_window()
-                    focused = bool(rule and rule[0] == "continuous" and self._same_app(window, current))
-                    focus_lost_at, grace_expired = self._update_focus_grace(focused, focus_lost_at)
+                    focus_lost_at, grace_expired = self._update_focus_grace(
+                        self._focus_state(window, "continuous"), focus_lost_at)
                     # Publica novamente depois de observar o foco, para que a
                     # HUD receba o prazo já nesta mesma volta.
                     self._suspend_others(window)
@@ -671,8 +1024,10 @@ class VideoLoop:
                 self._stop_recording(window, session_key)
                 if session_ended or self.stopping or not limit:
                     break
-                current, rule = self._focused_window()
-                if not rule or rule[0] != "continuous" or not self._same_app(window, current):
+                # Entre um segmento e outro vale o mesmo critério do laço: só
+                # uma saída de verdade encerra. Uma leitura em branco aqui
+                # cortava a sessão exatamente na virada do arquivo.
+                if self._focus_state(window, "continuous") == "fora":
                     break
         finally:
             self._finish_game_session()
@@ -697,13 +1052,24 @@ class VideoLoop:
             focus_lost_at = -1.0
             while not self.stopping:
                 time.sleep(POLL_SECONDS)
-                current, rule = self._focused_window()
-                focused = bool(rule and rule[0] == "clips" and self._same_app(window, current))
-                focus_lost_at, grace_expired = self._update_focus_grace(focused, focus_lost_at)
+                # A janela de mesclagem fechou: o clipe que esperava vira
+                # arquivo do buffer.
+                if (self.pending_clip is not None
+                        and time.time() - self.pending_clip_at >= self.settings.replay_seconds):
+                    self.flush_pending_clip()
+                focus_lost_at, grace_expired = self._update_focus_grace(
+                    self._focus_state(window, "clips"), focus_lost_at)
                 self._suspend_others(window)
                 if grace_expired:
                     break
         finally:
+            # A sessão acabou: não há próximo atalho para estender o clipe que
+            # esperava. Antes do buffer cair, porque os sidecars dele saem da
+            # sessão que está sendo encerrada.
+            self.flush_pending_clip()
+            # Antes de derrubar o buffer: parar o OBS com uma gravação longa em
+            # curso deixaria o arquivo dela órfão, sem sidecar e sem emenda.
+            self.stop_long_recording()
             self._stop_replay_buffer()
             self._release_others("buffer de clipes encerrado")
             self._finish_game_session()
@@ -717,16 +1083,13 @@ class VideoLoop:
 
         _install_stop_handlers(self.stop)
         initialize()
-        with connect() as db:
-            db.execute(
-                """UPDATE game_activity_sessions
-                   SET ended_at=last_seen_at,
-                       duration_seconds=MAX(0,(julianday(last_seen_at)-julianday(started_at))*86400.0)
-                   WHERE ended_at IS NULL"""
-            )
+        gamesession.close_stale()
+        self._rescue_stale_pending_clip()
         self._release_others("limpeza inicial")
 
-        hotkey = MarkerHotkey(self.settings.hotkey, self.hotkey_pressed)
+        hotkey = MarkerHotkey(self.settings.hotkey, self.hotkey_pressed,
+                              on_hold=self.hotkey_held,
+                              hold_seconds=self.settings.hold_seconds)
         hotkey.start()
 
         log(f"[video] apps monitorados: {len(self.settings.patterns)} | "

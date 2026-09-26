@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS captures (
   sha256 TEXT NOT NULL DEFAULT '',
   preserved INTEGER NOT NULL DEFAULT 0,
   process_ms INTEGER,
+  ai_metrics_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   processed_at TEXT
 );
@@ -134,6 +135,7 @@ CREATE TABLE IF NOT EXISTS video_segments (
   status TEXT NOT NULL DEFAULT 'pending',
   error TEXT NOT NULL DEFAULT '',
   preserved INTEGER NOT NULL DEFAULT 0,
+  session_detached INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   processed_at TEXT
 );
@@ -164,6 +166,18 @@ CREATE TABLE IF NOT EXISTS video_markers (
   FOREIGN KEY(video_id) REFERENCES video_segments(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_video_markers_video ON video_markers(video_id,offset_seconds);
+CREATE TABLE IF NOT EXISTS shared_links (
+  id INTEGER PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  host TEXT NOT NULL,
+  url TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  light INTEGER NOT NULL DEFAULT 0,
+  limit_mb INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_shared_links_source ON shared_links(source_path,created_at);
 CREATE TABLE IF NOT EXISTS game_activity_sessions (
   id INTEGER PRIMARY KEY,
   session_key TEXT NOT NULL UNIQUE,
@@ -192,6 +206,30 @@ CREATE TABLE IF NOT EXISTS speaker_observations (
   embedding_json TEXT NOT NULL,
   PRIMARY KEY(source_kind,source_id,speaker_id)
 );
+CREATE TABLE IF NOT EXISTS tags (
+  slug TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  criterion TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate','active','dormant','rejected')),
+  origin TEXT NOT NULL DEFAULT 'model' CHECK(origin IN ('model','user')),
+  proposals INTEGER NOT NULL DEFAULT 0,
+  proposal_days_json TEXT NOT NULL DEFAULT '[]',
+  samples_json TEXT NOT NULL DEFAULT '[]',
+  uses INTEGER NOT NULL DEFAULT 0,
+  decided_by TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used TEXT,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status,last_used);
+CREATE TABLE IF NOT EXISTS tag_aliases (
+  alias TEXT PRIMARY KEY,
+  slug TEXT NOT NULL REFERENCES tags(slug) ON DELETE CASCADE,
+  confidence REAL NOT NULL DEFAULT 0,
+  decided_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tag_aliases_slug ON tag_aliases(slug);
 """
 
 
@@ -280,6 +318,9 @@ def migrate_media_paths(db: sqlite3.Connection) -> None:
 def initialize() -> None:
     with connect() as db:
         db.executescript(SCHEMA)
+        run_columns = {row["name"] for row in db.execute("PRAGMA table_info(pipeline_runs)")}
+        if "progress_json" not in run_columns:
+            db.execute("ALTER TABLE pipeline_runs ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'")
         columns = {row["name"] for row in db.execute("PRAGMA table_info(hourly_summaries)")}
         if "activities_json" not in columns:
             db.execute("ALTER TABLE hourly_summaries ADD COLUMN activities_json TEXT NOT NULL DEFAULT '[]'")
@@ -288,6 +329,8 @@ def initialize() -> None:
             db.execute("ALTER TABLE captures ADD COLUMN preserved INTEGER NOT NULL DEFAULT 0")
         if "process_ms" not in capture_columns:
             db.execute("ALTER TABLE captures ADD COLUMN process_ms INTEGER")
+        if "ai_metrics_json" not in capture_columns:
+            db.execute("ALTER TABLE captures ADD COLUMN ai_metrics_json TEXT NOT NULL DEFAULT '{}'")
         for name in ("transcript_segments_json", "speakers_json", "audio_events_json"):
             if name not in capture_columns:
                 db.execute(f"ALTER TABLE captures ADD COLUMN {name} TEXT NOT NULL DEFAULT '[]'")
@@ -319,6 +362,8 @@ def initialize() -> None:
             db.execute("ALTER TABLE video_segments ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
         if "context" not in video_columns:
             db.execute("ALTER TABLE video_segments ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+        if "session_detached" not in video_columns:
+            db.execute("ALTER TABLE video_segments ADD COLUMN session_detached INTEGER NOT NULL DEFAULT 0")
         session_columns = {row["name"] for row in db.execute("PRAGMA table_info(video_sessions)")}
         if "preserved" not in session_columns:
             db.execute("ALTER TABLE video_sessions ADD COLUMN preserved INTEGER NOT NULL DEFAULT 0")

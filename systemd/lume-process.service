@@ -5,8 +5,9 @@ Wants=captura-dia.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/Documentos/lume
-ExecStart=%h/Documentos/lume/.venv/bin/python -m app.backend.pipeline --limit-audio 100 --limit-screen 250
+WorkingDirectory=@LUME_ROOT@
+ExecStart=@LUME_PYTHON@ -m app.backend.pipeline --limit-audio 100 --limit-screen 250
 Nice=10
 IOSchedulingClass=idle
-TimeoutStartSec=6h
+# O tamanho dos lotes não limita a fila; uma noite com backlog pode durar mais.
+TimeoutStartSec=infinity

@@ -48,9 +48,30 @@
 .session-continuous-head{display:flex;justify-content:space-between;margin-bottom:8px}
 .session-continuous-head strong{font-size:12px}
 .session-continuous-head span{font-size:10px;color:var(--muted)}
-.session-piece-tabs{display:flex;gap:6px;overflow:auto;padding:8px 0}
-.session-piece-tabs button{white-space:nowrap;border:1px solid var(--divider);background:var(--surface2);color:var(--muted);border-radius:6px;padding:6px 8px;font-size:9px}
+/* Grade, e não uma linha só: numa sessão de dez clipes a tira horizontal
+   empurrava metade dos trechos para fora da tela, e cada ficha dizia apenas o
+   número do arquivo. Aqui cabem todos, com a hora e a duração que é como a
+   pessoa lembra a jogada. */
+.session-piece-tabs{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;max-height:min(46vh,340px);overflow-y:auto;padding:10px 2px}
+.session-piece-tabs button{overflow:hidden;text-align:left;border:1px solid var(--divider);background:var(--surface2);color:var(--muted);border-radius:7px;padding:0;font-size:9px;cursor:pointer}
+.session-piece-tabs button>img,.session-piece-tabs .session-piece-missing{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#090a0f}
+.session-piece-tabs .session-piece-missing{display:grid;place-items:center;color:var(--muted)}
+.session-piece-meta{display:flex;align-items:center;gap:6px;padding:6px 8px 0;font-variant-numeric:tabular-nums}
+.session-piece-meta b{color:var(--accent3)}
+.session-piece-meta time{color:var(--text)}
+.session-piece-markers{color:#58a6ff}
+.session-piece-title{display:block;overflow:hidden;padding:2px 8px 7px;text-overflow:ellipsis;white-space:nowrap}
 .session-piece-tabs button.active{border-color:var(--accent);color:var(--accent3)}
+.session-clip-search{max-width:280px;margin-left:auto;padding:5px 9px;font-size:10px}
+.session-continuous-head .share-button{margin-left:9px}
+.custom-context-menu{position:fixed;z-index:200;width:240px;padding:5px;background:rgba(20,21,31,.98);border:1px solid rgba(255,255,255,.16);border-radius:9px;box-shadow:0 14px 44px rgba(0,0,0,.6);backdrop-filter:blur(14px)}
+.custom-context-title{overflow:hidden;padding:7px 9px 8px;border-bottom:1px solid var(--divider);color:var(--muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.custom-context-menu button{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:34px;padding:7px 9px;border:0;border-radius:6px;background:transparent;color:var(--text);font-size:10px;text-align:left;cursor:pointer}
+.custom-context-menu button:hover,.custom-context-menu button:focus-visible{outline:0;background:rgba(141,124,245,.18);color:#fff}
+.custom-context-menu button.danger{color:var(--red)}
+.custom-context-menu button.danger:hover,.custom-context-menu button.danger:focus-visible{background:rgba(255,92,112,.13)}
+.custom-context-menu button:disabled{opacity:.4;cursor:default}
+.custom-context-menu kbd{color:var(--muted);font:8px inherit}
 .media-picker-modal,.context-picker-modal{width:min(780px,calc(100vw - 48px))}
 .picker-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
 .picker-fields span{display:block;font-size:10px;color:var(--muted);margin-bottom:5px}

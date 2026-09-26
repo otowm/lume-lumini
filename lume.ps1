@@ -25,11 +25,15 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venv = Join-Path $root '.venv-win'
 $python = Join-Path $venv 'Scripts\python.exe'
 
-# Nesta instalação o índice é compartilhado com o Linux no volume F:. Use uma
-# variável dedicada para não deslocar também configurações e logs do Windows.
-if (-not $env:CAPTURA_DIA_DB_PATH -and (Test-Path 'F:\lume\lume.sqlite3')) {
-    $env:CAPTURA_DIA_DB_PATH = 'F:\lume\lume.sqlite3'
-}
+# O que é de uma máquina só — caminho do banco compartilhado com o Linux, redes
+# da VPN, porta aberta para fora — mora em `lume-local.ps1`, fora do
+# versionamento. Sem esse arquivo o Lume sobe fechado em 127.0.0.1, que é o que
+# a máquina de outra pessoa deve fazer.
+$env:LUME_REQUIREMENTS = 'requirements.txt'
+$env:LUME_IMPORT_CHECK = 'import fastapi, uvicorn, numpy, sherpa_onnx'
+$env:LUME_BIND_HOST = '127.0.0.1'
+$local = Join-Path $root 'lume-local.ps1'
+if (Test-Path $local) { . $local }
 
 Write-Host "Lume — captura local do dia" -ForegroundColor Cyan
 Write-Host ""
@@ -57,19 +61,21 @@ if (-not (Test-Path $python)) {
 }
 
 # Instala as dependências apenas quando faltam, para a abertura ser rápida.
-& $python -c "import fastapi, uvicorn, numpy, sherpa_onnx" 2>$null
+& $python -c $env:LUME_IMPORT_CHECK 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Instalando dependências..."
-    & $python -m pip install --disable-pip-version-check -q -r (Join-Path $root 'requirements.txt')
+    & $python -m pip install --disable-pip-version-check -q -r (Join-Path $root $env:LUME_REQUIREMENTS)
     if ($LASTEXITCODE -ne 0) { Write-Host "Falha ao instalar dependências." -ForegroundColor Red; Read-Host; exit 1 }
 }
 
 # --- Interface --------------------------------------------------------------
 $url = "http://127.0.0.1:$Port"
-$env:LUME_REMOTE_NETWORKS = if ($env:LUME_REMOTE_NETWORKS) { $env:LUME_REMOTE_NETWORKS } else { '172.27.0.0/16,10.28.4.0/24' }
-$env:LUME_REMOTE_HOSTS = if ($env:LUME_REMOTE_HOSTS) { $env:LUME_REMOTE_HOSTS } else { '172.27.181.179,10.28.4.6' }
 Write-Host "Interface em $url" -ForegroundColor Green
-Write-Host "ZeroTier em http://172.27.181.179:$Port ou http://10.28.4.6:$Port" -ForegroundColor DarkGreen
+if ($env:LUME_REMOTE_HOSTS) {
+    foreach ($host_ in $env:LUME_REMOTE_HOSTS.Split(',')) {
+        Write-Host "Tambem em http://$($host_.Trim()):$Port" -ForegroundColor DarkGreen
+    }
+}
 Write-Host "Feche esta janela (ou Ctrl+C) para encerrar a captura."
 Write-Host ""
 
@@ -78,4 +84,4 @@ if (-not $NoBrowser) {
 }
 
 Set-Location $root
-& $python -m uvicorn app.backend.main:app --host 0.0.0.0 --port $Port
+& $python -m uvicorn app.backend.main:app --host $env:LUME_BIND_HOST --port $Port

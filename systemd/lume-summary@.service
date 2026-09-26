@@ -4,8 +4,8 @@ After=ollama.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/Documentos/lume
-ExecStart=%h/Documentos/lume/.venv/bin/python -m app.backend.pipeline --summary-only %i
+WorkingDirectory=@LUME_ROOT@
+ExecStart=@LUME_PYTHON@ -m app.backend.pipeline --summary-only %i
 Nice=10
 IOSchedulingClass=idle
 TimeoutStartSec=30m

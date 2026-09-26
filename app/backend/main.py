@@ -38,9 +38,10 @@ from ..capture.base import format_video_app_rule, parse_video_app_rule
 from ..capture.imagediff import compare_images
 from .database import connect, initialize, row_dict
 from .audio_intelligence import embedding_for_sample
-from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, MEDIA_ROOT, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source
-from .runtime import pipeline_pause_flag, video_activity_flag, video_recording_flag
+from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
+from .runtime import VIDEO_ACTIVITY_FRESH_SECONDS, pipeline_pause_flag, video_activity_flag, video_recording_flag
 from .retention import cleanup_processed_capture_media, cleanup_ready_days, cleanup_settings, save_cleanup_settings
+from . import editing, mode, prompts, sharing, tags as tag_vocabulary
 from .services import ActionResult, get_manager
 
 
@@ -64,12 +65,12 @@ ALLOWED_CONFIG = {
     "VIDEO_SAMPLE_FRAMES","VIDEO_SAMPLE_GEOMETRY","VIDEO_RETENTION_MINUTES","DELETE_AFTER_DESCRIPTION","PAUSE_OTHER_CAPTURES",
     "VIDEO_ANALYSIS_PROFILE","VIDEO_SCAN_INTERVAL_SECONDS","VIDEO_MAX_KEYFRAMES","VIDEO_FOCUS_GRACE_SECONDS",
     "VIDEO_WEB_SEARCH_ENABLED","SEARXNG_URL","VIDEO_WEB_SEARCH_SAFETY_LIMIT","AI_THINKING_ENABLED",
-    "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_PREROLL_SECONDS",
+    "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
     "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND",
+    "VIDEO_RESOLVE_FPS","VIDEO_RESOLVE_START_TIMECODE",
 }
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
-MEDIA_CACHE_DIR = MEDIA_ROOT / ".lume-cache"
 VIDEO_THUMBNAIL_DIR = MEDIA_CACHE_DIR / "video-thumbnails"
 VIDEO_AUDIO_TRACK_DIR = MEDIA_CACHE_DIR / "video-audio-tracks"
 LEGACY_VIDEO_THUMBNAIL_DIR = CONFIG_DIR / "video-thumbnails"
@@ -111,6 +112,8 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         cancel_video_audio_track_jobs()
+        sharing.cancel_light_jobs()
+        sharing.cancel_uploads()
         manager.shutdown()
 
 
@@ -123,8 +126,55 @@ def _network_values(name: str) -> list[str]:
 
 REMOTE_NETWORKS = tuple(ipaddress.ip_network(value, strict=False) for value in _network_values("LUME_REMOTE_NETWORKS"))
 REMOTE_HOSTS = tuple(_network_values("LUME_REMOTE_HOSTS"))
-ALLOWED_SERVER_HOSTS = {"127.0.0.1", "localhost", "::1", *REMOTE_HOSTS}
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*ALLOWED_SERVER_HOSTS, "testserver"])
+ALLOWED_SERVER_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver", *REMOTE_HOSTS}
+# `["*"]` aqui, e a validação de verdade em `server_host_allowed`: a lista fixa
+# do TrustedHost não sabe aceitar "qualquer IP desta rede", e é justamente isso
+# que a instalação de quem não é técnico precisa — o endereço da máquina na LAN
+# muda de casa para casa e de aluguel de DHCP para o próximo.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+
+#: Rotas que só existem com a análise instalada. Uma tabela num lugar só, em vez
+#: de um `Depends` em quarenta assinaturas: dá para auditar de relance e os
+#: testes conseguem percorrê-la — inclusive para cobrar que toda rota nova seja
+#: classificada de um lado ou do outro.
+_PREFIXOS_IA = (
+    "/api/search", "/api/summary", "/api/days", "/api/timeline", "/api/activities",
+    "/api/captures", "/api/pipeline", "/api/tags", "/api/ollama",
+    "/api/voice-identities", "/api/settings/prompts", "/api/settings/schedule",
+)
+#: As de vídeo não têm prefixo comum: a mesma família de caminhos serve para
+#: gravar e para analisar, e só o sufixo distingue.
+_SUFIXOS_IA = (
+    re.compile(r"^/api/videos/process$"),
+    re.compile(r"^/api/videos/\d+/(analysis|context)$"),
+    re.compile(r"^/api/videos/\d+/speakers(/|$)"),
+    re.compile(r"^/api/video-sessions/\d+/(process|analysis|context)$"),
+    re.compile(r"^/api/test/screen-sequence"),
+    re.compile(r"^/api/videos/\d+/markers/ai$"),
+)
+
+
+def rota_de_ia(caminho: str) -> bool:
+    """Se este caminho só faz sentido com o pipeline instalado."""
+    if caminho.startswith(_PREFIXOS_IA):
+        return True
+    return any(padrao.match(caminho) for padrao in _SUFIXOS_IA)
+
+
+@app.middleware("http")
+async def recusar_analise_no_lumini(request: Request, call_next):
+    """No Lumini, o que depende de IA responde 409 em vez de tentar.
+
+    Esconder os botões na interface não basta: um POST feito na mão chamaria um
+    Ollama que não existe naquela máquina, e o erro sairia como falha de rede no
+    meio de um traceback. 409 porque a rota existe — o que não comporta é o
+    estado da instalação.
+    """
+    if mode.e_lumini() and rota_de_ia(request.url.path):
+        return JSONResponse(status_code=409, content={
+            "detail": "Esta instalação é o Lumini: a análise por IA não foi instalada.",
+        })
+    return await call_next(request)
 
 
 def remote_client_allowed(host: str) -> bool:
@@ -137,12 +187,42 @@ def remote_client_allowed(host: str) -> bool:
     return address.is_loopback or any(address in network for network in REMOTE_NETWORKS)
 
 
+def server_host_allowed(host: str) -> bool:
+    """Se o ``Host`` (ou a origem) descreve este servidor.
+
+    Além dos nomes configurados, aceita **qualquer IP literal dentro das redes
+    autorizadas**. Sem isso, abrir a interface para a rede exigiria fixar o
+    endereço da máquina — que muda ao trocar de Wi-Fi ou ao renovar o DHCP — e a
+    interface passaria a recusar sozinha, com um 400 que ninguém liga à causa.
+
+    Isso não afrouxa a proteção contra DNS rebinding, que é o motivo de conferir
+    o ``Host``: um ataque desses chega com um *domínio* no cabeçalho, nunca com
+    um IP literal da rede local.
+    """
+    name = (host or "").strip()
+    if not name:
+        return True
+    # Tira a porta e os colchetes de IPv6 antes de comparar.
+    if name.startswith("["):
+        name = name[1:].partition("]")[0]
+    elif name.count(":") == 1:
+        name = name.partition(":")[0]
+    name = name.lower()
+    if name in ALLOWED_SERVER_HOSTS:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return address.is_loopback or any(address in network for network in REMOTE_NETWORKS)
+
+
 def origin_allowed(origin: str) -> bool:
     try:
         parsed = urllib.parse.urlsplit(origin)
     except ValueError:
         return False
-    return parsed.scheme in {"http", "https"} and parsed.hostname in ALLOWED_SERVER_HOSTS
+    return parsed.scheme in {"http", "https"} and server_host_allowed(parsed.netloc)
 
 
 @app.middleware("http")
@@ -150,6 +230,8 @@ async def local_origin_only(request: Request, call_next):
     client_host = request.client.host if request.client else ""
     if not remote_client_allowed(client_host):
         return JSONResponse(status_code=403, content={"detail": "Cliente fora da rede autorizada"})
+    if not server_host_allowed(request.headers.get("host", "")):
+        return JSONResponse(status_code=400, content={"detail": "Cabeçalho Host não autorizado"})
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
         if origin and not origin_allowed(origin):
@@ -188,6 +270,25 @@ class ScreenSequenceTestRequest(BaseModel):
     paths: list[str] = Field(min_length=2, max_length=30)
 
 
+class TagCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=60)
+    criterion: str = Field(default="", max_length=400)
+
+
+class TagStatusUpdate(BaseModel):
+    status: Literal["candidate", "active", "dormant", "rejected"]
+
+
+class TagMergeRequest(BaseModel):
+    into: str = Field(min_length=1, max_length=60)
+
+
+class TagTestRequest(BaseModel):
+    tags: list[str] = Field(min_length=1, max_length=20)
+    context: str = Field(default="", max_length=2000)
+    use_laya: bool = True
+
+
 class VideoProcessRequest(BaseModel):
     path: str = Field(max_length=4096)
 
@@ -217,6 +318,17 @@ class VideoDateUpdate(BaseModel):
     captured_at: datetime
 
 
+class ShareUploadRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    use_light: bool = True
+    limit_mb: int | None = Field(default=None, ge=1, le=4096)
+    host: str = Field(default="", max_length=40)
+    expires: str = Field(default="", max_length=8)
+    # Sem valor padrão: publicar um vídeo é decisão de quem publica, e um campo
+    # que já vem marcado não é decisão nenhuma.
+    confirm_public_upload: bool = False
+
+
 class VideoTrimRequest(BaseModel):
     start_seconds: float = Field(ge=0, le=86400)
     end_seconds: float = Field(gt=0, le=86400)
@@ -232,6 +344,10 @@ class RetentionUpdate(BaseModel):
 
 class CleanupSettings(BaseModel):
     enabled: bool
+
+
+class PromptUpdate(BaseModel):
+    text: str
 
 
 def enroll_voice_identity(db, source_kind: str, source_id: int, speaker: dict, label: str, source: Path) -> dict:
@@ -373,12 +489,18 @@ class VideoSettings(BaseModel):
     vision_model: str = Field(default="qwen3-vl-ctx:latest", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$")
     text_model: str = Field(default="qwen3.5:9b", pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,200}$")
     marker_hotkey: str = Field(default="F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
+    # Tempo com o atalho abaixado que abre uma gravação longa no modo clipes.
+    # Abaixo de 0,2s qualquer toque viraria gravação; acima de 3s ninguém
+    # segura tanto sem achar que o atalho não pegou.
+    hotkey_hold_seconds: float = Field(default=0.6, ge=0.2, le=3.0)
     marker_preroll_seconds: int = Field(default=8, ge=0, le=120)
     hud_enabled: bool = True
     hud_placement: Literal["game", "second", "both"] = "second"
     hud_corner: Literal["top-left", "top-right", "bottom-left", "bottom-right"] = "top-right"
     hud_hotkey: str = Field(default="Ctrl+Shift+F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
     hud_sound: bool = True
+    resolve_fps: int = Field(default=0, ge=0, le=120)
+    resolve_start_timecode: str = Field(default="01:00:00:00", pattern=r"^\d{2}:[0-5]\d:[0-5]\d:\d{2}$")
     patterns: list[str] = Field(max_length=100)
     pattern_modes: dict[str, Literal["continuous", "clips"]] = Field(default_factory=dict, max_length=100)
     pattern_fps: dict[str, int] = Field(default_factory=dict, max_length=100)
@@ -527,8 +649,12 @@ def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool, hud_enabled: bo
     verb = "enable" if enabled else "disable"
     result = service_action(verb, ["captura-dia-video.service"], timeout=30, now=True)
     _report_runtime_failure("gravador de vídeo", result)
-    if enabled and result.returncode == 0:
-        _report_runtime_failure("reinício do gravador de vídeo", service_action("restart", ["captura-dia-video.service"], timeout=20))
+    # O laço Linux relê video.conf antes de cada sessão; reiniciá-lo aqui
+    # cortava a partida atual, zerava o timer e podia separar o marcador do
+    # vídeo. No Windows o supervisor aplica Settings em memória por outro fluxo.
+    if enabled and result.returncode == 0 and os.name == "nt":
+        _report_runtime_failure("reinício do gravador de vídeo",
+                                service_action("restart", ["captura-dia-video.service"], timeout=20))
     # A HUD lê a configuração só ao subir; qualquer mudança de posição, canto ou
     # atalho exige religá-la. Ela também não tem o que mostrar com o vídeo
     # seletivo desligado, então segue o estado dele.
@@ -538,6 +664,18 @@ def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool, hud_enabled: bo
     if enabled and hud_enabled:
         _report_runtime_failure("reinício da HUD",
                                 service_action("restart", ["captura-dia-hud.service"], timeout=20))
+    # O daemon do atalho lê a tecla e o tempo da segurada uma vez, ao subir:
+    # trocar F8 por outra tecla na interface só vale depois de reiniciá-lo. No
+    # Windows quem observa o teclado é o próprio gravador, e não há unit.
+    if os.name != "nt":
+        hotkey_verb = "enable" if enabled else "disable"
+        _report_runtime_failure(
+            "atalho de gravação",
+            service_action(hotkey_verb, ["captura-dia-hotkey.service"], timeout=30, now=True))
+        if enabled:
+            _report_runtime_failure(
+                "reinício do atalho de gravação",
+                service_action("restart", ["captura-dia-hotkey.service"], timeout=20))
 
 
 def _restart_screen_runtime() -> None:
@@ -615,7 +753,7 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
 
 
 @app.get("/api/ollama/models")
@@ -661,7 +799,7 @@ VIDEO_GEOMETRY={settings.geometry}
 VIDEO_SEGMENT_SECONDS={settings.segment_seconds}
 VIDEO_CODEC={settings.codec}
 VIDEO_QUALITY=high
-VIDEO_AUDIO=default_output
+VIDEO_AUDIO='device:MicBus.monitor|device:DiscordBus.monitor|device:RecordBus.monitor,device:MicBus.monitor,device:DiscordBus.monitor,device:RecordBus.monitor'
 VIDEO_SAMPLE_FRAMES={settings.sample_frames}
 VIDEO_SAMPLE_GEOMETRY={settings.sample_geometry}
 VIDEO_RETENTION_MINUTES={settings.retention_minutes}
@@ -678,12 +816,15 @@ AI_THINKING_ENABLED={'true' if settings.thinking_enabled else 'false'}
 LUME_VISION_MODEL={shlex.quote(settings.vision_model)}
 LUME_TEXT_MODEL={shlex.quote(settings.text_model)}
 VIDEO_MARKER_HOTKEY={shlex.quote(settings.marker_hotkey)}
+VIDEO_HOTKEY_HOLD_SECONDS={settings.hotkey_hold_seconds}
 VIDEO_MARKER_PREROLL_SECONDS={settings.marker_preroll_seconds}
 VIDEO_HUD_ENABLED={'true' if settings.hud_enabled else 'false'}
 VIDEO_HUD_PLACEMENT={settings.hud_placement}
 VIDEO_HUD_CORNER={settings.hud_corner}
 VIDEO_HUD_HOTKEY={shlex.quote(settings.hud_hotkey)}
 VIDEO_HUD_SOUND={'true' if settings.hud_sound else 'false'}
+VIDEO_RESOLVE_FPS={settings.resolve_fps}
+VIDEO_RESOLVE_START_TIMECODE={settings.resolve_start_timecode}
 """
     for pattern,fps in settings.pattern_fps.items():
         if pattern in settings.patterns and not 1 <= fps <= 60:
@@ -704,8 +845,18 @@ Icon=bookmark-new
 NoDisplay=true
 X-KDE-Shortcuts={settings.marker_hotkey}
 """)
-    if config_changed or rules_changed or shortcut_changed:
-        background_tasks.add_task(_apply_video_runtime, settings.enabled, shortcut_changed,
+    hud_shortcut_file = shortcut_file.with_name("lume-hud-toggle.desktop")
+    hud_shortcut_changed = atomic_write_if_changed(hud_shortcut_file, f"""[Desktop Entry]
+Type=Application
+Name=Lume — alternar HUD
+Exec={Path.home()}/bin/lume-toggle-video-hud
+Icon=video-display
+NoDisplay=true
+X-KDE-Shortcuts={settings.hud_hotkey}
+""")
+    if config_changed or rules_changed or shortcut_changed or hud_shortcut_changed:
+        background_tasks.add_task(_apply_video_runtime, settings.enabled,
+                                  shortcut_changed or hud_shortcut_changed,
                                   settings.hud_enabled)
     return get_video_settings()
 
@@ -926,6 +1077,27 @@ def safe_video_path(raw: str) -> Path:
     return candidate
 
 
+def media_version(source: Path) -> str:
+    """Carimbo que muda quando o arquivo muda.
+
+    As URLs de mídia carregam o caminho, que o corte não altera — ele reescreve
+    o arquivo no lugar. Sem este carimbo o navegador continua servindo do cache
+    as faixas de bytes do vídeo *antigo* por uma hora, e o player cola pedaços
+    de duas codificações diferentes: a imagem nova com o áudio velho.
+    """
+    try:
+        stats = source.stat()
+    except OSError:
+        return "0"
+    return f"{stats.st_mtime_ns}-{stats.st_size}"
+
+
+def media_url(source_key: str, source: Path, endpoint: str = "video", **extra) -> str:
+    query = "".join(f"&{name}={value}" for name, value in extra.items())
+    return (f"/api/{endpoint}?path={urllib.parse.quote(source_key, safe='')}"
+            f"{query}&v={media_version(source)}")
+
+
 def video_thumbnail_cache_path(source: Path) -> Path:
     identity = media_source_key(source).encode("utf-8", errors="surrogatepass")
     return VIDEO_THUMBNAIL_DIR / f"{hashlib.sha256(identity).hexdigest()}.jpg"
@@ -1035,35 +1207,58 @@ def probe_video_audio_tracks(source: Path) -> list[dict]:
     ]
 
 
-def video_audio_track_cache_path(source: Path, track: int) -> Path:
+#: Contêiner do cache por codec de áudio. A extração usa ``-c:a copy`` para não
+#: reencodar horas de gravação, e por isso o contêiner precisa aceitar o codec
+#: de origem: a extensão ``.m4a`` seleciona o muxer ipod, que recusa Opus — o
+#: padrão do gpu-screen-recorder em mp4/mkv. Com a extensão errada o ffmpeg nem
+#: escrevia o cabeçalho, o job terminava em erro e o botão "Preparar faixas
+#: independentes" não produzia nada.
+VIDEO_AUDIO_TRACK_DEFAULT_CONTAINER = (".m4a", "audio/mp4")
+VIDEO_AUDIO_TRACK_CONTAINERS = {
+    "opus": (".opus", "audio/ogg"),
+    "vorbis": (".ogg", "audio/ogg"),
+    "flac": (".flac", "audio/flac"),
+}
+VIDEO_AUDIO_TRACK_SUFFIXES = (
+    VIDEO_AUDIO_TRACK_DEFAULT_CONTAINER, *VIDEO_AUDIO_TRACK_CONTAINERS.values(),
+)
+
+
+def video_audio_track_container(codec: str) -> tuple[str, str]:
+    """Extensão e mimetype que aceitam ``codec`` sem reencodar."""
+    return VIDEO_AUDIO_TRACK_CONTAINERS.get(
+        str(codec or "").strip().lower(), VIDEO_AUDIO_TRACK_DEFAULT_CONTAINER)
+
+
+def video_audio_track_cache_path(source: Path, track: int, suffix: str = ".m4a") -> Path:
     identity = f"{media_source_key(source)}\0{track}".encode("utf-8", errors="surrogatepass")
-    return VIDEO_AUDIO_TRACK_DIR / f"{hashlib.sha256(identity).hexdigest()}.m4a"
+    return VIDEO_AUDIO_TRACK_DIR / f"{hashlib.sha256(identity).hexdigest()}{suffix}"
+
+
+def video_audio_track_destination(source: Path, item: dict) -> Path:
+    suffix, _ = video_audio_track_container(item.get("codec", ""))
+    return video_audio_track_cache_path(source, int(item["track"]), suffix)
+
+
+def resolve_video_audio_track_cache(source: Path, track: int) -> tuple[Path, str] | None:
+    """Acha o stem já preparado sem reabrir o vídeo só para descobrir o codec."""
+    for suffix, media_type in VIDEO_AUDIO_TRACK_SUFFIXES:
+        destination = video_audio_track_cache_path(source, track, suffix)
+        if suffix == VIDEO_AUDIO_TRACK_DEFAULT_CONTAINER[0]:
+            migrate_legacy_cache_file(destination, LEGACY_VIDEO_AUDIO_TRACK_DIR)
+        if destination.is_file():
+            return destination, media_type
+    return None
 
 
 def video_audio_tracks_cached(source: Path, tracks: list[dict]) -> bool:
-    destinations = [video_audio_track_cache_path(source, int(item["track"])) for item in tracks]
+    destinations = [video_audio_track_destination(source, item) for item in tracks]
     for destination in destinations:
         migrate_legacy_cache_file(destination, LEGACY_VIDEO_AUDIO_TRACK_DIR)
     return bool(destinations) and all(
         path.is_file() and path.stat().st_mtime_ns >= source.stat().st_mtime_ns
         for path in destinations
     )
-
-
-def unlink_with_retry(path: Path, attempts: int = 30, delay: float = 0.1) -> bool:
-    """Remove um arquivo, aguardando handles transitórios do FFmpeg/player no Windows."""
-    attempts = max(1, attempts)
-    for attempt in range(attempts):
-        try:
-            path.unlink()
-            return True
-        except FileNotFoundError:
-            return False
-        except PermissionError:
-            if attempt + 1 >= attempts:
-                raise
-            time.sleep(delay)
-    return False
 
 
 class _VideoAudioTrackJob:
@@ -1113,8 +1308,8 @@ class _VideoAudioTrackJob:
                 pass
 
     def _run(self) -> None:
-        destinations = [video_audio_track_cache_path(self.source, int(item["track"])) for item in self.tracks]
-        temporary = [path.with_suffix(f".{self.id}.tmp.m4a") for path in destinations]
+        destinations = [video_audio_track_destination(self.source, item) for item in self.tracks]
+        temporary = [path.with_name(f"{path.stem}.{self.id}.tmp{path.suffix}") for path in destinations]
         acquired = False
         process: subprocess.Popen[str] | None = None
         try:
@@ -1133,10 +1328,10 @@ class _VideoAudioTrackJob:
                 path.unlink(missing_ok=True)
             command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(self.source)]
             for item, path in zip(self.tracks, temporary):
-                command += [
-                    "-map", f"0:a:{int(item['track'])}", "-vn", "-c:a", "copy",
-                    "-movflags", "+faststart", str(path),
-                ]
+                command += ["-map", f"0:a:{int(item['track'])}", "-vn", "-c:a", "copy"]
+                if path.suffix == VIDEO_AUDIO_TRACK_DEFAULT_CONTAINER[0]:
+                    command += ["-movflags", "+faststart"]
+                command.append(str(path))
             process = subprocess.Popen(
                 command, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=os.environ.copy(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -1204,10 +1399,14 @@ def delete_video_caches(source: Path) -> None:
         video_thumbnail_cache_path(source),
         LEGACY_VIDEO_THUMBNAIL_DIR / video_thumbnail_cache_path(source).name,
     ]
+    # Todas as versões leves deste vídeo, em qualquer teto: depois de um corte, a
+    # que já existe mostra o trecho antigo com o nome do novo.
+    paths.extend(sharing.SHARE_CACHE_DIR.glob(sharing.share_cache_glob(source)))
     for track in range(32):
-        destination = video_audio_track_cache_path(source, track)
-        paths.extend((destination, LEGACY_VIDEO_AUDIO_TRACK_DIR / destination.name))
-        paths.extend(destination.parent.glob(f"{destination.stem}.*.tmp.m4a"))
+        for suffix, _ in VIDEO_AUDIO_TRACK_SUFFIXES:
+            destination = video_audio_track_cache_path(source, track, suffix)
+            paths.extend((destination, LEGACY_VIDEO_AUDIO_TRACK_DIR / destination.name))
+            paths.extend(destination.parent.glob(f"{destination.stem}.*.tmp{suffix}"))
     for path in paths:
         try:
             unlink_with_retry(path, attempts=5)
@@ -1219,7 +1418,8 @@ def delete_video_caches(source: Path) -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "time": datetime.now().astimezone().isoformat()}
+    return {"status": "ok", "mode": mode.modo_atual(),
+            "time": datetime.now().astimezone().isoformat()}
 
 
 @app.get("/api/status")
@@ -1233,6 +1433,7 @@ def status() -> dict:
     screen_files = directory_stats(SCREEN_DIR, ".png")
     usage = shutil.disk_usage(MEDIA_ROOT if MEDIA_ROOT.exists() else HOME)
     return {
+        "mode": mode.modo_atual(),
         "capturing": bool(audio["active"] and screen["active"]),
         "target": target,
         "audio": audio,
@@ -1256,7 +1457,10 @@ def selective_video_status() -> dict:
     service = unit_state("captura-dia-video.service")
     flag = video_activity_flag()
     pause_flag = video_recording_flag()
-    recording = flag.is_file()
+    try:
+        recording = time.time() - flag.stat().st_mtime <= VIDEO_ACTIVITY_FRESH_SECONDS
+    except OSError:
+        recording = False
     window = ""
     started_at: float | None = None
     mode = config.get("VIDEO_CAPTURE_MODE", "continuous").lower()
@@ -1279,7 +1483,7 @@ def selective_video_status() -> dict:
                 window = raw
                 started_at = flag.stat().st_mtime
         except OSError:
-            pass
+            recording = False
     if mode not in {"continuous", "clips"}:
         mode = "continuous"
     return {
@@ -1290,16 +1494,24 @@ def selective_video_status() -> dict:
         "mode": mode,
         "window": window,
         "started_at": started_at,
-        "pausing_captures": pause_flag.is_file(),
+        "pausing_captures": recording and pause_flag.is_file(),
         "pause_other_captures": config.get("PAUSE_OTHER_CAPTURES", "true").lower() == "true",
     }
 
 
 @app.post("/api/capture/{action}")
 def capture_action(action: Literal["pause", "resume"]) -> dict:
-    verb = "stop" if action == "pause" else "start"
+    """Pausar e retomar a captura, de um jeito que sobreviva ao reboot.
+
+    Só parar a unit valia até o próximo login: ela continuava habilitada e o
+    systemd a subia de novo no boot seguinte, como se a pausa nunca tivesse
+    existido. Quem guarda essa escolha é o estado de habilitação — é o mesmo
+    que o supervisor do Windows já persistia em ``_remember``. O ``--now``
+    mantém o efeito imediato de antes.
+    """
+    verb = "disable" if action == "pause" else "enable"
     units = ["captura-dia-audio.service", "captura-dia-tela.service"]
-    result = service_action(verb, units, timeout=30)
+    result = service_action(verb, units, timeout=30, now=True)
     if result.returncode != 0:
         raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao controlar a captura")
     return {"ok": True, "action": action}
@@ -1489,17 +1701,25 @@ def test_video_window(payload: VideoWindowTest) -> dict:
             compiled.append((pattern, field, re.compile(expression, re.IGNORECASE)))
         except re.error as exc:
             raise HTTPException(status_code=422, detail=f"Regex inválida: {pattern}: {exc}") from exc
-    info = get_backend().active_window()
+    backend = get_backend()
+    info = backend.active_window()
     if not info:
         raise HTTPException(status_code=503, detail="Não foi possível consultar a janela ativa")
-    # No Windows o segundo campo é o executável. Regras antigas/sem
-    # prefixo procuram somente nele, igual ao gravador real.
-    title, _, executable = info.partition(" | ")
-    fields = {"title": title.strip(), "exe": executable.strip(), "class": ""}
+    # O segundo campo é o executável no Windows e a classe da janela no Linux —
+    # nos dois é a identidade estável do app, e é nela que uma regra sem prefixo
+    # procura, igual ao gravador real. A separação é pelo último " | " porque o
+    # título pode conter a sequência: "mrekk | osu! ... - YouTube | firefox" é
+    # um vídeo no navegador, não o jogo.
+    title, separator, identity = info.rpartition(" | ")
+    if not separator:
+        title, identity = "", info
+    title, identity = title.strip(), identity.strip()
+    window_class = identity if backend.name != "windows" else ""
+    fields = {"title": title, "exe": identity, "class": window_class}
     matched_pattern = next((source for source, field, regex in compiled if regex.search(fields[field])), "")
     return {
-        "ok": True, "window_id": "", "title": title.strip(), "window_class": executable.strip(),
-        "executable": executable.strip(),
+        "ok": True, "window_id": "", "title": title, "window_class": identity,
+        "executable": identity,
         "info": info, "matched": bool(matched_pattern), "matched_pattern": matched_pattern,
     }
 
@@ -1615,6 +1835,111 @@ def video_file(request: Request, path: str) -> StreamingResponse:
     })
 
 
+@app.get("/api/video-download")
+def download_video(path: str) -> FileResponse:
+    """O mesmo arquivo, com o nome que a pessoa reconhece no seletor do Discord.
+
+    Rota própria, e não um ``?download=1`` em ``/api/video``: aquela existe para
+    o ``<video>`` e por isso corta todo Range em 8 MB, responde sempre 206 e
+    guarda uma hora de cache. Download quer o oposto — o arquivo inteiro, de uma
+    vez, e sem cache sobre um nome que muda quando a IA titula o clipe.
+
+    O ``FileResponse`` monta o ``Content-Disposition`` (inclusive o
+    ``filename*=utf-8''`` de nomes com acento) e trata Range sozinho; escrever
+    esse header à mão só acrescentaria uma forma nova de errá-lo.
+    """
+    source = safe_video_path(path)
+    return FileResponse(
+        source, filename=sharing.download_filename(path, source),
+        media_type=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/share/light")
+def light_version_state(path: str, limit_mb: int | None = None) -> dict:
+    """Consulta pura: diz se a versão leve existe, está saindo ou não cabe."""
+    source = safe_video_path(path)
+    try:
+        return sharing.light_state(path, source, limit_mb)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/share/light")
+def start_light_version(path: str, limit_mb: int | None = None) -> dict:
+    source = safe_video_path(path)
+    try:
+        return sharing.light_state(path, source, limit_mb, start=True)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/share/light")
+def cancel_light_version(path: str) -> dict:
+    source = safe_video_path(path)
+    return {"ok": True, "cancelled": sharing.cancel_light_jobs(source)}
+
+
+@app.get("/api/video-light")
+def light_video_file(path: str, limit_mb: int | None = None) -> FileResponse:
+    """Baixa a versão leve pronta; 409 enquanto ela não existir.
+
+    Não gera nada aqui: um GET que dispara meio minuto de ffmpeg viraria
+    timeout no navegador, e é o ``POST`` que existe para isso.
+    """
+    source = safe_video_path(path)
+    try:
+        limit = sharing.normalized_limit(limit_mb)
+        ready = sharing.share_cached(source, limit)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if ready is None:
+        raise HTTPException(status_code=409, detail="A versão leve ainda não está pronta")
+    return FileResponse(
+        ready, filename=sharing.light_filename(path, source, limit),
+        media_type="video/mp4", headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/share/upload")
+def upload_state(path: str) -> dict:
+    """Andamento do envio e os links que este clipe já ganhou."""
+    safe_video_path(path)
+    initialize()
+    return sharing.upload_state(path)
+
+
+@app.post("/api/share/upload")
+def start_upload(payload: ShareUploadRequest) -> dict:
+    """Publica o clipe num host grátis. Exige confirmação explícita."""
+    source = safe_video_path(payload.path)
+    initialize()
+    try:
+        return sharing.start_upload(
+            payload.path, source, use_light=payload.use_light, limit_mb=payload.limit_mb,
+            host_name=payload.host or None, expires=payload.expires or sharing.DEFAULT_EXPIRES,
+            confirmed=payload.confirm_public_upload,
+        )
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/share/upload")
+def cancel_upload(path: str) -> dict:
+    safe_video_path(path)
+    return {"ok": True, "cancelled": sharing.cancel_uploads(path)}
+
+
+@app.delete("/api/share/links/{link_id}")
+def forget_shared_link(link_id: int) -> dict:
+    """Tira o link da lista. O arquivo continua no ar — o host é que o apaga."""
+    initialize()
+    if not sharing.forget_link(link_id):
+        raise HTTPException(status_code=404, detail="Link não encontrado")
+    return {"ok": True, "id": link_id, "unpublished": False}
+
+
 @app.get("/api/video-audio-tracks")
 def video_audio_tracks(path: str, prepare: bool = False) -> dict:
     source = safe_video_path(path)
@@ -1636,7 +1961,7 @@ def video_audio_tracks(path: str, prepare: bool = False) -> dict:
             "items": [
                 {
                     **item,
-                    "url": f"/api/video-audio-track?path={urllib.parse.quote(path, safe='')}&track={item['track']}",
+                    "url": media_url(path, source, "video-audio-track", track=item["track"]),
                 }
                 for item in tracks
             ],
@@ -1674,11 +1999,12 @@ def cancel_video_audio_tracks(path: str, job_id: str) -> dict:
 @app.get("/api/video-audio-track")
 def video_audio_track(path: str, track: int = Query(ge=0, le=31)) -> FileResponse:
     source = safe_video_path(path)
-    destination = video_audio_track_cache_path(source, track)
-    if not destination.is_file() or destination.stat().st_mtime_ns < source.stat().st_mtime_ns:
+    resolved = resolve_video_audio_track_cache(source, track)
+    if resolved is None or resolved[0].stat().st_mtime_ns < source.stat().st_mtime_ns:
         raise HTTPException(status_code=409, detail="Faixas de áudio ainda estão sendo preparadas")
+    destination, media_type = resolved
     return FileResponse(
-        destination, media_type="audio/mp4",
+        destination, media_type=media_type,
         headers={"Cache-Control": "private, max-age=86400"},
     )
 
@@ -1692,27 +2018,20 @@ def video_thumbnail(path: str) -> FileResponse:
     )
 
 
-def video_game_label(source_path: str, fallback: str = "") -> tuple[str, str]:
-    """Prefer the recorded window title over an AI-generated app guess."""
-    source = resolve_media_source(source_path)
-    sidecar = source.with_suffix(source.suffix + ".window")
-    if sidecar.is_file():
-        window = sidecar.read_text(encoding="utf-8", errors="replace").strip()
-        title, separator, executable = window.rpartition(" | ")
-        label = (title if separator else window).strip() or executable.strip()
-        if label:
-            return label, "window"
-    return fallback.strip(), "analysis" if fallback.strip() else "unknown"
-
-
 @app.get("/api/videos")
 def list_videos() -> dict:
     VIDEO_DIR.mkdir(parents=True, exist_ok=True); initialize()
     paths = sorted(
-        (path for path in VIDEO_DIR.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS),
+        (path for path in VIDEO_DIR.iterdir()
+         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+         and not path.name.endswith(".partial.mp4")),
         key=lambda item:item.stat().st_mtime, reverse=True,
     )
     with connect() as db:
+        # Versões antigas chegaram a indexar o arquivo temporário enquanto o
+        # gravador ainda escrevia. Ele nunca é mídia do usuário nem deve virar
+        # uma entrada fantasma depois do rename para o nome final.
+        db.execute("DELETE FROM video_segments WHERE source_path LIKE '%.partial.mp4'")
         known_paths={row["source_path"] for row in db.execute("SELECT source_path FROM video_segments")}
     for path in paths:
         source_key = media_source_key(path)
@@ -1723,7 +2042,10 @@ def list_videos() -> dict:
     with connect() as db:
         affected_sessions: set[int] = set()
         for path in paths:
-            video = db.execute("SELECT id,session_id FROM video_segments WHERE source_path=?",(media_source_key(path),)).fetchone()
+            video = db.execute(
+                "SELECT id,session_id,session_detached FROM video_segments WHERE source_path=?",
+                (media_source_key(path),),
+            ).fetchone()
             video_id = video["id"]
             marker_file = path.with_suffix(path.suffix+".markers")
             if marker_file.is_file():
@@ -1734,7 +2056,7 @@ def list_videos() -> dict:
                     if round(offset,3) not in existing:
                         db.execute("INSERT INTO video_markers(video_id,offset_seconds) VALUES(?,?)",(video_id,offset));existing.add(round(offset,3))
             captured_session = captured_video_session(path)
-            if captured_session and video["session_id"] is None:
+            if captured_session and video["session_id"] is None and not video["session_detached"]:
                 key, name = captured_session
                 source = AUTO_VIDEO_SESSION_PREFIX + key
                 session = db.execute("SELECT id FROM video_sessions WHERE source_folder=?", (source,)).fetchone()
@@ -1767,7 +2089,7 @@ def list_videos() -> dict:
         sidecar=path.with_suffix(path.suffix+".window")
         window=sidecar.read_text(encoding="utf-8").strip() if sidecar.exists() else ""
         game, game_source = video_game_label(source_key, state.get("app", ""))
-        items.append({"id":state.get("id"),"session_id":state.get("session_id"),"name":path.name,"path":source_key,"bytes":path.stat().st_size,"modified_at":datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(),"captured_at":state.get("captured_at") or datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(),"status":state.get("status","unindexed"),"stage":state.get("stage",""),"progress":state.get("progress",0),"trace":json.loads(state.get("trace_json","[]") or "[]"),"title":state.get("title","") ,"game":game,"game_source":game_source,"description":state.get("description",""),"context":state.get("context",""),"transcript":state.get("transcript",""),"transcript_segments":json.loads(state.get("transcript_segments_json","[]") or "[]"),"chapters":json.loads(state.get("chapters_json","[]") or "[]"),"markers":markers_by_video.get(state.get("id"), []),"error":state.get("error","") ,"preserved":bool(state.get("preserved",0)),"available":True,"url":f"/api/video?path={source_key}"})
+        items.append({"id":state.get("id"),"session_id":state.get("session_id"),"name":path.name,"path":source_key,"bytes":path.stat().st_size,"modified_at":datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(),"captured_at":state.get("captured_at") or datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(),"status":state.get("status","unindexed"),"stage":state.get("stage",""),"progress":state.get("progress",0),"trace":json.loads(state.get("trace_json","[]") or "[]"),"title":state.get("title","") ,"game":game,"game_source":game_source,"description":state.get("description",""),"context":state.get("context",""),"transcript":state.get("transcript",""),"transcript_segments":json.loads(state.get("transcript_segments_json","[]") or "[]"),"chapters":json.loads(state.get("chapters_json","[]") or "[]"),"markers":markers_by_video.get(state.get("id"), []),"error":state.get("error","") ,"preserved":bool(state.get("preserved",0)),"available":True,"url":media_url(source_key,path),"thumbnail_url":media_url(source_key,path,"video-thumbnail")})
         items[-1]["speakers"] = json.loads(state.get("speakers_json", "[]") or "[]")
         items[-1]["audio_events"] = json.loads(state.get("audio_events_json", "[]") or "[]")
     for source_key, state in states.items():
@@ -1916,7 +2238,10 @@ def join_video_session(payload: VideoJoinRequest) -> dict:
         session_id = cursor.lastrowid
         ordered_ids = [row["id"] for row in sorted(clips_by_id.values(),key=lambda row:(row["captured_at"],row["id"]))]
         for order, video_id in enumerate(ordered_ids):
-            db.execute("UPDATE video_segments SET session_id=?,sort_order=? WHERE id=?", (session_id, order, video_id))
+            db.execute(
+                "UPDATE video_segments SET session_id=?,sort_order=?,session_detached=0 WHERE id=?",
+                (session_id, order, video_id),
+            )
         if session_ids:
             db.execute(
                 f"DELETE FROM video_sessions WHERE id IN ({','.join('?' for _ in session_ids)})",
@@ -1925,6 +2250,59 @@ def join_video_session(payload: VideoJoinRequest) -> dict:
     return {
         "ok": True, "id": session_id, "name": payload.name.strip(),
         "clips": len(ordered_ids), "merged_sessions": len(session_ids),
+    }
+
+
+@app.delete("/api/video-sessions/{session_id}/clips/{video_id}")
+def detach_video_from_session(session_id: int, video_id: int) -> dict:
+    """Retira um trecho da sessão sem apagar o vídeo nem sua análise."""
+    initialize()
+    with connect() as db:
+        session = db.execute(
+            "SELECT id,status FROM video_sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        clip = db.execute(
+            "SELECT id,status,session_id FROM video_segments WHERE id=?", (video_id,)
+        ).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="Sessão não encontrada")
+        if not clip or clip["session_id"] != session_id:
+            raise HTTPException(status_code=404, detail="Vídeo não pertence a esta sessão")
+        if session["status"] in ("queued", "processing") or clip["status"] in ("queued", "processing"):
+            raise HTTPException(
+                status_code=409,
+                detail="A sessão está sendo analisada; cancele ou aguarde antes de retirar o vídeo",
+            )
+
+        db.execute(
+            "UPDATE video_segments SET session_id=NULL,sort_order=0,session_detached=1 WHERE id=?",
+            (video_id,),
+        )
+        remaining = db.execute(
+            "SELECT id FROM video_segments WHERE session_id=? ORDER BY captured_at,id",
+            (session_id,),
+        ).fetchall()
+        for order, row in enumerate(remaining):
+            db.execute("UPDATE video_segments SET sort_order=? WHERE id=?", (order, row["id"]))
+
+        session_deleted = not remaining
+        if session_deleted:
+            db.execute("DELETE FROM video_sessions WHERE id=?", (session_id,))
+        else:
+            db.execute(
+                """UPDATE video_sessions
+                   SET status='pending',stage='Análise desatualizada após retirar trecho',progress=0,
+                       summary='',trace_json='[]',job_unit='',error='',processed_at=NULL,
+                       ai_live_thinking='',ai_live_content='',ai_metrics_json='{}'
+                   WHERE id=?""",
+                (session_id,),
+            )
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "video_id": video_id,
+        "remaining_clips": len(remaining),
+        "session_deleted": session_deleted,
     }
 
 @app.post("/api/videos/{video_id}/markers")
@@ -1976,6 +2354,7 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
 
     temporary = source.with_name(f".{source.stem}.lume-trim-{secrets.token_hex(5)}{source.suffix}")
     cancel_video_audio_track_job(source)
+    sharing.cancel_light_jobs(source)
     try:
         result = run(trim_video_command(source, temporary, start, end - start), timeout=3600)
         if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
@@ -2076,7 +2455,8 @@ def list_video_sessions() -> dict:
             "bytes": source.stat().st_size if available else 0,
             "available": available,
             "path": row["source_path"],
-            "url": f"/api/video?path={row['source_path']}" if available else "",
+            "url": media_url(row["source_path"], source) if available else "",
+            "thumbnail_url": media_url(row["source_path"], source, "video-thumbnail") if available else "",
         })
     items = []
     for row in sessions:
@@ -2469,6 +2849,86 @@ def set_cleanup_settings(settings: CleanupSettings) -> dict:
     return save_cleanup_settings(settings.enabled)
 
 
+def resolve_timeline_options() -> tuple[int, str]:
+    """FPS e timecode inicial da timeline, como configurados no Video seletivo."""
+    config = parse_shell_config(VIDEO_CONFIG)
+    try:
+        fps = int(config.get("VIDEO_RESOLVE_FPS", "0"))
+    except ValueError:
+        fps = 0
+    return max(0, fps), config.get("VIDEO_RESOLVE_START_TIMECODE", editing.DEFAULT_START_TIMECODE)
+
+
+@app.get("/api/editing")
+def get_editing_folder() -> dict:
+    return editing.folder()
+
+
+@app.post("/api/editing/video/{video_id}")
+def send_video_to_editing(video_id: int) -> dict:
+    fps, start = resolve_timeline_options()
+    try:
+        return editing.send_video(video_id, start_timecode=start, fps=fps)
+    except editing.EditingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/editing/session/{session_id}")
+def send_session_to_editing(session_id: int) -> dict:
+    fps, start = resolve_timeline_options()
+    try:
+        return editing.send_session(session_id, start_timecode=start, fps=fps)
+    except editing.EditingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/editing/{name}")
+def remove_from_editing(name: str) -> dict:
+    """Some com o atalho; o video original continua onde sempre esteve."""
+    try:
+        return editing.remove(name)
+    except editing.EditingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail=f"Nao deu para remover: {exc}") from exc
+
+
+@app.post("/api/editing/open")
+def open_editing_folder() -> dict:
+    """Abre a pasta no gerenciador de arquivos da maquina que roda o Lume."""
+    EDIT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if os.name == "nt":
+            os.startfile(EDIT_DIR)
+        else:
+            subprocess.Popen(["xdg-open", str(EDIT_DIR)])
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"Nao deu para abrir a pasta: {exc}") from exc
+    return {"ok": True, "root": str(EDIT_DIR)}
+
+
+@app.get("/api/settings/prompts")
+def get_prompts() -> dict:
+    return {"items": prompts.listing()}
+
+
+@app.put("/api/settings/prompts/{key}")
+def set_prompt(key: str, update: PromptUpdate) -> dict:
+    """Guarda o texto do usuario; um prompt igual ao padrao volta a seguir o Lume."""
+    try:
+        return prompts.save(key, update.text)
+    except prompts.PromptError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/settings/prompts/{key}")
+def reset_prompt(key: str) -> dict:
+    try:
+        return prompts.reset(key)
+    except prompts.PromptError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.delete("/api/media/raw/unkept")
 def delete_unkept_raw_media() -> dict:
     """Executa manualmente a limpeza segura apenas de prints e áudios consolidados."""
@@ -2549,6 +3009,69 @@ def screen_sequence_result(job_id: int) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="Teste de sequência não encontrado")
     return {**dict(row), "result": json.loads(row["result_json"] or "{}")}
+
+
+@app.get("/api/tags")
+def list_tags() -> dict:
+    return tag_vocabulary.listing()
+
+
+@app.post("/api/tags")
+def create_tag(payload: TagCreate) -> dict:
+    try:
+        return tag_vocabulary.create(payload.label, payload.criterion)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/tags/test")
+def test_tags(payload: TagTestRequest) -> dict:
+    """Conciliação sem gravar nada: mostra o caminho de cada string até a tag."""
+    resolution = tag_vocabulary.canonicalize(
+        payload.tags, context=payload.context, use_laya=payload.use_laya, commit=False
+    )
+    return {**resolution.as_dict(), "laya": tag_vocabulary.laya.status()}
+
+
+@app.post("/api/tags/promote")
+def promote_tags(day: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"), commit: bool = False) -> dict:
+    """Roda a promoção de um dia — em ensaio por padrão, gravando só quando pedido."""
+    if unit_state("lume-process.service")["active"]:
+        raise HTTPException(status_code=409, detail="O pipeline automático está usando a GPU; pare-o na tela Fila ou aguarde")
+    flag = "--promote-tags" if commit else "--preview-tags"
+    result = run([sys.executable, "-m", "app.backend.pipeline", flag, day], timeout=900)
+    if result.returncode != 0:
+        raise HTTPException(status_code=503, detail=result.stderr.strip() or "Falha ao promover as tags")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="O pipeline não devolveu um relatório legível") from exc
+
+
+@app.put("/api/tags/{slug}/status")
+def update_tag_status(slug: str, payload: TagStatusUpdate) -> dict:
+    try:
+        return tag_vocabulary.set_status(slug, payload.status)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/tags/{slug}/merge")
+def merge_tag(slug: str, payload: TagMergeRequest) -> dict:
+    try:
+        return tag_vocabulary.merge(slug, payload.into)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/tags/aliases/{alias}")
+def delete_tag_alias(alias: str) -> dict:
+    try:
+        return tag_vocabulary.remove_alias(alias)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.delete("/api/test/screen-sequence/{job_id}")
@@ -2936,6 +3459,45 @@ def queue_eta_seconds(counts: dict[str, int], speed: dict[str, dict[str, int]]) 
     return round(total) or None
 
 
+def pipeline_summary_job(db) -> dict:
+    """Expose the worker's actual plan; older workers report only saved evidence."""
+    job = {"id": "pipeline-summary", "kind": "summary", "title": "Consolidação dos dias", "stage": "Finalizando o processamento"}
+    run = db.execute("SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1").fetchone()
+    if not run or run["status"] != "running":
+        return job
+    payload = json.loads(dict(run).get("progress_json") or "{}")
+    days = payload.get("days", [])
+    if days:
+        finished = sum(item["status"] in ("done", "error") for item in days)
+        errors = sum(item["status"] == "error" for item in days)
+        current = next((item for item in days if item["status"] == "processing"), None)
+        job.update(days=days, progress=round(finished / len(days) * 100),
+                   detail=f"{finished}/{len(days)} dias finalizados · {errors} com falha",
+                   updated_at=payload.get("updated_at"))
+        if current:
+            date = current["day"]
+            job.update(title=f"Resumo de {date[8:10]}/{date[5:7]}/{date[:4]}", stage=current["stage"])
+        else:
+            job["stage"] = "Finalizando lote e limpeza"
+        return job
+    latest = db.execute(
+        """SELECT day,generated_at,stage FROM (
+             SELECT day,generated_at,'Análise de imagens salva' stage FROM activity_sessions
+             UNION ALL SELECT substr(hour,1,10),generated_at,'Resumo por hora salvo' FROM hourly_summaries
+             UNION ALL SELECT day,generated_at,'Resumo do dia salvo' FROM summaries
+           ) WHERE julianday(generated_at)>=julianday(?) ORDER BY generated_at DESC LIMIT 1""",
+        (run["started_at"],),
+    ).fetchone()
+    if latest:
+        date = latest["day"]
+        job.update(stage=f"Último resultado: {latest['stage']} · {date[8:10]}/{date[5:7]}/{date[:4]}",
+                   updated_at=latest["generated_at"].replace(" ", "T") + "Z",
+                   detail="Lote iniciado antes do acompanhamento detalhado; exibindo o último resultado salvo.")
+    else:
+        job["stage"] = "Preparando consolidação; aguardando o primeiro resultado"
+    return job
+
+
 @app.get("/api/pipeline/queue")
 def pipeline_queue(
     limit: int = Query(default=200, ge=1, le=1000),
@@ -3005,8 +3567,9 @@ def pipeline_queue(
         jobs.append({"id": f"hourly-summary-error-{tracked_day}", "stage": f"Falha ao gerar resumos horários de {tracked_day[8:10]}/{tracked_day[5:7]}; tente atualizar novamente", "kind": "hourly", "status": "error"})
     if not daily_running and daily_state["active_state"] == "failed":
         jobs.append({"id": f"daily-summary-error-{tracked_day}", "stage": f"Falha ao gerar o resumo de {tracked_day[8:10]}/{tracked_day[5:7]}; tente novamente", "kind": "summary", "status": "error"})
-    if process_running and not items:
-        jobs.append({"id": "pipeline-summary", "stage": "Gerando resumo ou finalizando o lote", "kind": "summary"})
+    if process_running and not items and not video_running:
+        with connect() as db:
+            jobs.append(pipeline_summary_job(db))
     for row in video_rows:
         jobs.append({
             "id": f"video-{row['id']}", "video_id": row["id"], "kind": "video",
@@ -3180,7 +3743,7 @@ def enqueue_unprocessed() -> dict:
     # Import local evita carregar o pipeline pesado durante a inicialização
     # da API. A descoberta só registra arquivos; o worker faz a análise.
     from .pipeline import discover
-    discovered = discover()
+    discovered = discover(audio_recording=bool(unit_state("captura-dia-audio.service")["active"]))
     # A listagem também registra vídeos novos e associa automaticamente os
     # clipes gravados às suas sessões. O retorno volumoso não é necessário aqui.
     list_videos()

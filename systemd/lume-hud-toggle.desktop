@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lume — alternar HUD
+Comment=Alterna a HUD entre compacto, expandido e oculto
+Exec=%h/bin/lume-toggle-video-hud
+Icon=video-display
+NoDisplay=true
+X-KDE-Shortcuts=@HOTKEY@

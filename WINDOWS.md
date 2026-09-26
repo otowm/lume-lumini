@@ -36,6 +36,14 @@ Nada mais precisa ser instalado para capturar. Em especial, **não** é preciso
 Duplo clique em **`Lume.bat`**. Ele aceita uma porta como argumento
 (`Lume.bat 8877`) e não depende de política de execução do PowerShell.
 
+Ajustes que valem só nesta máquina — caminho de um banco compartilhado, abrir a
+interface para a VPN — vivem em `lume-local.cmd` (ou `lume-local.ps1`), que o
+git ignora. Sem esse arquivo, o Lume sobe fechado em `127.0.0.1`.
+
+Para instalar apenas o gravador, sem nada de IA, é `instalar-lumini.ps1` e o
+atalho **`Lumini.bat`** — ver [LUMINI.md](LUMINI.md). Nessa instalação o
+supervisor deixa de oferecer as units de processamento e de captura do dia.
+
 Se preferir o PowerShell, `lume.ps1` faz o mesmo e aceita `-NoBrowser` e
 `-Port`:
 
@@ -203,8 +211,13 @@ O que acontece a cada gravação:
 3. o OBS dedicado sobe (se ainda não estiver de pé) e o Game Capture é apontado
    para **aquele executável** — e não para "qualquer tela cheia", que poderia
    pegar outra janela;
-4. grava até o segmento estourar ou o foco sair por mais que
-   `VIDEO_FOCUS_GRACE_SECONDS`;
+4. grava até o segmento estourar ou o foco **sair para outro app** por mais
+   que `VIDEO_FOCUS_GRACE_SECONDS`. Sair do jogo e o sistema mexer no foco são
+   coisas diferentes: a barra de tarefas, o menu Iniciar, o alternador de
+   tarefas e as notificações tomam o foco sozinhos, e o
+   `GetForegroundWindow` devolve 0 no meio de um Alt+Tab. Nesses instantes o
+   gravador segura a contagem em vez de começá-la — era isso que anunciava
+   "Fora do jogo" com o jogo na frente;
 5. o arquivo é conferido: se sair preto ou estático, você é avisado e um
    `.sem-imagem` fica ao lado, em vez de acumular gravação inútil em silêncio;
 6. áudio e telas voltam.
@@ -214,8 +227,23 @@ os segmentos da mesma sessão agrupados na interface e, se você usar o atalho,
 um `.markers` com os instantes marcados. O atalho padrão é **F8**
 (`VIDEO_MARKER_HOTKEY`), registrado globalmente — funciona com o jogo em foco.
 No modo contínuo, o F8 adiciona um marcador; no modo **Clipes**, ele salva os
-últimos 60 segundos do Replay Buffer do OBS. Nos dois casos, um aviso sonoro
-confirma somente ações aceitas. Clipes feitos enquanto o mesmo jogo permanece
+últimos 60 segundos do Replay Buffer do OBS. Tocar de novo antes de a janela
+fechar — menos de `VIDEO_REPLAY_SECONDS` depois do último toque — **estende o
+mesmo clipe** em vez de abrir outro: os dois pedidos cobrem um trecho só, e
+salvá-los separados deixaria a mesma jogada em dois arquivos. Por isso o clipe
+aparece na biblioteca quando a janela fecha, não no instante do atalho.
+
+**Segurar** o F8 por `VIDEO_HOTKEY_HOLD_SECONDS` (0,6s por padrão) no modo
+Clipes abre uma **gravação longa**, para quando dá para ver que a jogada vai
+demorar e você quer tudo: o Lume salva o pré-roll que já está no buffer e deixa
+o OBS gravando dali em diante. Segurar de novo encerra, e os dois pedaços saem
+emendados num arquivo só — clipe + conteúdo gravado. Enquanto ela corre, um
+toque simples volta a ser marcador, e a HUD mostra um ponto vermelho piscando
+com o tempo da gravação.
+
+Cada ação tem um som próprio: o aceite de sempre para marcador e clipe, um
+arpejo subindo ao abrir a gravação longa e o mesmo arpejo descendo ao fechá-la.
+Nos três casos o som confirma somente ações aceitas. Clipes feitos enquanto o mesmo jogo permanece
 ativo recebem a mesma sessão e aparecem agrupados automaticamente.
 
 Na Biblioteca de vídeos, **Unir vídeos/sessões** aceita tanto clipes avulsos

@@ -9,3 +9,7 @@ __pycache__/
 # SQLite runtime files
 *.sqlite3-shm
 *.sqlite3-wal
+
+# Ajustes de uma máquina só: caminho do banco, redes da VPN, porta aberta.
+lume-local.cmd
+lume-local.ps1

@@ -5,8 +5,8 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Documentos/lume
-ExecStart=%h/Documentos/lume/.venv/bin/python -m app.capture.hud
+WorkingDirectory=@LUME_ROOT@
+ExecStart=@LUME_PYTHON@ -m app.capture.hud
 Restart=on-failure
 RestartSec=5
 Nice=10

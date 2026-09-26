@@ -1,7 +1,7 @@
 {
   ".codex/hooks.json": {
     "mtime": 1785991039.642168,
-    "ast_hash": "",
+    "ast_hash": "67f3590000507fc36f75d345633a8a59",
     "semantic_hash": ""
   },
   "app/backend/__init__.py": {
@@ -10,33 +10,33 @@
     "semantic_hash": "68b329da9893e34099c7d8ad5cb9c940"
   },
   "app/backend/database.py": {
-    "mtime": 1788019255.534053,
-    "ast_hash": "30508249bb3b0aae5c51d7655bb9a6a8",
+    "mtime": 1790411903.467907,
+    "ast_hash": "7cdab707e3821c2d23cb516ee12a1df6",
     "semantic_hash": ""
   },
   "app/backend/main.py": {
-    "mtime": 1788022417.4774992,
-    "ast_hash": "e7b8e4512a457f100e18311b8260dafb",
+    "mtime": 1790441897.2230074,
+    "ast_hash": "7d804bfd72f575a25c51c174d40ee274",
     "semantic_hash": ""
   },
   "app/backend/main_paths.py": {
-    "mtime": 1787627910.8235717,
-    "ast_hash": "13f9dc7df0a1ab5fed7ad6bb2aa14472",
+    "mtime": 1790411509.8461819,
+    "ast_hash": "b54844256abeae33bb6293650b4ed162",
     "semantic_hash": ""
   },
   "app/backend/pipeline.py": {
-    "mtime": 1788019281.218272,
-    "ast_hash": "cf346d40c100baab0151826e2452e76e",
+    "mtime": 1790298499.6325688,
+    "ast_hash": "f67b876874dffff35d12986793fd07e1",
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1788022420.2547286,
-    "ast_hash": "9f3d367b843e462d8adf1220b9f4862f",
+    "mtime": 1790440156.0527637,
+    "ast_hash": "a02a03d52ff057a5aefe7d482514157c",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
-    "mtime": 1786746085.0734067,
-    "ast_hash": "8d807cf28f273ead7ef2fb1a7a30dd86",
+    "mtime": 1790440778.2000294,
+    "ast_hash": "f6827564769b9945e4e15d90ed585ccc",
     "semantic_hash": ""
   },
   "bin/capture-frame": {
@@ -50,13 +50,13 @@
     "semantic_hash": "e2a58c05296314cf10f371f9f740ee5b"
   },
   "bin/game-video-loop": {
-    "mtime": 1786297750.3439527,
-    "ast_hash": "b466637ca757ae3ddfff61d4e2a7133d",
+    "mtime": 1790390600.757659,
+    "ast_hash": "02e71013ce38ef44c0ac3b78657a1fc3",
     "semantic_hash": ""
   },
   "bin/grava-audio.sh": {
-    "mtime": 1786746101.8021736,
-    "ast_hash": "44f027fe362511b0dd262fea1a0d2eed",
+    "mtime": 1788122709.085426,
+    "ast_hash": "6f2ab09db937b2338051f2aa9868ece1",
     "semantic_hash": ""
   },
   "frontend/package.json": {
@@ -65,13 +65,13 @@
     "semantic_hash": "d32dfc76f8a7ea89812c39332e28fd43"
   },
   "frontend/src/api.ts": {
-    "mtime": 1788022418.8363843,
-    "ast_hash": "5a87a5e3720c405d50a01e8873181c7c",
+    "mtime": 1790440201.3202288,
+    "ast_hash": "156908f1c79f1ff950f337f49e87801f",
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1788022473.3132699,
-    "ast_hash": "a96ac4b054a18982376f2d48d0cad3ca",
+    "mtime": 1790443069.5206451,
+    "ast_hash": "b1bd297f14c6ab225a81b3f52c9e3011",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -85,13 +85,13 @@
     "semantic_hash": "05869532f9b0348c50146060db9f5665"
   },
   "install-captura-dia.sh": {
-    "mtime": 1785971948.6287298,
-    "ast_hash": "994a8ce2aa9f2a962e87f0c3ca28143a",
+    "mtime": 1789950028.520843,
+    "ast_hash": "f9db44a24a5bf3723f3278563267a7c9",
     "semantic_hash": ""
   },
   "install-lume.sh": {
-    "mtime": 1787524278.790301,
-    "ast_hash": "d75f472a6195034d49f3b622881097fa",
+    "mtime": 1790440960.327919,
+    "ast_hash": "461dbbc413453bbc22cbd9649d76c30d",
     "semantic_hash": ""
   },
   "install-user.sh": {
@@ -100,13 +100,13 @@
     "semantic_hash": "b3ac5f1d6d53df06f82c25ae88bdebfa"
   },
   "AGENTS.md": {
-    "mtime": 1785610784.0111003,
-    "ast_hash": "6a47d64fcc136324ca395065a707ef76",
+    "mtime": 1790440919.4834895,
+    "ast_hash": "8c1bd9bf9b21629fb08b70060901960f",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1786746596.453683,
-    "ast_hash": "e2218b10949eb8b54965682b02a0a146",
+    "mtime": 1790442033.921863,
+    "ast_hash": "e585428adbbb3b970abaa31d012e118e",
     "semantic_hash": ""
   },
   "config/captura-dia/janelas-sensiveis.txt": {
@@ -115,8 +115,8 @@
     "semantic_hash": ""
   },
   "config/captura-dia/video-apps.txt": {
-    "mtime": 1785629048.931841,
-    "ast_hash": "c406444bae6d30472850dc48c1ec8b90",
+    "mtime": 1788482997.4104974,
+    "ast_hash": "3adc93ad065ce327df3fd71bbe2b2d9f",
     "semantic_hash": ""
   },
   "config/sensitive-windows.txt": {
@@ -145,8 +145,8 @@
     "semantic_hash": ""
   },
   "requirements.txt": {
-    "mtime": 1786057460.9055831,
-    "ast_hash": "62c8c259ab7845ece4dbaa882f68b57b",
+    "mtime": 1790439894.4073195,
+    "ast_hash": "02428e11e6567d3f869a4e9095af8359",
     "semantic_hash": ""
   },
   "searxng/settings.yml": {
@@ -160,18 +160,18 @@
     "semantic_hash": ""
   },
   "bin/add-video-marker": {
-    "mtime": 1785971922.9797907,
-    "ast_hash": "10283a11064abf626d6cd2910cef7d4c",
+    "mtime": 1789942411.1350935,
+    "ast_hash": "b6e3f04f2fae61d6ce255daf7e6b8870",
     "semantic_hash": ""
   },
   ".claude/settings.local.json": {
-    "mtime": 1786751203.855872,
-    "ast_hash": "",
+    "mtime": 1787693597.9199982,
+    "ast_hash": "bc3315d978bdc4746d9550785f9ba4bb",
     "semantic_hash": ""
   },
   "app/backend/runtime.py": {
-    "mtime": 1787786808.4390905,
-    "ast_hash": "0065e48affed191426ce49b220e358d2",
+    "mtime": 1789767819.59272,
+    "ast_hash": "d9514af712adad134b05b2c51f5ce219",
     "semantic_hash": ""
   },
   "app/capture/__init__.py": {
@@ -185,8 +185,8 @@
     "semantic_hash": ""
   },
   "app/capture/linux.py": {
-    "mtime": 1786746376.7900264,
-    "ast_hash": "a81184f8c79295b5847bb2c7dbf246f6",
+    "mtime": 1788122754.6883545,
+    "ast_hash": "a71baa065017afb5d34fb51eb5a37e90",
     "semantic_hash": ""
   },
   "app/capture/selftest.py": {
@@ -200,13 +200,13 @@
     "semantic_hash": ""
   },
   "WINDOWS.md": {
-    "mtime": 1786658158.8752277,
-    "ast_hash": "b34d245de7c1e22f2c4b51901e95bfbc",
+    "mtime": 1790440919.483212,
+    "ast_hash": "0ab93d368225f2542b9c7ef3c498c7cf",
     "semantic_hash": ""
   },
   "app/backend/services.py": {
-    "mtime": 1787524233.0039432,
-    "ast_hash": "b049c73c964ce4a97829aac2d3baac14",
+    "mtime": 1790440108.1893284,
+    "ast_hash": "9f07ac8620370addad541772ceb69ece",
     "semantic_hash": ""
   },
   "app/capture/imagediff.py": {
@@ -230,8 +230,8 @@
     "semantic_hash": ""
   },
   "lume.ps1": {
-    "mtime": 1786595500.196448,
-    "ast_hash": "da702fd03c3e09f1117b94dd20cae5cc",
+    "mtime": 1790439986.315994,
+    "ast_hash": "571b6775660b0c2c58de0849d8cb0448",
     "semantic_hash": ""
   },
   "HANDOFF.md": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1788023579.6522293,
-    "ast_hash": "95248f7427d66c6fd336592ef703e787",
+    "mtime": 1790390730.028027,
+    "ast_hash": "ae7846825b36f589cd9e62f49a81bcbb",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -250,13 +250,13 @@
     "semantic_hash": ""
   },
   "app/capture/winvideo.py": {
-    "mtime": 1788023306.3915832,
-    "ast_hash": "04d002e69fc56b0950dc4b9656d5afd2",
+    "mtime": 1790390618.4928505,
+    "ast_hash": "bec43d3abed7fc7bb247836b6195f691",
     "semantic_hash": ""
   },
   "app/backend/audio_intelligence.py": {
-    "mtime": 1786307647.703447,
-    "ast_hash": "934a5f2e2995c0d71166a1f39fc154fb",
+    "mtime": 1789676916.0531054,
+    "ast_hash": "9eabb872353a20981122172831e03751",
     "semantic_hash": ""
   },
   "bin/install-audio-intelligence": {
@@ -285,8 +285,8 @@
     "semantic_hash": ""
   },
   "app/backend/windows_startup.py": {
-    "mtime": 1786595498.8627248,
-    "ast_hash": "7f2ea54a6189f9081df4597df634b145",
+    "mtime": 1790443068.9781942,
+    "ast_hash": "2103fbc41cc5902c38d116b283dee5f1",
     "semantic_hash": ""
   },
   "install-windows-startup.ps1": {
@@ -295,28 +295,28 @@
     "semantic_hash": ""
   },
   ".claude/launch.json": {
-    "mtime": 1786315602.2345886,
-    "ast_hash": "",
+    "mtime": 1787524929.789136,
+    "ast_hash": "0202b8342bb91439313c02f0472a2e9e",
     "semantic_hash": ""
   },
   "app/capture/hud.py": {
-    "mtime": 1788023596.689147,
-    "ast_hash": "1bfb339b010cca9a8011ca39ba572948",
+    "mtime": 1790390099.220592,
+    "ast_hash": "d2299c35a8858f0fb7f704a6c9bc16f1",
     "semantic_hash": ""
   },
   "app/capture/hudsource.py": {
-    "mtime": 1788023253.430746,
-    "ast_hash": "47795f0a539d5d8a5405bd4075ddda10",
+    "mtime": 1789942872.8640056,
+    "ast_hash": "f336146034d43196f256f978d0a7efc5",
     "semantic_hash": ""
   },
   "app/capture/hudstate.py": {
-    "mtime": 1788023254.9216685,
-    "ast_hash": "af7028fbcfa2b325b08f164443a7daf0",
+    "mtime": 1789942462.9911757,
+    "ast_hash": "5aead1f4c89ab7656255404280f4b936",
     "semantic_hash": ""
   },
   "app/capture/winhotkey.py": {
-    "mtime": 1787523433.9747357,
-    "ast_hash": "bb2fd7701111ec0917139126632110d3",
+    "mtime": 1789942542.116228,
+    "ast_hash": "7ebbde0a95fde7a17c5255ba511f0705",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
@@ -327,6 +327,106 @@
   "app/backend/retention.py": {
     "mtime": 1787628391.1475346,
     "ast_hash": "241dcde0259b03fedfeb535950295993",
+    "semantic_hash": ""
+  },
+  "app/backend/prompts.py": {
+    "mtime": 1790298656.643527,
+    "ast_hash": "6e367e547c25b31b85cce4602a4e87b7",
+    "semantic_hash": ""
+  },
+  "app/backend/editing.py": {
+    "mtime": 1788034234.187147,
+    "ast_hash": "47d38d11ed37536622f5c32f8371f0f0",
+    "semantic_hash": ""
+  },
+  "bin/toggle-video-hud": {
+    "mtime": 1788118948.2415776,
+    "ast_hash": "86cacabe2bb57f4585d59835f246048a",
+    "semantic_hash": ""
+  },
+  "bin/lume-audio-diag": {
+    "mtime": 1788125185.4103692,
+    "ast_hash": "0cc089e2a26a082dcb8f97def83eee3f",
+    "semantic_hash": ""
+  },
+  "frontend/src/DayPicker.tsx": {
+    "mtime": 1789880000.5357594,
+    "ast_hash": "0c0d0dcc9e138a8164f19bfdd15d1969",
+    "semantic_hash": ""
+  },
+  "app/capture/gamesession.py": {
+    "mtime": 1789917196.570847,
+    "ast_hash": "491d9bb393724ae44ebdd15fcb1b4622",
+    "semantic_hash": ""
+  },
+  "frontend/src/ActivitiesView.tsx": {
+    "mtime": 1789927003.6742349,
+    "ast_hash": "91acc8d12388781d55000b839c4abe75",
+    "semantic_hash": ""
+  },
+  "REVIEW_UX_QWEN.md": {
+    "mtime": 1789927226.745224,
+    "ast_hash": "b93c342a96a1b952f0cd81162e6f3fa5",
+    "semantic_hash": ""
+  },
+  "app/capture/hotkeyd.py": {
+    "mtime": 1789942292.1719687,
+    "ast_hash": "9f21a32bd60a09d377f7a589f889cd7e",
+    "semantic_hash": ""
+  },
+  "app/backend/laya.py": {
+    "mtime": 1790298296.5096395,
+    "ast_hash": "283c0f039450750b6ac1ae1e8daa7b91",
+    "semantic_hash": ""
+  },
+  "app/backend/tags.py": {
+    "mtime": 1790298648.4195597,
+    "ast_hash": "07a4de693e1e75d27e20ea76e1aad7bf",
+    "semantic_hash": ""
+  },
+  "frontend/src/TagsView.tsx": {
+    "mtime": 1790298888.4136722,
+    "ast_hash": "c30b2d3a2d5550a6929eba8722cac5d0",
+    "semantic_hash": ""
+  },
+  "app/backend/sharing.py": {
+    "mtime": 1790412534.7253373,
+    "ast_hash": "48093b1a020c6340c0a4a6c23b39d065",
+    "semantic_hash": ""
+  },
+  "app/backend/mode.py": {
+    "mtime": 1790440024.9220638,
+    "ast_hash": "7afc508540f18b3759e3f0827ecafa67",
+    "semantic_hash": ""
+  },
+  "instalar-lumini.ps1": {
+    "mtime": 1790443069.2226536,
+    "ast_hash": "ebadf96c69fedbc11af3bee80ab8c9b5",
+    "semantic_hash": ""
+  },
+  "instalar-lumini.sh": {
+    "mtime": 1790443069.0883286,
+    "ast_hash": "e07fc274383d65dd2fe9310aedc75a4c",
+    "semantic_hash": ""
+  },
+  "LUMINI.md": {
+    "mtime": 1790443069.3984165,
+    "ast_hash": "cc081858fbe41eb8ef933c286594d82c",
+    "semantic_hash": ""
+  },
+  "requirements-ia.txt": {
+    "mtime": 1790439894.4064963,
+    "ast_hash": "b8a38c2c7c29d83d50120c8b3687b42d",
+    "semantic_hash": ""
+  },
+  "requirements-lumini.txt": {
+    "mtime": 1790439894.405608,
+    "ast_hash": "446711bc59dab66d7e7d23da06199c28",
+    "semantic_hash": ""
+  },
+  "app/backend/test_windows_startup.py": {
+    "mtime": 1790443028.2395465,
+    "ast_hash": "68175d65a7ab03d0c052fb3b4608d317",
     "semantic_hash": ""
   }
 }

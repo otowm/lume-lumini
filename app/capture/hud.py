@@ -76,6 +76,11 @@ CHROMA = "#010203"
 
 LEVEL_COLORS = {"ok": "#3fb950", "info": "#58a6ff", "warn": "#d29922", "fail": "#f85149"}
 
+#: Vermelho de gravação. Deliberadamente **não** é o vermelho de falha: o de
+#: falha é chapado e grita; este é o ponto de REC de qualquer câmera, e é a
+#: piscada — não a cor sozinha — que diz que ainda está rodando.
+RECORD_RED = "#ff5c5c"
+
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
@@ -210,13 +215,23 @@ def _alert_sound() -> None:
 #: caso — o OBS leva segundos para informar o arquivo, e a faixa some quando o
 #: evento seguinte (salvo ou falhou) chegar.
 EVENT_STYLES = {
-    "marker":        ("◆", "#58a6ff", 2.4),
-    "marker_queued": ("◇", "#58a6ff", 2.4),
-    "clip_saving":   ("●", "#d29922", 20.0),
-    "clip_queued":   ("○", "#d29922", 2.4),
-    "clip_saved":    ("✔", "#3fb950", 2.8),
-    "clip_failed":   ("✖", "#f85149", 5.0),
-    "ignored":       ("–", "#7d8590", 2.0),
+    "marker":         ("◆", "#58a6ff", 2.4),
+    "marker_queued":  ("◇", "#58a6ff", 2.4),
+    "clip_saving":    ("●", "#d29922", 20.0),
+    "clip_queued":    ("○", "#d29922", 2.4),
+    "clip_saved":     ("✔", "#3fb950", 2.8),
+    # Um atalho dentro da janela de replay não abre outro clipe: estende o que
+    # acabou de ser salvo. A seta é o que diferencia "salvei" de "cresceu".
+    "clip_merged":    ("⇥", "#3fb950", 2.8),
+    "clip_failed":    ("✖", "#f85149", 5.0),
+    "ignored":        ("–", "#7d8590", 2.0),
+    # Gravação longa. O início é um instante curto — a partir dali quem informa
+    # é o ponto vermelho permanente, não a faixa. Fechar, ao contrário, espera
+    # o desfecho: emendar o pré-roll à gravação leva segundos.
+    "long_started":   ("⏺", RECORD_RED, 2.4),
+    "long_saving":    ("●", "#d29922", 60.0),
+    "long_saved":     ("✔", "#3fb950", 3.2),
+    "long_failed":    ("✖", "#f85149", 5.0),
 }
 
 #: Duração da entrada (desliza e acende) e da saída (recolhe).
@@ -466,15 +481,29 @@ class HudPanel:
         width, height = self.COMPACT_SIZE
         color = LEVEL_COLORS.get(status.level, MUTED)
         accent = color
+        blink = True
         if event is not None:
             accent = blend(color, EVENT_STYLES[event[0]][1], event[2].glow)
         label = status.headline if status.level == "fail" else (snapshot.app or status.headline)
         clock = format_elapsed(snapshot.elapsed_seconds) if snapshot.recording else ""
+        # Numa gravação longa o relógio que importa é o dela, não o da sessão de
+        # jogo: a pergunta na cabeça de quem segurou o atalho é "há quanto tempo
+        # estou gravando isto", e o ponto passa a piscar em vermelho.
+        if snapshot.long_recording:
+            clock = format_elapsed(snapshot.long_elapsed_seconds)
+            if status.level != "fail":
+                label = f"REC · {snapshot.app}" if snapshot.app else "Gravando tudo"
+            color = RECORD_RED
+            if event is None:
+                accent = RECORD_RED
+            # Um segundo aceso, um apagado: a piscada nasce do próprio relógio,
+            # sem redesenhar um quadro a mais do que a barra já desenha.
+            blink = int(snapshot.long_elapsed_seconds) % 2 == 0
 
         # Parada, a barra compacta só muda quando o relógio vira — uma vez por
         # segundo. Redesenhá-la 15 vezes nesse intervalo seria puro desperdício
         # de CPU justamente durante o jogo, que é quando ela está na tela.
-        key = (accent, color, label, clock,
+        key = (accent, color, label, clock, snapshot.long_recording and blink,
                None if event is None else (event[0], event[1], round(event[2].reveal, 3)))
         if key == self._compact_key:
             return
@@ -489,7 +518,8 @@ class HudPanel:
         # Linha normal, deslocada para cima conforme o evento toma o lugar.
         y = middle - height * reveal
         if reveal < 1.2:
-            self.canvas.create_oval(14, y - 4, 22, y + 4, fill=color, outline=color)
+            dot = blend(BACKGROUND, color, 0.35) if snapshot.long_recording and not blink else color
+            self.canvas.create_oval(14, y - 4, 22, y + 4, fill=dot, outline=dot)
             room = width - 32 - 12 - (self._font(9).measure(clock) + 10 if clock else 0)
             self._text(32, y, self._fit(label, room, 9, bold=True), TEXT, 9,
                        bold=True, anchor="w")
@@ -525,14 +555,23 @@ class HudPanel:
 
         clock = (format_elapsed(snapshot.elapsed_seconds)
                  if snapshot.recording or snapshot.buffering else "")
-        self.canvas.create_oval(14, 17, 22, 25, fill=color, outline=color)
+        dot = color
+        if snapshot.long_recording:
+            clock = format_elapsed(snapshot.long_elapsed_seconds)
+            if int(snapshot.long_elapsed_seconds) % 2 == 0 or status.level == "fail":
+                dot = RECORD_RED
+            else:
+                dot = blend(BACKGROUND, RECORD_RED, 0.35)
+        self.canvas.create_oval(14, 17, 22, 25, fill=dot, outline=dot)
         room = width - 32 - 14 - (self._font(10).measure(clock) + 10 if clock else 0)
         self._text(32, 21, self._fit(status.headline, room, 10, bold=True), TEXT, 10, bold=True)
         if clock:
             self._text(width - 14, 21, clock, MUTED, 10, anchor="e")
 
         subtitle = snapshot.app or "—"
-        if snapshot.mode == "clips":
+        if snapshot.long_recording:
+            subtitle += "  ·  gravando tudo (clipe + o que veio depois)"
+        elif snapshot.mode == "clips":
             subtitle += "  ·  clipes"
         if snapshot.markers:
             subtitle += f"  ·  {snapshot.markers} marcador" + ("es" if snapshot.markers > 1 else "")
@@ -583,6 +622,13 @@ class HudPanel:
         if not meter.present:
             self._text(bar_x + 4, y, "sem sinal", LEVEL_COLORS["warn"] if not meter.required
                        else LEVEL_COLORS["fail"], 8)
+            return
+        if meter.peak_db <= SOUND_FLOOR_DB and display_db <= SOUND_FLOOR_DB:
+            # O trilho vazio continua delimitando onde a barra surgirá, mas o
+            # texto torna inequívoco que não há áudio sendo capturado. Antes as
+            # três linhas cinzas pareciam três barras ativas mesmo em -100 dB.
+            self._text(bar_x + 4, y, "silêncio", MUTED, 8)
+            self._text(width - 14, y, "−∞", MUTED, 8, anchor="e")
             return
         # Escala de -60 dB (piso audível) a 0 dB (saturação).
         filled = max(0.0, min(1.0, (display_db - SOUND_FLOOR_DB) / -SOUND_FLOOR_DB))
@@ -641,7 +687,8 @@ class Hud:
         De propósito não inclui os medidores nem o tempo: eles mudam sempre, e a
         HUD repetiria o mesmo aviso continuamente.
         """
-        return (status.level, snapshot.recording, snapshot.buffering, snapshot.app,
+        return (status.level, snapshot.recording, snapshot.buffering,
+                snapshot.long_recording, snapshot.app,
                 tuple(alert.key for alert in status.alerts))
 
     #: Acima desta idade o evento é história, não confirmação: a HUD que acaba
@@ -659,7 +706,9 @@ class Hud:
         # inteira, em vez de já entrar pela metade por causa do atraso de leitura.
         self._event = (snapshot.event_kind, snapshot.event_label)
         self._event_started = time.monotonic()
-        if snapshot.event_kind == "clip_failed" and self.settings.sound:
+        # A confirmação sonora do marcador é do laço de vídeo, que roda sempre;
+        # tocá-la aqui também renderia dois bipes para o mesmo marcador.
+        if snapshot.event_kind in {"clip_failed", "long_failed"} and self.settings.sound:
             _alert_sound()
 
     def _current_event(self) -> tuple[str, str, EventFrame] | None:
@@ -801,9 +850,12 @@ _DEMO_EVENTS = [
     ("marker", "Marcador 3 · 12:04"),
     ("clip_saving", "Salvando clipe…"),
     ("clip_saved", "Clipe salvo · 60s"),
+    ("clip_merged", "Clipe estendido · 1:35"),
     ("clip_failed", "O OBS não informou o arquivo"),
     ("ignored", "Nada sendo gravado"),
     ("marker_queued", "Marcador na próxima cena"),
+    ("long_started", "Gravação longa iniciada"),
+    ("long_saved", "Gravação longa salva · 2026-09-20_21-14-08_DP-1.mp4"),
 ]
 
 
@@ -835,10 +887,11 @@ def _demo_sequence():
         elif phase == 2:  # microfone caiu
             meters[0].present = False
             meters[0].absent_seconds = 20.0
-        elif phase == 3:  # modo clipes, tudo certo
-            snapshot.recording = False
-            snapshot.buffering = True
+        elif phase == 3:  # modo clipes com uma gravação longa em curso
+            snapshot.buffering = False
             snapshot.mode = "clips"
+            snapshot.long_recording = True
+            snapshot.long_elapsed_seconds = elapsed % 60
 
         # Um acontecimento a cada 4 s, percorrendo os tipos, para dar para ver a
         # animação sem precisar de um jogo aberto e do atalho na mão.
@@ -904,6 +957,12 @@ def main(argv: list[str] | None = None) -> int:
         from .winrecord import _install_stop_handlers
 
         _install_stop_handlers(hud.stop)
+    else:
+        import signal
+
+        signal.signal(signal.SIGTERM, hud.stop)
+        signal.signal(signal.SIGINT, hud.stop)
+        signal.signal(signal.SIGUSR1, lambda _signum, _frame: hud.toggle())
     return hud.run()
 
 

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+pid="$(systemctl --user show captura-dia-hud.service --property=MainPID --value)"
+[[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "A HUD de vídeo não está ativa" >&2; exit 1; }
+# Logo após um restart o interpretador ainda está importando Tk e não instalou
+# o handler de USR1. Esperar essa janela curta evita que um F4 precoce mate a HUD.
+elapsed="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+if [[ "$elapsed" =~ ^[0-9]+$ ]] && ((elapsed < 2)); then
+  sleep $((2 - elapsed))
+  pid="$(systemctl --user show captura-dia-hud.service --property=MainPID --value)"
+fi
+[[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "A HUD de vídeo não está ativa" >&2; exit 1; }
+kill -USR1 "$pid"

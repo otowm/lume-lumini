@@ -17,14 +17,39 @@ import ctypes
 import re
 import sys
 import threading
+import time
 
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+#: Tempo com a tecla abaixada que separa um toque de uma segurada. O mesmo
+#: valor do daemon do Linux (:mod:`app.capture.hotkeyd`), para que o atalho
+#: tenha o mesmo tato nos dois sistemas.
+DEFAULT_HOLD_SECONDS = 0.6
+
+#: Cadência com que se pergunta ao Windows se a tecla continua abaixada.
+_POLL_SECONDS = 0.025
+
+
+class MSG(ctypes.Structure):
+    _fields_ = [("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint),
+                ("wParam", ctypes.c_void_p), ("lParam", ctypes.c_void_p),
+                ("time", ctypes.c_uint),
+                ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long)]
+
+
 class MarkerHotkey:
-    """Atalho global que chama ``on_press`` a cada acionamento."""
+    """Atalho global que distingue toque de segurada.
+
+    ``RegisterHotKey`` avisa quando a tecla desce e nada mais — nem soltar, nem
+    "continua abaixada". Quem responde isso é ``GetAsyncKeyState``, perguntado
+    em intervalos curtos logo depois do aviso. O toque só sai ao soltar, porque
+    até lá ele ainda pode virar segurada; a segurada sai assim que o limite
+    vence, ainda com a tecla abaixada, que é o que confirma à pessoa que já
+    pode soltar.
+    """
 
     _MODIFIERS = {"ALT": 0x1, "CTRL": 0x2, "CONTROL": 0x2, "SHIFT": 0x4, "WIN": 0x8}
     _WM_HOTKEY = 0x0312
@@ -33,9 +58,12 @@ class MarkerHotkey:
     #: thread precisam de identificadores distintos.
     _next_id = 1
 
-    def __init__(self, spec: str, on_press) -> None:
+    def __init__(self, spec: str, on_press, on_hold=None,
+                 hold_seconds: float = DEFAULT_HOLD_SECONDS) -> None:
         self.spec = spec
         self.on_press = on_press
+        self.on_hold = on_hold
+        self.hold_seconds = hold_seconds if hold_seconds > 0 else DEFAULT_HOLD_SECONDS
         self._thread = None
 
     @classmethod
@@ -77,19 +105,47 @@ class MarkerHotkey:
             return
         log(f"[marcador] atalho {self.spec} registrado")
 
-        class MSG(ctypes.Structure):
-            _fields_ = [("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint),
-                        ("wParam", ctypes.c_void_p), ("lParam", ctypes.c_void_p),
-                        ("time", ctypes.c_uint),
-                        ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long)]
-
         message = MSG()
         try:
             while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
                 if message.message == self._WM_HOTKEY:
+                    action = self._resolve(user32, vk)
+                    callback = self.on_hold if action == "hold" else self.on_press
+                    if callback is None:
+                        continue
                     try:
-                        self.on_press()
+                        callback()
                     except Exception as exc:  # nunca derrubar a thread do atalho
                         log(f"[marcador] falhou: {exc}")
+                    if action == "hold":
+                        # A ação já saiu; o que a tecla ainda abaixada produzir
+                        # até soltar é repetição, e repetição não é atalho novo.
+                        self._drain(user32, vk)
         finally:
             user32.UnregisterHotKey(None, hotkey_id)
+
+    def _resolve(self, user32, vk: int) -> str:
+        """Espera o desfecho da tecla e diz se foi toque ou segurada.
+
+        Bloquear a fila de mensagens aqui é de propósito: enquanto a tecla está
+        abaixada o Windows repete o ``WM_HOTKEY``, e cada repetição contaria
+        como um atalho novo. Presas na fila, elas são descartadas junto com a
+        pressionada que já foi resolvida.
+        """
+        if self.on_hold is None:
+            return "tap"
+        deadline = time.monotonic() + self.hold_seconds
+        while time.monotonic() < deadline:
+            if not user32.GetAsyncKeyState(vk) & 0x8000:
+                return "tap"
+            time.sleep(_POLL_SECONDS)
+        return "hold"
+
+    def _drain(self, user32, vk: int) -> None:
+        """Descarta as repetições enfileiradas enquanto a tecla esteve abaixada."""
+        while user32.GetAsyncKeyState(vk) & 0x8000:
+            time.sleep(_POLL_SECONDS)
+        pending = MSG()
+        while user32.PeekMessageW(ctypes.byref(pending), None,
+                                  self._WM_HOTKEY, self._WM_HOTKEY, 0x0001):
+            pass

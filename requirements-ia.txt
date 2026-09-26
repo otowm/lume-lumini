@@ -1,0 +1,4 @@
+# Só a análise: diarização de locutor, audio tagging e o pipeline.
+# Nada aqui é importado pelo caminho de gravação.
+numpy==2.3.3
+sherpa-onnx==1.13.4

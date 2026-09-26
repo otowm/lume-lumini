@@ -8,6 +8,7 @@ captura do Linux, e sim expô-la pela mesma interface que o Windows implementa.
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 _ANSI = re.compile(r"\033\[[0-9;]*m")
 
 from .base import AudioConfig, CaptureBackend, Monitor, ScreenConfig
+from ..backend.runtime import video_activity_flag
 
 HOME = Path.home()
 SCREEN_BIN = Path(os.environ.get("CAPTURA_DIA_SCREEN_BIN", HOME / "bin/captura-tela.sh"))
@@ -49,27 +51,54 @@ class LinuxCaptureBackend(CaptureBackend):
         return result.stdout.strip()
 
     def list_monitors(self) -> list[Monitor]:
-        # A geometria detalhada é resolvida dentro do script de captura;
-        # aqui devolvemos o mínimo necessário para diagnóstico.
         monitors: list[Monitor] = []
         try:
             result = subprocess.run(["kscreen-doctor", "-o"], check=False,
                                     capture_output=True, text=True, timeout=5)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return monitors
-        index = 0
+        current_name: str | None = None
+        current_enabled = False
         for raw in result.stdout.splitlines():
             line = _ANSI.sub("", raw).strip()
             if line.startswith("Output:"):
                 parts = line.split()
-                name = parts[2] if len(parts) > 2 else f"output{index}"
-                monitors.append(Monitor(index=index, name=name, x=0, y=0, width=0, height=0))
-                index += 1
+                current_name = parts[2] if len(parts) > 2 else f"output{len(monitors)}"
+                current_enabled = False
+            elif line == "enabled" and current_name is not None:
+                current_enabled = True
+            elif line.startswith("Geometry:") and current_name is not None and current_enabled:
+                match = re.search(r"Geometry:\s*(-?\d+),(-?\d+)\s+(\d+)x(\d+)", line)
+                if match:
+                    x, y, width, height = map(int, match.groups())
+                    monitors.append(Monitor(index=len(monitors), name=current_name,
+                                            x=x, y=y, width=width, height=height))
         return monitors
 
     def active_monitor(self) -> Monitor | None:
-        # O script instalado já recorta o monitor ativo; não precisamos aqui.
-        return None
+        monitors = self.list_monitors()
+        try:
+            payload = json.loads(video_activity_flag().read_text(encoding="utf-8"))
+            recorded = str(payload.get("monitor") or "") if isinstance(payload, dict) else ""
+        except (OSError, json.JSONDecodeError):
+            recorded = ""
+        if recorded:
+            return next((monitor for monitor in monitors if monitor.name == recorded), None)
+
+        wid = self._kdotool("getactivewindow")
+        geometry = self._kdotool("getwindowgeometry", wid) if wid else None
+        if not geometry:
+            return None
+        position = re.search(r"Position:\s*(-?\d+),(-?\d+)", geometry)
+        size = re.search(r"Geometry:\s*(\d+)x(\d+)", geometry)
+        if not position or not size:
+            return None
+        x, y = map(int, position.groups())
+        width, height = map(int, size.groups())
+        cx, cy = x + width // 2, y + height // 2
+        return next((monitor for monitor in monitors
+                     if monitor.x <= cx < monitor.x + monitor.width
+                     and monitor.y <= cy < monitor.y + monitor.height), None)
 
     # --- Telas (delega ao script instalado, sem mudar comportamento) -----
     def grab_frame(self, dest_dir: Path, stamp: str, cfg: ScreenConfig, window_text: str) -> list[Path]:
@@ -122,10 +151,14 @@ class LinuxCaptureBackend(CaptureBackend):
             ]
         mic = cfg.mic_device or MIC_SOURCE
         discord = DISCORD_SOURCE
+        # O ``map=`` é obrigatório: as três entradas são mono e todas chamam seu
+        # único canal de FC. Sem ele o ffmpeg desempata sozinho e devolve os
+        # canais rotacionados — mic em c2, Discord em c0, sistema em c1.
         filters = (
             "[0:a]pan=mono|c0=c0[mic];[1:a]pan=mono|c0=c0[dis];"
             "[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];"
-            "[mic][dis][sys]join=inputs=3:channel_layout=3.0[out]"
+            "[mic][dis][sys]join=inputs=3:channel_layout=3.0"
+            ":map=0.0-FL|1.0-FR|2.0-FC[out]"
         )
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",

@@ -42,18 +42,63 @@ from pathlib import Path
 from .base import read_shell_config, stable_app_label
 from .hudstate import SILENCE_DB, SOUND_FLOOR_DB, HudSnapshot, Meter, to_db
 from ..backend.main_paths import CONFIG_DIR, MEDIA_ROOT, VIDEO_DIR
-from ..backend.runtime import runtime_dir, video_activity_flag
+from ..backend.runtime import VIDEO_ACTIVITY_FRESH_SECONDS, runtime_dir, video_activity_flag, video_recording_flag
 
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 
 #: Acima disto o arquivo de estado do laço de vídeo é considerado velho. Ele é
 #: reescrito a cada volta (2 s), então uma folga generosa distingue "o laço
 #: morreu segurando o sinal" de "a volta demorou um pouco".
-FLAG_FRESH_SECONDS = 15.0
+FLAG_FRESH_SECONDS = VIDEO_ACTIVITY_FRESH_SECONDS
 
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+#: De quanto em quanto tempo se confere que o ``parec`` ainda lê o bus pedido.
+ATTACH_CHECK_SECONDS = 4.0
+
+
+def _pulse_sources() -> dict[str, str]:
+    """Mapa id -> nome das fontes do PipeWire/Pulse."""
+    try:
+        result = subprocess.run(["pactl", "list", "short", "sources"], check=False,
+                                capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {}
+    sources: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2:
+            sources[fields[0]] = fields[1]
+    return sources
+
+
+def _attached_source(client: str) -> str | None:
+    """Fonte à qual o ``parec`` de ``client`` está realmente ligado.
+
+    Existe porque ``parec --device=X`` **não** falha quando X não existe: ele
+    cai calado na fonte padrão. E um stream já ligado é *movido* pelo PipeWire
+    quando o bus some — foi assim que os três medidores da HUD acabavam lendo o
+    mesmo dispositivo, e qualquer som mexia as três barras.
+    """
+    try:
+        result = subprocess.run(["pactl", "list", "source-outputs"], check=False,
+                                capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    sources = _pulse_sources()
+    source_id: str | None = None
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Source Output #"):
+            source_id = None
+        elif stripped.startswith("Source:"):
+            source_id = stripped.split(":", 1)[1].strip()
+        elif f'"{client}"' in stripped and source_id is not None:
+            return sources.get(source_id)
+    return None
 
 
 class _MeterTracker:
@@ -328,6 +373,9 @@ class WindowsHudCollector(HudCollector):
             hooked, source = self._hooked, self._capture_source
             stalled, written = self._bytes.stalled_seconds, self._bytes.value
             connected, reason = self._connected, self._reason
+        # Só é gravação longa se o OBS confirmar que há gravação: o sinal pode
+        # estar velho de um laço que morreu no meio dela.
+        long_recording = bool(flag.get("long_recording")) and recording
 
         return HudSnapshot(
             backend=self.name,
@@ -336,6 +384,8 @@ class WindowsHudCollector(HudCollector):
             enabled=settings.get("VIDEO_ENABLED", "false").lower() == "true",
             recording=recording,
             buffering=buffering and not recording,
+            long_recording=long_recording,
+            long_elapsed_seconds=_long_elapsed(flag),
             mode=flag.get("mode") or settings.get("VIDEO_CAPTURE_MODE", "continuous"),
             app=_app_label(flag.get("window", "")),
             window=flag.get("window", ""),
@@ -358,10 +408,12 @@ class WindowsHudCollector(HudCollector):
 class LinuxHudCollector(HudCollector):
     """Estado derivado do laço bash e medidores lidos dos buses do PipeWire.
 
-    O ``bin/game-video-loop`` não publica estado estruturado: ele sinaliza que
-    assumiu as capturas criando ``captura-dia-video-paused`` e escreve o
-    segmento em curso como ``*.partial.mp4``. Os dois juntos dizem o suficiente
-    — está gravando, há quanto tempo, e se o arquivo está crescendo.
+    O ``bin/game-video-loop`` publica o mesmo JSON que o ``winvideo`` — janela,
+    modo, marcadores, clipes, eventos — e, no modo contínuo, escreve o segmento
+    em curso como ``*.partial.mp4``. O arquivo parcial ainda importa: é dele que
+    saem os bytes escritos e o alerta de captura travada, que o sinal não conta.
+    Instalações antigas, sem o JSON, continuam legíveis pelo par
+    ``captura-dia-video-paused`` + ``*.partial.mp4``.
 
     Ainda **não validado numa máquina Linux**; a estrutura está no lugar e o
     comportamento na ausência de cada peça é degradar em silêncio, nunca acusar
@@ -411,9 +463,20 @@ class LinuxHudCollector(HudCollector):
         Taxa baixa e um canal de propósito: só queremos saber se há som e o
         quão alto, não gravar nada. O custo fica em ruído estatístico.
         """
+        # Nome único por bus: é ele que permite conferir, depois, se este
+        # processo continua lendo o dispositivo certo.
+        client = f"lume-hud-{device}"
         argv = ["parec", f"--device={device}", "--format=s16le", "--rate=8000",
-                "--channels=1", "--latency-msec=100", "--client-name=lume-hud"]
+                "--channels=1", "--latency-msec=100", f"--client-name={client}"]
         while not self._stopping.is_set():
+            if device not in _pulse_sources().values():
+                # Abrir agora faria o parec cair na fonte padrão e reportar o
+                # áudio errado como se fosse deste bus. Melhor não ter medidor.
+                with self._lock:
+                    tracker.update(present=False, peak_db=SILENCE_DB)
+                    self._reason = f"{device} ainda não existe"
+                self._stopping.wait(2.0)
+                continue
             try:
                 process = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                            stderr=subprocess.DEVNULL)
@@ -425,6 +488,7 @@ class LinuxHudCollector(HudCollector):
             with self._lock:
                 self._readable = True
                 self._reason = ""
+            checked_at = time.monotonic()
             try:
                 while not self._stopping.is_set():
                     assert process.stdout is not None
@@ -436,6 +500,16 @@ class LinuxHudCollector(HudCollector):
                     peak = max((abs(value) for value in samples), default=0) / 32768.0
                     with self._lock:
                         tracker.update(present=True, peak_db=to_db(peak))
+                    now = time.monotonic()
+                    if now - checked_at >= ATTACH_CHECK_SECONDS:
+                        checked_at = now
+                        attached = _attached_source(client)
+                        if attached is not None and attached != device:
+                            # O bus foi recriado e o PipeWire arrastou este
+                            # stream para outra fonte. Reabrir é o que devolve
+                            # cada barra ao seu próprio áudio.
+                            log(f"[hud] {device}: stream movido para {attached}; reabrindo")
+                            break
             finally:
                 process.terminate()
                 try:
@@ -493,7 +567,21 @@ class LinuxHudCollector(HudCollector):
 
     def snapshot(self) -> HudSnapshot:
         settings = self._settings()
-        recording = (runtime_dir() / self.PAUSE_FILE).is_file()
+        flag = _read_video_flag()
+        # O sinal padrão existe mesmo quando PAUSE_OTHER_CAPTURES=false. O
+        # arquivo histórico fica como fallback durante upgrades sem restart.
+        active = (bool(flag) or video_recording_flag().is_file()
+                  or (runtime_dir() / self.PAUSE_FILE).is_file())
+        mode = str(flag.get("mode") or settings.get("VIDEO_CAPTURE_MODE", "continuous"))
+        # No modo clipes o replay fica em RAM e nada é escrito enquanto ninguém
+        # aperta o atalho: "gravando" seria mentira, e não há segmento parcial
+        # cujo crescimento vigiar.
+        # Segurar o atalho abre uma gravação longa: em clipes o replay vive em
+        # RAM, mas a partir daí há arquivo crescendo em disco de verdade — e
+        # chamar isso de "armado" esconderia justamente o que está acontecendo.
+        long_recording = active and bool(flag.get("long_recording"))
+        buffering = active and mode == "clips" and not long_recording
+        recording = active and not buffering
         partial = self._partial_segment() if recording else None
         elapsed = 0.0
         written = 0
@@ -523,14 +611,20 @@ class LinuxHudCollector(HudCollector):
             enabled=settings.get("VIDEO_ENABLED", "false").lower() == "true",
             service_active=self._service_state(),
             recording=recording,
-            mode=settings.get("VIDEO_CAPTURE_MODE", "continuous"),
-            app=_app_label(self._active_window()) if recording else "",
-            window=self._active_window() if recording else "",
-            elapsed_seconds=elapsed,
+            buffering=buffering,
+            long_recording=long_recording,
+            long_elapsed_seconds=_long_elapsed(flag),
+            mode=mode,
+            app=_app_label(str(flag.get("window") or "")) if active else "",
+            window=str(flag.get("window") or "") if active else "",
+            elapsed_seconds=_elapsed(flag) if flag else elapsed,
+            focus_grace_remaining=_focus_grace_remaining(flag),
             output_bytes=written,
             bytes_stalled_seconds=stalled,
             video_hooked=None,  # não existe hook a falhar: grava-se o monitor
-            markers=_count_markers(partial),
+            markers=int(flag.get("markers") or _count_markers(partial)),
+            last_clip_name=str(flag.get("last_clip") or ""),
+            **_event_fields(flag),
             meters=meters if readable else [],
             disk_free_bytes=self._disk_free(),
         )
@@ -560,6 +654,14 @@ def _elapsed(flag: dict) -> float:
     if isinstance(started, (int, float)) and started > 0:
         return max(0.0, time.time() - float(started))
     return 0.0
+
+
+def _long_elapsed(flag: dict) -> float:
+    """Há quanto tempo a gravação longa corre, ou zero se não há nenhuma."""
+    started = flag.get("long_started_at")
+    if not flag.get("long_recording") or not isinstance(started, (int, float)) or started <= 0:
+        return 0.0
+    return max(0.0, time.time() - float(started))
 
 
 def _app_label(window: str) -> str:

@@ -109,6 +109,14 @@ class HudSnapshot:
     recording: bool = False
     #: Modo clipes com o Replay Buffer de pé, sem gravar em arquivo ainda.
     buffering: bool = False
+    #: Gravação longa em curso: no modo clipes, alguém segurou o atalho e pediu
+    #: para gravar tudo dali em diante — o clipe de pré-roll já está guardado e
+    #: o arquivo cresce até a próxima segurada.
+    long_recording: bool = False
+    #: Há quanto tempo essa gravação longa começou. Separado de
+    #: ``elapsed_seconds``, que conta a sessão de jogo inteira: são duas
+    #: perguntas distintas, e a segunda não responde "quanto já gravei".
+    long_elapsed_seconds: float = 0.0
     mode: str = "continuous"
     app: str = ""
     window: str = ""
@@ -231,6 +239,8 @@ def evaluate(snapshot: HudSnapshot) -> HudStatus:
         headline = alerts[0].text
     elif snapshot.focus_grace_remaining is not None:
         headline = f"Fora do jogo · para em {max(0, math.ceil(snapshot.focus_grace_remaining))}s"
+    elif snapshot.long_recording:
+        headline = "Gravando tudo"
     elif snapshot.buffering:
         headline = "Clipes armados"
     else:

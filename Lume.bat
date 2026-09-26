@@ -18,9 +18,14 @@ set "VENV=%~dp0.venv-win"
 set "PY=%VENV%\Scripts\python.exe"
 set "URL=http://127.0.0.1:%PORT%"
 
-rem Compatibilidade com instalacoes anteriores; o backend tambem resolve o
-rem banco pela raiz de armazenamento selecionada em storage.conf.
-if not defined CAPTURA_DIA_DB_PATH if exist "F:\lume\lume.sqlite3" set "CAPTURA_DIA_DB_PATH=F:\lume\lume.sqlite3"
+rem Ajustes de uma maquina especifica (caminho do banco, redes remotas) vivem
+rem num arquivo proprio, fora do versionamento: um caminho `F:\lume` ou um IP de
+rem VPN cravados aqui viajariam para quem clonasse o projeto.
+rem Fechado por padrao; `lume-local.cmd` pode abrir para a rede.
+if not defined LUME_BIND_HOST set "LUME_BIND_HOST=127.0.0.1"
+if not defined LUME_REQUIREMENTS set "LUME_REQUIREMENTS=requirements.txt"
+if not defined LUME_IMPORT_CHECK set "LUME_IMPORT_CHECK=import fastapi, uvicorn, numpy, sherpa_onnx"
+if exist "%~dp0lume-local.cmd" call "%~dp0lume-local.cmd"
 
 echo.
 echo   Lume - captura local do dia
@@ -56,10 +61,10 @@ if not exist "%PY%" (
 )
 
 rem Instala as dependencias so quando faltam, para a abertura ser rapida.
-"%PY%" -c "import fastapi, uvicorn, numpy, sherpa_onnx" >nul 2>&1
+"%PY%" -c "%LUME_IMPORT_CHECK%" >nul 2>&1
 if errorlevel 1 (
     echo   Instalando dependencias...
-    "%PY%" -m pip install --disable-pip-version-check -q -r "%~dp0requirements.txt"
+    "%PY%" -m pip install --disable-pip-version-check -q -r "%~dp0%LUME_REQUIREMENTS%"
     if errorlevel 1 (
         echo   [ERRO] Falha ao instalar as dependencias.
         pause
@@ -87,7 +92,7 @@ echo.
 rem Abre o navegador em paralelo, depois que o servidor tiver subido.
 start "" /min cmd /c "timeout /t 3 /nobreak >nul&start %URL%"
 
-"%PY%" -m uvicorn app.backend.main:app --host 127.0.0.1 --port %PORT%
+"%PY%" -m uvicorn app.backend.main:app --host %LUME_BIND_HOST% --port %PORT%
 set "CODE=%ERRORLEVEL%"
 
 rem Ctrl+C encerra com 15 no cmd; nao e' falha, e' o usuario fechando.

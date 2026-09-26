@@ -8,7 +8,8 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStartPre=%h/bin/audio-bus.sh setup
 ExecStart=%h/bin/grava-audio.sh
-ExecStopPost=-%h/bin/audio-bus.sh teardown
+# Os buses permanecem vivos quando o gravador contínuo é pausado pelo vídeo:
+# eles alimentam as três faixas do vídeo e os medidores da HUD.
 Environment=AUDIO_OUTDIR=%h/captura-dia/audio
 Environment=SEG_SECONDS=900
 KillSignal=SIGINT
@@ -20,4 +21,3 @@ Nice=5
 
 [Install]
 WantedBy=captura-dia.target
-

@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Atalho do KDE: dispara no instante em que a tecla desce e não sabe nada sobre
+# soltar. Quando o `lume-hotkeyd` está de pé é ele quem observa o teclado — e
+# quem distingue toque de segurada —, então este caminho sai de cena para o
+# gravador não receber o mesmo toque duas vezes.
+daemon_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-hotkey-daemon"
+if [[ -r "$daemon_flag" ]]; then
+  daemon_pid="$(cat "$daemon_flag" 2>/dev/null || true)"
+  if [[ "$daemon_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$daemon_pid" 2>/dev/null; then
+    exit 0
+  fi
+fi
 pid="$(systemctl --user show captura-dia-video.service --property=MainPID --value)"
 [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "O gravador de vídeo não está ativo" >&2; exit 1; }
 kill -USR1 "$pid"

@@ -1,0 +1,11 @@
+# Lumini: só o que o gravador e a biblioteca de clipes precisam.
+#
+# Verificado bloqueando numpy e sherpa-onnx no `sys.meta_path`: `app.capture.*`
+# e `app.backend.main` importam sem eles, com as rotas todas registradas. Quem
+# só grava e manda clipe no Discord não instala mais nada de Python.
+fastapi==0.139.2
+uvicorn[standard]>=0.35,<1
+# Dependência real da gravação no Windows: `app/capture/obs.py` conversa com o
+# OBS por websocket. Hoje ela chega de carona no extra do uvicorn, o que é sorte,
+# não contrato — por isso está escrita aqui.
+websockets>=12

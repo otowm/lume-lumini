@@ -1,0 +1,12 @@
+# Copie para `lume-local.ps1` (que o git ignora) e ajuste para esta máquina.
+# Sem este arquivo o Lume responde só em 127.0.0.1 — o padrão fechado.
+
+# Banco num volume compartilhado com outra instalação:
+# $env:CAPTURA_DIA_DB_PATH = 'F:\lume\lume.sqlite3'
+
+# Abrir a interface para outro PC. As três linhas andam juntas: o backend confere
+# o IP de quem chega e o cabeçalho Host, e sem elas o acesso de fora leva 403
+# mesmo com o bind aberto.
+# $env:LUME_BIND_HOST = '0.0.0.0'
+# $env:LUME_REMOTE_NETWORKS = '172.27.0.0/16,10.28.4.0/24'
+# $env:LUME_REMOTE_HOSTS = '172.27.181.179,10.28.4.6'

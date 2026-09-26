@@ -26,7 +26,9 @@ from ..capture.imagediff import compare_images
 from .audio_intelligence import analyze_video_audio
 from .database import connect, initialize
 from .main_paths import AUDIO_DIR, CONFIG_DIR, SCREEN_DIR, VIDEO_DIR, media_source_key, resolve_media_source
+from . import prompts
 from .retention import cleanup_processed_capture_media, cleanup_settings, mark_capture_cleanup_ready
+from . import tags as tag_vocabulary
 from .runtime import exclusive_lock, pipeline_pause_flag, runtime_dir
 
 DEFAULT_WHISPER_BIN = (
@@ -43,6 +45,8 @@ AI_LIVE_VIDEO_PATH: str | None = None
 AI_LIVE_SESSION_ID: int | None = None
 AI_LIVE_LAST_WRITE = 0.0
 MAX_VISION_IMAGES_PER_REQUEST = 16
+ACTIVITY_CONTEXT_FRAMES = 3
+ACTIVITY_BATCH_FRAMES = MAX_VISION_IMAGES_PER_REQUEST - ACTIVITY_CONTEXT_FRAMES
 
 
 def _run_hidden(*args, **kwargs):
@@ -118,12 +122,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def discover() -> dict[str, int]:
+def discover(audio_recording: bool | None = None) -> dict[str, int]:
     initialize()
     audio_files = sorted(AUDIO_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime)
-    # O último arquivo é o segmento aberto quando o serviço está gravando.
-    active_audio = audio_files[-1] if audio_files else None
-    counts = {"audio": 0, "screen": 0}
+    # A API conhece o estado do gravador. No worker independente, preserve o
+    # segmento recém-escrito, mas não deixe o último WAV parado fora do índice
+    # para sempre depois de a captura encerrar.
+    newest_audio = audio_files[-1] if audio_files else None
+    active_audio = newest_audio if newest_audio and (
+        audio_recording is True or
+        (audio_recording is None and time.time() - newest_audio.stat().st_mtime < 30)
+    ) else None
+    counts = {"audio": 0, "screen": 0, "deferred_audio": int(active_audio is not None)}
     with connect() as db:
         for kind, files in (("audio", audio_files), ("screen", sorted(SCREEN_DIR.glob("*.png")))):
             for path in files:
@@ -136,6 +146,43 @@ def discover() -> dict[str, int]:
                 )
                 counts[kind] += cursor.rowcount
     return counts
+
+
+# O Ollama devolve, por chamada, quanto tempo foi carregar o modelo, quanto foi
+# ler o prompt (que num modelo de visão inclui codificar a imagem) e quanto foi
+# gerar a resposta. Sem essa divisão não dá para saber se encurtar um prompt
+# adianta alguma coisa. O acumulador soma as chamadas de uma mesma análise --
+# ``ollama_json`` pode repetir a chamada para consertar um JSON quebrado -- e o
+# worker processa um item por vez, então um dicionário de módulo basta.
+_CALL_METRICS: dict[str, object] = {}
+
+
+def clear_call_metrics() -> None:
+    _CALL_METRICS.clear()
+
+
+def last_call_metrics() -> dict:
+    return dict(_CALL_METRICS)
+
+
+def _record_call_metrics(model: str, payload: dict) -> None:
+    def milliseconds(key: str) -> int:
+        return round(payload.get(key, 0) / 1_000_000)
+
+    _CALL_METRICS["model"] = model
+    _CALL_METRICS["calls"] = int(_CALL_METRICS.get("calls", 0)) + 1
+    for key, source in (
+        ("prompt_tokens", "prompt_eval_count"),
+        ("generated_tokens", "eval_count"),
+    ):
+        _CALL_METRICS[key] = int(_CALL_METRICS.get(key, 0)) + int(payload.get(source, 0) or 0)
+    for key, source in (
+        ("load_ms", "load_duration"),
+        ("prompt_ms", "prompt_eval_duration"),
+        ("eval_ms", "eval_duration"),
+        ("total_ms", "total_duration"),
+    ):
+        _CALL_METRICS[key] = int(_CALL_METRICS.get(key, 0)) + milliseconds(source)
 
 
 def ollama_chat(model: str, messages: list[dict], timeout: int = 300, num_ctx: int = 16384, think: bool | None = None) -> str:
@@ -176,7 +223,8 @@ def ollama_chat(model: str, messages: list[dict], timeout: int = 300, num_ctx: i
         raise RuntimeError(message) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"Ollama indisponível: {exc}") from exc
-    metrics = {"model": model, "status": "done", "prompt_tokens": final_payload.get("prompt_eval_count", 0), "generated_tokens": final_payload.get("eval_count", 0), "total_duration_ms": round(final_payload.get("total_duration", 0) / 1_000_000), "eval_duration_ms": round(final_payload.get("eval_duration", 0) / 1_000_000)}
+    metrics = {"model": model, "status": "done", "prompt_tokens": final_payload.get("prompt_eval_count", 0), "generated_tokens": final_payload.get("eval_count", 0), "total_duration_ms": round(final_payload.get("total_duration", 0) / 1_000_000), "eval_duration_ms": round(final_payload.get("eval_duration", 0) / 1_000_000), "prompt_duration_ms": round(final_payload.get("prompt_eval_duration", 0) / 1_000_000), "load_duration_ms": round(final_payload.get("load_duration", 0) / 1_000_000)}
+    _record_call_metrics(model, final_payload)
     publish_ai_live(thinking, content, metrics, force=True)
     had_content = bool(content.strip())
     content = recover_json_from_thinking(content, thinking)
@@ -186,6 +234,11 @@ def ollama_chat(model: str, messages: list[dict], timeout: int = 300, num_ctx: i
     if not content:
         raise RuntimeError("Ollama retornou conteúdo vazio")
     return content
+
+
+def context_overflow(exc: Exception) -> bool:
+    """O Ollama recusa o lote inteiro quando as imagens não cabem no ``num_ctx``."""
+    return "exceed_context_size" in str(exc) or "exceeds the available context size" in str(exc)
 
 
 def parse_json_response(text: str) -> dict:
@@ -268,15 +321,11 @@ def adaptive_web_research(facts: str, user_context: str, config: dict[str, str],
     sources: list[dict] = []; queries: list[str] = []; seen_urls: set[str] = set()
     while state.get("query_count", 0) < safety_limit:
         evidence = "\n".join(f"- {item['title']}: {item['snippet']}" for item in sources[-30:]) or "(nenhuma pesquisa feita)"
-        plan = ollama_json(text_model(), [{"role": "user", "content": (
-            "Você está pesquisando contexto factual para uma análise de gameplay. Decida se ainda existem dúvidas "
-            "concretas que a internet pode resolver (jogo, missão, item, personagem fictício, mecânica, patch ou evento). "
-            "NUNCA pesquise identidade, perfil, fama, redes sociais, estatísticas ou biografia de pessoas reais. "
-            "Nomes de amigos e jogadores informados pelo usuário são dados privados e não podem aparecer nas consultas. "
-            "Não pesquise fatos já visíveis nem repita consultas equivalentes. Continue apenas se a busca puder melhorar a análise. "
-            "Responda SOMENTE JSON com continue (boolean), queries (lista de consultas específicas) e reason.\n"
-            f"O contexto privado do usuário foi deliberadamente omitido.\nFatos observados:\n{safe_facts[:12000]}\n"
-            f"Consultas anteriores: {json.dumps(queries, ensure_ascii=False)}\nResultados obtidos:\n{evidence[:16000]}"
+        plan = ollama_json(text_model(), [{"role": "user", "content": prompts.render(
+            "web_research_plan",
+            fatos=safe_facts[:12000],
+            consultas_anteriores=json.dumps(queries, ensure_ascii=False),
+            resultados=evidence[:16000],
         )}], timeout=180, num_ctx=16384, think=False)
         proposed = [str(item).strip() for item in plan.get("queries", []) if str(item).strip()]
         unique = [item for item in proposed if item.casefold() not in {old.casefold() for old in queries} and safe_research_query(item, private_terms)]
@@ -300,10 +349,10 @@ def adaptive_web_research(facts: str, user_context: str, config: dict[str, str],
             break
     if not sources:
         return {"findings": "", "sources": [], "queries": queries}
-    synthesis = ollama_json(text_model(), [{"role": "user", "content": (
-        "Use os resultados de busca apenas para complementar os fatos observados. Ignore resultados conflitantes ou sem relação. "
-        "Não transforme hipóteses em fatos. Responda SOMENTE JSON com findings (parágrafo factual curto) e useful_urls (lista de URLs usadas).\n"
-        f"Fatos observados:\n{safe_facts[:12000]}\nResultados:\n{json.dumps(sources, ensure_ascii=False)[:30000]}"
+    synthesis = ollama_json(text_model(), [{"role": "user", "content": prompts.render(
+        "web_research_synthesis",
+        fatos=safe_facts[:12000],
+        resultados=json.dumps(sources, ensure_ascii=False)[:30000],
     )}], timeout=240, num_ctx=24576, think=False)
     useful = set(str(url) for url in synthesis.get("useful_urls", []))
     selected = [item for item in sources if not useful or item["url"] in useful]
@@ -907,16 +956,13 @@ def marker_visual_title(
         event for event in audio_events
         if float(event.get("end", 0)) >= start and float(event.get("start", 0)) <= end
     ]
-    prompt = (
-        f"Crie um título curto, factual e específico em português para o marcador em {format_video_time(moment)}. "
-        f"Os frames estão em ordem cronológica e cobrem {format_video_time(start)}–{format_video_time(end)}, "
-        "12 segundos antes e depois do marcador quando há vídeo suficiente. Analise o momento concreto: a ação, "
-        "a reação e o resultado. Pode ser uma boa jogada, humor, surpresa, conversa, falha, vitória, bug ou outro "
-        "acontecimento pontual. Cruze as imagens com a fala e os sons próximos, mas não invente detalhes nem use um "
-        "resumo geral do vídeo. Se algo estiver incerto, prefira um título simples baseado no que é observável. "
-        f"Transcrição local: {' '.join(nearby_transcript)[:6000] or '(sem fala detectada)'}. "
-        f"Eventos sonoros locais: {json.dumps(nearby_events, ensure_ascii=False)[:3000] or '[]'}. "
-        'Responda SOMENTE JSON no formato {"title":"..."}.'
+    prompt = prompts.render(
+        "video_marker_title",
+        instante=format_video_time(moment),
+        inicio=format_video_time(start),
+        fim=format_video_time(end),
+        transcricao=" ".join(nearby_transcript)[:6000] or "(sem fala detectada)",
+        eventos_sonoros=json.dumps(nearby_events, ensure_ascii=False)[:3000] or "[]",
     )
     data = ollama_json(
         vision_model(),
@@ -976,19 +1022,14 @@ def analyze_video_chapter(path: Path, start: float, end: float, index: int, tota
                 transcription = transcribe(audio, language="auto")
             except RuntimeError:
                 pass
-    prompt = (
-        f"Analise o capítulo {index+1} de {total}, entre {format_video_time(start)} e {format_video_time(end)}, "
-        "de uma gravação contínua de gameplay. Os frames estão em ordem temporal. Reconstrua primeiro as ações, seus "
-        "autores, alvos, reações e resultados. Identifique também mudanças de cenário, progresso, falhas, vitórias, "
-        "personagens e informações concretas. Não presuma que todo trecho é tático: reconheça humor, conversa/reação, "
-        "surpresa, bug, tentativa frustrada ou momento narrativo quando a sequência ou o áudio sustentarem essa leitura. "
-        "Cruze a fala e os efeitos sonoros com as ações correspondentes, mas trate erros de transcrição com cautela e não "
-        "invente o conteúdo de fala ausente. Use informações da HUD apenas como contexto secundário da ação principal. "
-        "Não escreva generalidades nem invente ligações. "
-        f"Transcrição deste capítulo: {transcription['text'][:10000] or '(sem fala detectada)'}. "
-        f"Contexto informado pelo usuário (trate como metadado confiável): {context[:5000] or '(nenhum)'}. "
-        "Responda SOMENTE JSON com title, summary (um parágrafo factual), events (lista de 2 a 8 fatos em ordem), "
-        "evidence (lista curta do que foi visto/ouvido), interpretation (inferência curta separada dos fatos), app, game e tags."
+    prompt = prompts.render(
+        "video_chapter",
+        capitulo=index + 1,
+        total=total,
+        inicio=format_video_time(start),
+        fim=format_video_time(end),
+        transcricao=transcription["text"][:10000] or "(sem fala detectada)",
+        contexto=context[:5000] or "(nenhum)",
     )
     if len(images) < 2:
         raise RuntimeError(f"não foi possível extrair frames do capítulo {index+1}")
@@ -1058,12 +1099,9 @@ def describe_long_video(path: Path, duration: float, geometry: str, directory: P
     update_video_progress(path, "Sintetizando todos os capítulos", 90, {
         "kind": "synthesis", "detail": f"{chapter_count} capítulos concluídos; gerando memória final",
     })
-    synthesis = ollama_json(text_model(), [{"role": "user", "content": (
-        "Produza uma memória detalhada desta gravação de gameplay a partir dos capítulos abaixo. Preserve a ordem "
-        "temporal e nomes concretos. A descrição deve ter de 4 a 8 parágrafos curtos, cobrindo o arco da sessão, "
-        "momentos importantes, progresso, dificuldades e desfecho. Evite frases genéricas. Responda SOMENTE JSON "
-        "com title, description, app, game, tags (até 8) e highlights (até 10 fatos).\nCAPÍTULOS:\n"
-        + json.dumps(compact, ensure_ascii=False)
+    synthesis = ollama_json(text_model(), [{"role": "user", "content": prompts.render(
+        "video_synthesis",
+        capitulos=json.dumps(compact, ensure_ascii=False),
     )}], timeout=600, num_ctx=32768)
     description = str(synthesis.get("description") or "").strip()
     highlights = [str(item) for item in synthesis.get("highlights", [])[:10]]
@@ -1109,7 +1147,8 @@ def synchronized_audio_context(captured_at: str, radius_seconds: float = 45) -> 
         and str(segment.get("text") or "").strip()
     ]
     return "\n".join(
-        f"[{float(segment.get('start', 0)) - offset:+.0f}s] {str(segment.get('text') or '').strip()}"
+        f"[{float(segment.get('start', 0)) - offset:+.0f}s; "
+        f"fonte={segment.get('source') or 'não identificada'}] {str(segment.get('text') or '').strip()}"
         for segment in nearby
     )[:4000]
 
@@ -1119,22 +1158,23 @@ def describe_screen(path: Path) -> dict:
     sidecar = path.with_suffix(path.suffix + ".window")
     window = sidecar.read_text(encoding="utf-8").strip() if sidecar.exists() else ""
     audio_context = synchronized_audio_context(timestamp_from_name(path).isoformat())
-    prompt = (
-        "Analise este screenshot de desktop em português do Brasil. Extraia apenas fatos visíveis e úteis para memória pessoal. "
-        "Não invente conteúdo ilegível. Ignore relógio, barra de tarefas e elementos decorativos. "
-        f"Metadado da janela ativa, se disponível: {window or '(indisponível)'}. "
-        f"Transcrição sincronizada do áudio ao redor deste instante: {audio_context or '(sem fala sincronizada)'}. "
-        "Use a fala somente para esclarecer o assunto, a intenção ou a relação entre elementos visíveis; "
-        "não descreva como visível algo que existe apenas no áudio. "
-        "Responda SOMENTE JSON com: title (curto), description (2-5 frases), app, tags (lista de até 5 strings), "
-        "is_game (boolean), game (nome ou string vazia), event (conquista/progresso observável ou string vazia)."
+    prompt = prompts.render(
+        "screen_description",
+        janela=window or "(indisponível)",
+        audio_proximo=audio_context or "(sem fala sincronizada)",
     )
     data = ollama_json(vision_model(), [{"role": "user", "content": prompt, "images": [encoded]}], timeout=300)
+    title = str(data.get("title") or "Captura de tela")[:300]
+    description = str(data.get("description") or "").strip()
     return {
-        "title": str(data.get("title") or "Captura de tela")[:300],
-        "text": str(data.get("description") or "").strip(),
+        "title": title,
+        "text": description,
         "app": str(data.get("app") or (window.split(" | ")[-1] if window else "Desktop"))[:120],
-        "tags": [str(tag)[:60] for tag in data.get("tags", [])[:5]],
+        "tags": tag_vocabulary.apply_tags(
+            [str(tag) for tag in data.get("tags", [])[:5]],
+            day=timestamp_from_name(path).date().isoformat(),
+            context=f"{title}. {description}",
+        ),
         "metadata": {"is_game": bool(data.get("is_game")), "game": data.get("game", ""), "event": data.get("event", "")},
     }
 
@@ -1150,12 +1190,34 @@ def _activity_image(path: Path, target: Path) -> str:
     return base64.b64encode(source.read_bytes()).decode()
 
 
+def _screen_window(path: Path) -> str:
+    try:
+        return path.with_suffix(path.suffix + ".window").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _activity_app(row: dict) -> str:
+    """Prefere a identidade capturada da janela aos nomes variáveis da IA."""
+    source = row.get("source_path")
+    if source:
+        path = resolve_media_source(source)
+        window = _screen_window(path)
+        # O capturador grava «título | classe/processo». Só o sufixo é estável;
+        # o título pode mudar a cada episódio ou aba do mesmo aplicativo.
+        _, separator, app = window.rpartition(" | ")
+        if separator and app.strip():
+            return app.strip()
+    return str(row.get("app") or "Aplicativo desconhecido").strip()
+
+
 def _activity_groups(rows: list[dict], gap_seconds: float = 600) -> list[list[dict]]:
     """Separa por aplicativo e continuidade; mudanças de título não quebram a sessão."""
     groups: list[list[dict]] = []
     last_by_app: dict[str, list[dict]] = {}
     for row in sorted(rows, key=lambda item: item["captured_at"]):
-        app = str(row.get("app") or "Aplicativo desconhecido").strip()
+        app = _activity_app(row)
+        row = {**row, "app": app}
         moment = datetime.fromisoformat(row["captured_at"])
         current = last_by_app.get(app)
         if current:
@@ -1202,16 +1264,10 @@ def analyze_screen_sequence(paths: list[Path]) -> dict:
                 f"descrição anterior: {item.get('text') or '(ainda sem descrição)'} · "
                 f"áudio próximo: {(audio or '(nenhum)')[:800]}"
             )
-        prompt = (
-            f"Determine principalmente O QUE A PESSOA ESTAVA FAZENDO nesta sequência cronológica de {len(ordered)} prints. "
-            "Comece identificando o objetivo ou tarefa mais provável sustentada pelos frames. Depois reconstrua as ações "
-            "executadas, a evolução entre telas, decisões visíveis e o resultado alcançado ou estado final. Diferencie fatos "
-            "claramente visíveis de inferências; quando o objetivo não estiver comprovado, diga isso de forma concisa. "
-            "Observe todos os frames, não trate telas repetidas como novas ações e não invente texto ilegível. Use o áudio "
-            "próximo somente para esclarecer a ação visual correspondente. A narrative deve responder de forma direta e "
-            "natural 'o que eu estava fazendo?', sem começar com uma descrição genérica dos screenshots. "
-            "Responda SOMENTE JSON com title, narrative (2 a 6 parágrafos), events (lista cronológica), tags (até 8) e key_frames "
-            "(números dos frames desta chamada).\n\n" + "\n".join(frame_context)
+        prompt = prompts.render(
+            "screen_sequence",
+            quantidade=len(ordered),
+            frames="\n".join(frame_context),
         )
         data = ollama_json(
             vision_model(), [{"role": "user", "content": prompt, "images": images}], timeout=900, num_ctx=24576
@@ -1262,7 +1318,50 @@ def process_screen_sequence_job(job_id: int) -> dict:
         raise
 
 
-def generate_visual_activities(day: str, force: bool = False) -> int:
+def _activity_batch_summary(data: dict, started_at: str, ended_at: str) -> dict:
+    """Mantém cada lote legível e limitado, sem cortar o JSON da sequência."""
+    result = {
+        "started_at": started_at, "ended_at": ended_at,
+        "title": str(data.get("title") or "")[:200],
+        "narrative": str(data.get("narrative") or "")[:4000],
+        "events": string_list(data.get("events"), 12, 300),
+        "tags": string_list(data.get("tags"), 10, 80),
+    }
+    # Caracteres escapados podem multiplicar o tamanho serializado. Dois
+    # resumos sempre devem caber juntos para cada nível realmente reduzir.
+    while len(json.dumps(result, ensure_ascii=False)) > 10000:
+        result["narrative"] = result["narrative"][:len(result["narrative"]) // 2]
+        result["events"] = [event[:len(event) // 2] for event in result["events"]]
+    return result
+
+
+def _merge_activity_batches(analyses: list[dict]) -> dict:
+    """Consolida em níveis: todos os períodos chegam à síntese final."""
+    pending = analyses
+    while len(pending) > 1:
+        chunks: list[list[dict]] = [[]]
+        size = 0
+        for item in pending:
+            item_size = len(json.dumps(item, ensure_ascii=False))
+            if chunks[-1] and size + item_size > 24000:
+                chunks.append([])
+                size = 0
+            chunks[-1].append(item)
+            size += item_size
+        merged = []
+        for chunk in chunks:
+            if len(chunk) == 1:
+                merged.append(chunk[0])
+                continue
+            data = ollama_json(text_model(), [{"role": "user", "content": prompts.render(
+                "activity_merge", lotes=json.dumps(chunk, ensure_ascii=False),
+            )}], timeout=900, num_ctx=32768)
+            merged.append(_activity_batch_summary(data, chunk[0]["started_at"], chunk[-1]["ended_at"]))
+        pending = merged
+    return pending[0]
+
+
+def generate_visual_activities(day: str, force: bool = False, *, report=None) -> int:
     """Analisa sequências completas de prints em lotes sobrepostos e as consolida."""
     with connect() as db:
         raw_rows = db.execute(
@@ -1274,7 +1373,10 @@ def generate_visual_activities(day: str, force: bool = False) -> int:
     groups = _activity_groups(rows)
     generated = 0
     active_keys: list[str] = []
-    for group in groups:
+    # O lote encolhe uma vez e vale para o dia inteiro: sem isso, cada grupo
+    # grande repetiria a mesma chamada perdida antes de descobrir o limite.
+    batch_frames = ACTIVITY_BATCH_FRAMES
+    for group_index, group in enumerate(groups, 1):
         app = str(group[0].get("app") or "Aplicativo desconhecido")
         activity_key = hashlib.sha1(f"{day}|{app}|{group[0]['id']}".encode()).hexdigest()
         active_keys.append(activity_key)
@@ -1287,9 +1389,12 @@ def generate_visual_activities(day: str, force: bool = False) -> int:
         key_capture_ids: list[int] = []
         with tempfile.TemporaryDirectory(prefix="lume-activity-") as directory:
             workdir = Path(directory)
-            for start in range(0, len(group), 30):
-                context_start = max(0, start - 3)
-                frames = group[context_start:min(len(group), start + 30)]
+            start = 0
+            while start < len(group):
+                if report:
+                    report(f"Analisando imagens · grupo {group_index}/{len(groups)} · {app} · imagens {start + 1}–{min(len(group), start + batch_frames)}/{len(group)}")
+                context_start = max(0, start - ACTIVITY_CONTEXT_FRAMES)
+                frames = group[context_start:min(len(group), start + batch_frames)]
                 context_count = start - context_start
                 images = [
                     _activity_image(resolve_media_source(item["source_path"]), workdir / f"{start:04d}-{index:02d}.jpg")
@@ -1298,23 +1403,35 @@ def generate_visual_activities(day: str, force: bool = False) -> int:
                 frame_context = []
                 for index, item in enumerate(frames, 1):
                     audio = synchronized_audio_context(item["captured_at"])
+                    window = _screen_window(resolve_media_source(item["source_path"]))
                     frame_context.append(
                         f"FRAME {index}{' (somente contexto anterior)' if index <= context_count else ''} · "
-                        f"[{item['captured_at'][11:19]}] · memória screen:{item['id']} · descrição anterior: "
-                        f"{item.get('text') or '(ainda sem descrição)'} · áudio próximo: {(audio or '(nenhum)')[:800]}"
+                        f"[{item['captured_at']}] · memória screen:{item['id']}\n"
+                        + json.dumps({
+                            "janela_capturada": window[:600] or "(indisponível)",
+                            "titulo_anterior_da_ia": str(item.get("title") or "")[:300],
+                            "descricao_anterior_da_ia": str(item.get("text") or "")[:1800],
+                            "audio_proximo_transcrito": (audio or "(nenhum)")[:800],
+                        }, ensure_ascii=False)
                     )
-                prompt = (
-                    f"Analise esta sequência cronológica de {len(frames)} prints do aplicativo {app}. "
-                    f"Os primeiros {context_count} frames apenas conectam este lote ao anterior; não os conte novamente. "
-                    "Reconstrua ações, mudanças de estado, decisões, resultados e períodos de espera. Observe todos os frames; "
-                    "não transforme uma única tela em atividade prolongada e não invente texto ilegível. Use o áudio próximo "
-                    "somente para esclarecer a ação visual correspondente. Selecione key_frames apenas quando o print for útil "
-                    "para rever o que aconteceu. Responda SOMENTE JSON com title, narrative (2 a 6 parágrafos), events "
-                    "(lista cronológica), tags (até 8) e key_frames (números dos frames desta chamada).\n\n" +
-                    "\n".join(frame_context)
+                prompt = prompts.render(
+                    "activity_batch",
+                    quantidade=len(frames),
+                    aplicativo=app,
+                    frames_de_contexto=context_count,
+                    frames="\n".join(frame_context),
                 )
-                data = ollama_json(vision_model(), [{"role": "user", "content": prompt, "images": images}], timeout=900, num_ctx=24576)
-                analyses.append(data)
+                try:
+                    data = ollama_json(vision_model(), [{"role": "user", "content": prompt, "images": images}], timeout=900, num_ctx=24576)
+                except RuntimeError as exc:
+                    if not context_overflow(exc) or batch_frames <= 1:
+                        raise
+                    batch_frames = max(1, batch_frames // 2)
+                    print(f"[activity] lote visual reduzido para {batch_frames} frames: {exc}", file=sys.stderr)
+                    continue
+                analyses.append(_activity_batch_summary(
+                    data, frames[context_count]["captured_at"], frames[-1]["captured_at"]
+                ))
                 for value in data.get("key_frames", []) if isinstance(data.get("key_frames"), list) else []:
                     try:
                         frame_index = int(value) - 1
@@ -1324,17 +1441,14 @@ def generate_visual_activities(day: str, force: bool = False) -> int:
                         capture_id = int(frames[frame_index]["id"])
                         if capture_id not in key_capture_ids:
                             key_capture_ids.append(capture_id)
+                start += batch_frames
 
-        if len(analyses) > 1:
-            synthesis = ollama_json(text_model(), [{"role": "user", "content": (
-                "Una estes lotes consecutivos de uma única atividade. Preserve a cronologia e detalhes concretos, elimine apenas "
-                "repetições causadas pela sobreposição. Responda SOMENTE JSON com title, narrative (4 a 10 parágrafos), events "
-                "(lista cronológica) e tags (até 10).\n" + json.dumps(analyses, ensure_ascii=False)[:60000]
-            )}], timeout=900, num_ctx=32768)
-        else:
-            synthesis = analyses[0]
+        synthesis = _merge_activity_batches(analyses)
         events = string_list(synthesis.get("events"), 40, 800)
-        tags = string_list(synthesis.get("tags"), 10, 80)
+        tags = tag_vocabulary.apply_tags(
+            string_list(synthesis.get("tags"), 10, 80), day=day,
+            context=f"{synthesis.get('title') or app}. {str(synthesis.get('narrative') or '')[:400]}",
+        )
         capture_ids = [int(item["id"]) for item in group]
         with connect() as db:
             db.execute(
@@ -1351,13 +1465,20 @@ def generate_visual_activities(day: str, force: bool = False) -> int:
             )
             db.executemany("UPDATE captures SET preserved=1 WHERE id=?", [(item_id,) for item_id in key_capture_ids])
         generated += 1
-    if force:
-        with connect() as db:
-            if active_keys:
-                placeholders = ",".join("?" for _ in active_keys)
-                db.execute(f"DELETE FROM activity_sessions WHERE day=? AND activity_key NOT IN ({placeholders})", [day, *active_keys])
-            else:
-                db.execute("DELETE FROM activity_sessions WHERE day=?", (day,))
+    # Só reconciliar após concluir todos os grupos. Uma execução interrompida
+    # não pode remover a única análise disponível de uma captura.
+    covered_ids = {row["id"] for row in rows}
+    active_key_set = set(active_keys)
+    with connect() as db:
+        obsolete = db.execute(
+            "SELECT id,activity_key,capture_ids_json FROM activity_sessions WHERE day=?", (day,)
+        ).fetchall()
+        for session in obsolete:
+            if session["activity_key"] in active_key_set:
+                continue
+            ids = set(json.loads(session["capture_ids_json"] or "[]"))
+            if ids and ids.issubset(covered_ids):
+                db.execute("DELETE FROM activity_sessions WHERE id=?", (session["id"],))
     return generated
 
 
@@ -1648,31 +1769,12 @@ def string_list(value: object, limit: int = 10, item_limit: int = 500) -> list[s
 
 
 def short_video_analysis_prompt(duration: float, window: str, transcript: str, context: str) -> str:
-    return (
-        "Os frames estão em ordem cronológica e representam um único trecho contínuo de gameplay ou aplicativo. "
-        "Primeiro reconstrua o acontecimento principal ENTRE os frames; não escreva ainda a descrição final. "
-        "Identifique em ordem: quem agiu, o que fez, contra quem ou o quê, a reação e o resultado visível. "
-        "Classifique a natureza provável do trecho como humor, jogada tática, destaque mecânico, conversa/reação, bug, "
-        "momento narrativo, rotina ou incerto. Não presuma que todo clipe de jogo é tático, competitivo ou exemplar. "
-        "Procure timing cômico, surpresa, erro, tentativa frustrada, reação, contraste entre fala e imagem e interferência "
-        "de outros jogadores, sem forçar humor quando ele não estiver sustentado pelo áudio, contexto ou sequência visual. "
-        "Cruze a transcrição com as ações no mesmo momento: fala, risada, tom e efeitos podem explicar por que o trecho foi "
-        "preservado. Se houver indício de fala, mas ela não tiver sido transcrita com segurança, declare essa limitação e "
-        "não invente o conteúdo. "
-        "Use o HUD apenas como evidência secundária para esclarecer o acontecimento. Somente quando legível e relevante, "
-        "determine jogo, mapa, localização, lado/equipe, objetivo, bomba/carga, jogadores vivos, vida, placar e resultado. "
-        "Não confunda o nome de uma localização do HUD com o mapa, nem plantar/proteger uma bomba com desarmá-la. "
-        "Não transforme uma mecânica genérica, um ícone ou um estado estático da HUD em fato central do vídeo. "
-        "Separe rigorosamente: (1) fatos visíveis ou audíveis; (2) afirmações fornecidas pelo usuário; "
-        "(3) inferências compatíveis; (4) pontos que não foi possível confirmar. O contexto do usuário é uma fonte "
-        "confiável sobre a experiência dele, mas não deve ser apresentado como evidência visual. "
-        f"Duração aproximada: {duration:.1f}s. Janela: {window or 'indisponível'}. "
-        f"Transcrição do áudio (pode conter erros): {transcript[:16000] or '(sem fala detectada)'}. "
-        f"Contexto informado pelo usuário: {context[:5000] or '(nenhum)'}. "
-        "Responda SOMENTE JSON com clip_type, main_action, audio_visual_relation, interesting_moment, "
-        "observed_facts (lista), user_context_facts (lista), inferences (lista), "
-        "uncertain (lista), game_state (objeto com game, map, player_side, objective_state, round_result, hud_details), "
-        "app, tags (até 5), event e clip_worthy (boolean). Use string vazia para campos não confirmados."
+    return prompts.render(
+        "video_short_analysis",
+        duracao=f"{duration:.1f}",
+        janela=window or "indisponível",
+        transcricao=transcript[:16000] or "(sem fala detectada)",
+        contexto=context[:5000] or "(nenhum)",
     )
 
 
@@ -1692,28 +1794,11 @@ def review_short_video_analysis(analysis: dict, context: str, research: dict) ->
         "tags": string_list(analysis.get("tags"), 5, 60),
         "clip_worthy": bool(analysis.get("clip_worthy")),
     }
-    prompt = (
-        "Você é o revisor factual final de uma análise de vídeo. Produza uma descrição natural em português do Brasil "
-        "sem acrescentar fatos. O contexto declarado pelo usuário é confiável e pode fornecer nomes e rótulos como "
-        "'clutch', mas deixe implícita ou explicitamente clara a diferença entre contexto informado e evidência visual. "
-        "Comece pelo acontecimento principal e por seu resultado. Preserve a natureza do clipe quando houver evidência "
-        "de humor, reação, conversa, falha, surpresa, narrativa ou destaque; não converta automaticamente gameplay em "
-        "análise tática. Explique brevemente a relação entre fala e ação quando ela estiver sustentada. Se a fala não foi "
-        "transcrita com segurança, não invente seu conteúdo. Use placar, vida, localização e outros itens da HUD apenas "
-        "quando ajudarem a entender a ação principal; nunca deixe a HUD substituir a descrição do que aconteceu. "
-        "Fatos observados têm prioridade sobre inferências; o contexto do usuário tem prioridade quando corrige uma "
-        "inferência incompatível. Itens incertos não podem virar afirmações. Resultados da internet explicam apenas "
-        "mecânicas e nomes do jogo: nunca comprovam uma ação ocorrida neste vídeo. "
-        "Antes de responder, verifique contradições de lado/equipe, objetivo, plantar versus desarmar, vitória/derrota, "
-        "quantidade de jogadores e autoria das ações. Exemplo obrigatório: se o jogador está no ataque e sua equipe "
-        "plantou, descreva defesa do pós-plant, não desarme. Não chame de clutch apenas por inferência; use o termo se "
-        "ele estiver no contexto do usuário ou for inequivocamente sustentado pelas evidências. "
-        "Responda SOMENTE JSON com title (curto), description (2 a 5 frases), app, tags (até 5), event, "
-        "clip_type, main_action, audio_visual_relation, interesting_moment, clip_worthy (boolean), observed_facts, "
-        "user_context_facts, inferences e uncertain.\n"
-        f"CONTEXTO ORIGINAL DO USUÁRIO:\n{context[:5000] or '(nenhum)'}\n"
-        f"ANÁLISE ESTRUTURADA DO VÍDEO:\n{json.dumps(evidence, ensure_ascii=False)}\n"
-        f"CONTEXTO EXTERNO OPCIONAL:\n{str(research.get('findings') or '')[:6000] or '(nenhum)'}"
+    prompt = prompts.render(
+        "video_short_review",
+        contexto=context[:5000] or "(nenhum)",
+        analise=json.dumps(evidence, ensure_ascii=False),
+        contexto_externo=str(research.get("findings") or "")[:6000] or "(nenhum)",
     )
     reviewed = ollama_json(text_model(), [{"role": "user", "content": prompt}], timeout=300, num_ctx=16384)
     reviewed["observed_facts"] = string_list(reviewed.get("observed_facts") or evidence["observed_facts"], 12)
@@ -1884,11 +1969,14 @@ def save_speaker_observations(db, source_kind: str, source_id: int, embeddings: 
     )
 
 
-def process_pending(kind: str, limit: int) -> int:
+def process_pending(kind: str, limit: int, *, capture_ids: list[int] | None = None) -> int:
+    if limit <= 0 or capture_ids == []:
+        return 0
+    selected = "" if capture_ids is None else f" AND id IN ({','.join('?' for _ in capture_ids)})"
     with connect() as db:
         rows = db.execute(
-            "SELECT * FROM captures WHERE kind=? AND status IN ('pending','error') ORDER BY captured_at LIMIT ?",
-            (kind, limit if kind == "audio" else max(limit * 20, limit)),
+            f"SELECT * FROM captures WHERE kind=? AND status IN ('pending','error'){selected} ORDER BY captured_at,id LIMIT ?",
+            [kind, *(capture_ids or []), limit if kind == "audio" else max(limit * 20, limit)],
         ).fetchall()
     completed = 0
     for row in rows:
@@ -1930,21 +2018,23 @@ def process_pending(kind: str, limit: int) -> int:
         try:
             # O tempo medido aqui alimenta a média por tipo mostrada na fila.
             started = time.monotonic()
+            clear_call_metrics()
             result = transcribe(path) if kind == "audio" else describe_screen(path)
             if kind == "audio":
                 intelligence = analyze_video_audio(path, result.get("segments", []), known_voice_profiles())
                 result.update(segments=intelligence["segments"], speakers=intelligence["speakers"], audio_events=intelligence["events"])
             elapsed_ms = round((time.monotonic() - started) * 1000)
+            call_metrics = json.dumps(last_call_metrics(), ensure_ascii=False)
             with connect() as db:
                 saved = db.execute(
                     """UPDATE captures SET status='done',title=?,text=?,app=?,tags_json=?,duration_seconds=?,
                        model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',
-                       process_ms=?,processed_at=CURRENT_TIMESTAMP
+                       process_ms=?,ai_metrics_json=?,processed_at=CURRENT_TIMESTAMP
                        WHERE id=? AND status='processing'""",
                     (result["title"], result["text"], result["app"], json.dumps(result.get("tags", []), ensure_ascii=False),
                      result.get("duration"), WHISPER_MODEL.name if kind == "audio" else vision_model(), sha256(path),
                      json.dumps(result.get("segments", []), ensure_ascii=False), json.dumps(result.get("speakers", []), ensure_ascii=False),
-                     json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, capture_id),
+                     json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, call_metrics, capture_id),
                 )
                 if kind == "audio" and saved.rowcount:
                     save_speaker_observations(db, "audio", capture_id, intelligence.get("speaker_embeddings", {}))
@@ -1957,6 +2047,25 @@ def process_pending(kind: str, limit: int) -> int:
                     "UPDATE captures SET status='error',error=? WHERE id=? AND status='processing'",
                     (str(exc)[-2000:], capture_id),
                 )
+    return completed
+
+
+def drain_pending(kind: str, batch_size: int, through_id: int) -> int:
+    """Tenta cada item da fila inicial uma vez, em lotes, sem repetir erros."""
+    if batch_size <= 0:
+        return 0
+    with connect() as db:
+        ids = [row["id"] for row in db.execute(
+            "SELECT id FROM captures WHERE kind=? AND status IN ('pending','error') AND id<=? ORDER BY captured_at,id",
+            (kind, through_id),
+        )]
+    size = min(batch_size, 500)
+    completed = 0
+    for start in range(0, len(ids), size):
+        if pipeline_pause_flag().is_file():
+            break
+        batch = ids[start:start + size]
+        completed += process_pending(kind, len(batch), capture_ids=batch)
     return completed
 
 
@@ -1974,20 +2083,22 @@ def process_specific(path: Path) -> dict:
         db.execute("UPDATE captures SET status='processing',error='' WHERE id=?", (row["id"],))
     try:
         started = time.monotonic()
+        clear_call_metrics()
         result = transcribe(path) if kind == "audio" else describe_screen(path)
         if kind == "audio":
             intelligence = analyze_video_audio(path, result.get("segments", []), known_voice_profiles())
             result.update(segments=intelligence["segments"], speakers=intelligence["speakers"], audio_events=intelligence["events"])
         elapsed_ms = round((time.monotonic() - started) * 1000)
+        call_metrics = json.dumps(last_call_metrics(), ensure_ascii=False)
         with connect() as db:
             db.execute(
                 """UPDATE captures SET status='done',title=?,text=?,app=?,tags_json=?,duration_seconds=?,
                    model=?,sha256=?,transcript_segments_json=?,speakers_json=?,audio_events_json=?,error='',
-                   process_ms=?,processed_at=CURRENT_TIMESTAMP WHERE id=?""",
+                   process_ms=?,ai_metrics_json=?,processed_at=CURRENT_TIMESTAMP WHERE id=?""",
                 (result["title"], result["text"], result["app"], json.dumps(result.get("tags", []), ensure_ascii=False),
                  result.get("duration"), WHISPER_MODEL.name if kind == "audio" else vision_model(), sha256(path),
                  json.dumps(result.get("segments", []), ensure_ascii=False), json.dumps(result.get("speakers", []), ensure_ascii=False),
-                 json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, row["id"]),
+                 json.dumps(result.get("audio_events", []), ensure_ascii=False), elapsed_ms, call_metrics, row["id"]),
             )
             if kind == "audio":
                 save_speaker_observations(db, "audio", row["id"], intelligence.get("speaker_embeddings", {}))
@@ -1998,6 +2109,78 @@ def process_specific(path: Path) -> dict:
         with connect() as db:
             db.execute("UPDATE captures SET status='error',error=? WHERE id=?", (str(exc)[-2000:], row["id"]))
         raise
+
+
+def days_pending_consolidation() -> set[str]:
+    """Dias com memória analisada cuja narrativa não cobre o que está lá.
+
+    Existe porque "pendente" tinha dois sentidos que não se encontravam. O
+    botão de processar pendentes enfileira *mídia* pendente; um dia cuja mídia
+    foi analisada semanas atrás não tem nada pendente e, ainda assim, pode
+    estar sem narrativa — e o worker só consolidava os dias que tocava na
+    própria rodada. O resultado era um dia inteiro de memórias invisível: não
+    aparecia como atrasado em lugar nenhum e nenhum clique o alcançava.
+
+    São dois casos, e o segundo é o que trava a limpeza segura:
+
+    * dia sem resumo nenhum;
+    * dia cujo resumo é **anterior** à memória mais nova dele. Acontece quando
+      mais capturas do mesmo dia são analisadas depois da consolidação: a
+      narrativa passa a não cobrir tudo, e a limpeza — que compara a contagem
+      registrada com a atual — recusa apagar a mídia bruta, corretamente.
+      Reconsolidar é o que atualiza as duas coisas.
+
+    A consulta é sobre o índice, não sobre o disco: a narrativa é montada a
+    partir do texto já analisado, então um dia continua consolidável depois de
+    a mídia bruta ter sido apagada pela retenção.
+    """
+    with connect() as db:
+        rows = db.execute(
+            """SELECT memoria.day FROM (
+                   SELECT day, max(processado) processado FROM (
+                       SELECT substr(captured_at,1,10) day,
+                              coalesce(processed_at,created_at) processado
+                       FROM captures WHERE status='done'
+                       UNION ALL
+                       SELECT substr(captured_at,1,10) day,
+                              coalesce(processed_at,created_at) processado
+                       FROM video_segments WHERE status='done'
+                   ) WHERE day IS NOT NULL AND day <> '' GROUP BY day
+               ) memoria
+               LEFT JOIN summaries resumo ON resumo.day = memoria.day
+               WHERE resumo.day IS NULL
+                  OR julianday(resumo.generated_at) < julianday(memoria.processado)"""
+        ).fetchall()
+    return {row["day"] for row in rows}
+
+
+def describe_tag_candidates(candidates: list[dict]) -> dict[str, dict]:
+    """O Qwen batiza as candidatas que sobreviveram à quarentena.
+
+    Uma tag nova precisa de um critério: é o texto que o Laya lê para reconhecer
+    o assunto nas próximas análises. Sem ele a tag existe mas não é aplicável.
+    """
+    with connect() as db:
+        vocabulary = [dict(row) for row in db.execute(
+            "SELECT label,criterion FROM tags WHERE status='active' ORDER BY label"
+        )]
+    prompt = prompts.render(
+        "tag_promotion",
+        vocabulario="\n".join(f"- {item['label']}: {item['criterion']}" for item in vocabulary) or "(nenhuma ainda)",
+        candidatas=json.dumps(candidates, ensure_ascii=False, indent=1),
+    )
+    data = ollama_json(text_model(), [{"role": "user", "content": prompt}], timeout=600, num_ctx=8192)
+    described: dict[str, dict] = {}
+    for item in data.get("tags", []) if isinstance(data, dict) else []:
+        slug = str((item or {}).get("slug") or "").strip()
+        if slug:
+            described[slug] = {"label": str(item.get("label") or ""), "criterion": str(item.get("criterion") or "")}
+    return described
+
+
+def promote_day_tags(day: str) -> dict:
+    """Fecha o vocabulário do dia: funde sinônimos e promove o que recorreu."""
+    return tag_vocabulary.promote(day, describe=describe_tag_candidates)
 
 
 def generate_summary(day: str) -> bool:
@@ -2017,6 +2200,12 @@ def generate_summary(day: str) -> bool:
         generate_hourly_summaries(day)
     except Exception as exc:
         print(f"[summary] síntese horária indisponível para {day}: {exc}", file=sys.stderr)
+    # Depois das análises do dia: só aqui todas as propostas da jornada existem,
+    # e a recorrência entre elas é o que separa assunto novo de ruído do modelo.
+    try:
+        promote_day_tags(day)
+    except Exception as exc:
+        print(f"[summary] promoção de tags indisponível para {day}: {exc}", file=sys.stderr)
     with connect() as db:
         hourly_rows = db.execute(
             "SELECT hour,title,narrative,activities_json,source_count FROM hourly_summaries WHERE substr(hour,1,10)=? ORDER BY hour",
@@ -2039,29 +2228,19 @@ def generate_summary(day: str) -> bool:
     )
     counts = {kind: sum(1 for row in rows if row["kind"] == kind) for kind in ("audio", "screen", "video", "session", "game_activity")}
     target = daily_narrative_target(len(rows))
-    prompt = (
-        "Você gera o resumo factual da memória digital pessoal. Use somente o CONTEXTO, sem inventar. "
-        "Blocos marcados como MOMENTO MULTIMODAL contêm falas e telas do mesmo intervalo; interprete-os em conjunto "
-        "e não conte o áudio e os prints como atividades independentes. "
-        f"Há {len(rows)} memórias processadas ({counts['screen']} telas, {counts['audio']} áudios, "
-        f"{counts['video']} vídeos avulsos, {counts['session']} sessões de vídeo e "
-        f"{counts['game_activity']} sessões de jogo cronometradas), distribuídas em {len(hourly_rows)} horas com atividade. "
-        f"Escreva narrative com {target}, cobrindo em ordem cronológica os períodos e assuntos distintos. "
-        "Não encurte tudo em um único parágrafo. Não repita screenshots equivalentes, não infle períodos pausados e não invente duração. "
-        "Linhas DURAÇÃO EXATA DO CONTADOR são a fonte principal para os minutos de games e app_blocks. DURAÇÃO REGISTRADA DO "
-        "VÍDEO é apenas apoio quando não houver sessão cronometrada correspondente. Arredonde somente no resultado final. "
-        "Não some novamente prints, áudios, vídeos ou capítulos que pertençam ao mesmo "
-        "intervalo de vídeo, e cada SESSÃO DE VÍDEO já representa seus clipes uma única vez. Quando a evidência for apenas um clipe "
-        "ou destaque salvo, a duração informa somente o material gravado e não prova o tempo total jogado. "
-        "Responda SOMENTE JSON: narrative (uma string com parágrafos separados por \\n\\n), tasks (lista de {text,done,source}), "
-        "meetings (lista de {time,title,snippet}), highlights (lista de títulos), "
-        "app_blocks (lista de {app,minutes}), games (lista de {title,minutes,event}) e relevant_media. "
-        "relevant_media deve separar screens, audio, videos e sessions; cada lista contém somente evidências realmente "
-        "úteis para rever ou editar, como {id,reason}. Use exclusivamente IDs explícitos [tipo:id] do contexto e seja seletivo. "
-        "Quando houver evidências representativas, não deixe todas as quatro listas vazias; inclua ao menos o melhor item citado.\n\n"
-        "SÍNTESE POR HORA:\n" + (hourly_context or "(indisponível)") +
-        "\n\nSESSÕES VISUAIS ANALISADAS EM SEQUÊNCIA:\n" + (activity_context[:50000] or "(indisponível)") +
-        "\n\nEVIDÊNCIAS REPRESENTATIVAS DO DIA INTEIRO:\n" + raw_context
+    prompt = prompts.render(
+        "daily_summary",
+        memorias=len(rows),
+        telas=counts["screen"],
+        audios=counts["audio"],
+        videos=counts["video"],
+        sessoes=counts["session"],
+        sessoes_de_jogo=counts["game_activity"],
+        horas=len(hourly_rows),
+        tamanho_da_narrativa=target,
+        sintese_por_hora=hourly_context or "(indisponível)",
+        sessoes_visuais=activity_context[:50000] or "(indisponível)",
+        evidencias=raw_context,
     )
     data = ollama_json(text_model(), [{"role": "user", "content": prompt}], timeout=900, num_ctx=24576)
     data = apply_exact_game_durations(data, rows)
@@ -2075,27 +2254,26 @@ def generate_summary(day: str) -> bool:
     return True
 
 
-def generate_hourly_summaries(day: str, force: bool = False) -> int:
+def generate_hourly_summaries(day: str, force: bool = False, *, report=None) -> int:
     rows = summary_source_rows(day)
     hours: dict[str, list] = {}
     for row in rows:
         hours.setdefault(row["captured_at"][:13], []).append(row)
     generated = 0
-    for hour, entries in hours.items():
+    for hour_index, (hour, entries) in enumerate(sorted(hours.items()), 1):
         with connect() as db:
             cached = db.execute("SELECT source_count FROM hourly_summaries WHERE hour=?", (hour,)).fetchone()
         if cached and cached["source_count"] == len(entries) and not force:
             continue
+        if report:
+            report(f"Gerando resumo das {hour[-2:]}h · período {hour_index}/{len(hours)}")
         context = multimodal_context(entries, 30000)
-        prompt = (
-            "Resuma esta hora de memória digital pessoal em português do Brasil. Compacte repetições entre screenshots e áudio, "
-            "trate cada MOMENTO MULTIMODAL como uma atividade única, cruzando a fala com as telas do mesmo intervalo. "
-            "preserve atividades, decisões e assuntos concretos, e não invente. Responda SOMENTE JSON com title (curto), "
-            "narrative (2-5 frases compactas), tags (lista de até 5 strings) e activities (lista de objetos com label, detail, "
-            "app, type e minutes). type deve ser app, site, search, communication ou other. minutes deve ser uma estimativa "
-            "conservadora baseada no intervalo observado, ou 0 quando não for possível estimar.\n\nCONTEXTO:\n" + context
-        )
+        prompt = prompts.render("hourly_summary", contexto=context)
         data = ollama_json(text_model(), [{"role": "user", "content": prompt}], timeout=600, num_ctx=8192)
+        hourly_tags = tag_vocabulary.apply_tags(
+            [str(tag) for tag in data.get("tags", [])[:5]], day=hour[:10],
+            context=f"{data.get('title') or ''}. {str(data.get('narrative') or '')[:400]}",
+        )
         with connect() as db:
             db.execute(
                 """INSERT INTO hourly_summaries(hour,title,narrative,tags_json,activities_json,source_count,model)
@@ -2103,13 +2281,13 @@ def generate_hourly_summaries(day: str, force: bool = False) -> int:
                    tags_json=excluded.tags_json,activities_json=excluded.activities_json,source_count=excluded.source_count,
                    model=excluded.model,generated_at=CURRENT_TIMESTAMP""",
                 (hour, str(data.get("title") or f"Atividades das {hour[-2:]}h")[:200], str(data.get("narrative") or ""),
-                 json.dumps(data.get("tags", [])[:5], ensure_ascii=False), json.dumps(data.get("activities", [])[:12], ensure_ascii=False), len(entries), text_model()),
+                 json.dumps(hourly_tags, ensure_ascii=False), json.dumps(data.get("activities", [])[:12], ensure_ascii=False), len(entries), text_model()),
             )
         generated += 1
     return generated
 
 
-def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool) -> dict:
+def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool, *, drain: bool = False) -> dict:
     initialize(); discovered = discover()
     with connect() as db:
         db.execute("UPDATE captures SET status='pending',error='interrompido; reagendado' WHERE status='processing'")
@@ -2130,6 +2308,7 @@ def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool) -> dict:
                ORDER BY captured_at"""
         )]
         run_id = db.execute("INSERT INTO pipeline_runs(status) VALUES('running')").lastrowid
+        through_id = db.execute("SELECT coalesce(max(id),0) FROM captures").fetchone()[0]
     try:
         videos = 0
         sessions = 0
@@ -2148,19 +2327,55 @@ def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool) -> dict:
             except Exception as exc:
                 video_errors += 1
                 print(f"[pipeline] falha em {job['kind']} {job['id']}: {exc}", file=sys.stderr)
-        audio = process_pending("audio", limit_audio)
-        screen = process_pending("screen", limit_screen)
+        audio = drain_pending("audio", limit_audio, through_id) if drain else process_pending("audio", limit_audio)
+        screen = drain_pending("screen", limit_screen, through_id) if drain else process_pending("screen", limit_screen)
         today = datetime.now().astimezone().date().isoformat()
-        summary_days = sorted(capture_days | video_days | {today}) if summarize else []
+        # Primeiro os dias desta rodada, em ordem cronológica; depois o
+        # atrasado — dias com memória analisada e sem resumo —, do mais recente
+        # para o mais antigo, que é a ordem em que alguém procura por eles.
+        summary_days: list[str] = []
+        if summarize and not pipeline_pause_flag().is_file():
+            touched = sorted(capture_days | video_days | {today})
+            summary_days = touched + sorted(days_pending_consolidation() - set(touched), reverse=True)
         activities = 0
         hourly = 0
+        summary_errors = 0
         summarized_days = []
-        for day in summary_days:
-            activities += generate_visual_activities(day)
-            hourly += generate_hourly_summaries(day)
-            if generate_summary(day):
-                summarized_days.append(day)
-                mark_capture_cleanup_ready(day)
+        # Um dia que a IA não consegue consolidar não pode derrubar a execução
+        # inteira: os dias seguintes e a limpeza precisam acontecer mesmo assim.
+        summary_queue = [{"day": day, "status": "pending", "stage": "Aguardando"} for day in summary_days]
+
+        def save_progress(stage=None):
+            if stage is not None:
+                entry["stage"] = stage
+            payload = {"days": summary_queue, "updated_at": datetime.now().astimezone().isoformat()}
+            with connect() as db:
+                db.execute("UPDATE pipeline_runs SET progress_json=? WHERE id=?",
+                           (json.dumps(payload, ensure_ascii=False), run_id))
+
+        save_progress()
+        for entry in summary_queue:
+            day = entry["day"]
+            entry["status"] = "processing"
+            try:
+                save_progress("Preparando análise das imagens")
+                activities += generate_visual_activities(day, report=save_progress)
+                save_progress("Preparando resumos por hora")
+                hourly += generate_hourly_summaries(day, report=save_progress)
+                save_progress("Escrevendo resumo do dia")
+                if generate_summary(day):
+                    summarized_days.append(day)
+                    mark_capture_cleanup_ready(day)
+                    entry["stage"] = "Concluído"
+                else:
+                    entry["stage"] = "Sem registros para resumir"
+                entry["status"] = "done"
+                save_progress()
+            except Exception as exc:
+                entry.update(status="error", stage="Falha ao consolidar o dia", error=str(exc)[-2000:])
+                save_progress()
+                summary_errors += 1
+                print(f"[pipeline] falha ao consolidar {day}: {exc}", file=sys.stderr)
         with connect() as db:
             db.execute("UPDATE pipeline_runs SET status='done',finished_at=CURRENT_TIMESTAMP,audio_count=?,screen_count=? WHERE id=?", (audio, screen, run_id))
         cleanup = None
@@ -2171,8 +2386,8 @@ def run_pipeline(limit_audio: int, limit_screen: int, summarize: bool) -> dict:
                 print(f"[cleanup] limpeza automática falhou sem afetar o processamento: {exc}", file=sys.stderr)
         return {"discovered": discovered, "audio": audio, "screen": screen, "videos": videos,
                 "sessions": sessions, "video_errors": video_errors, "activities": activities,
-                "hourly": hourly, "summary": bool(summarized_days), "summarized_days": summarized_days,
-                "cleanup": cleanup}
+                "hourly": hourly, "summary_errors": summary_errors, "summary": bool(summarized_days),
+                "summarized_days": summarized_days, "cleanup": cleanup}
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE pipeline_runs SET status='error',finished_at=CURRENT_TIMESTAMP,error=? WHERE id=?", (str(exc)[-2000:], run_id))
@@ -2217,11 +2432,10 @@ def process_video_session(session_id: int) -> dict:
             f"CLIPE {index+1} · {row['duration_seconds']:.0f}s · {row['title']}\n{row['description']}"
             for index, row in enumerate(rows)
         )
-        synthesis = ollama_json(text_model(), [{"role": "user", "content": (
-            "Estes clipes pertencem à mesma sessão de gameplay e estão em ordem. Produza uma narrativa conjunta factual, "
-            "explicando progressão, acontecimentos marcantes e desfecho. Não trate os clipes como sessões desconectadas. "
-            f"Contexto informado pelo usuário: {session['context'] or '(nenhum)'}.\n"
-            "Responda SOMENTE JSON com title, summary (4 a 10 parágrafos), highlights (até 12) e game.\n" + context[:50000]
+        synthesis = ollama_json(text_model(), [{"role": "user", "content": prompts.render(
+            "session_synthesis",
+            contexto=session["context"] or "(nenhum)",
+            clipes=context[:50000],
         )}], timeout=600, num_ctx=32768)
         summary = str(synthesis.get("summary") or "")
         highlights = synthesis.get("highlights") or []
@@ -2244,6 +2458,7 @@ def main() -> None:
     parser.add_argument("--limit-audio", type=int, default=100)
     parser.add_argument("--limit-screen", type=int, default=500)
     parser.add_argument("--no-summary", action="store_true")
+    parser.add_argument("--single-batch", action="store_true", help="Executa somente um lote; por padrão esgota a fila inicial")
     parser.add_argument("--discover-only", action="store_true")
     parser.add_argument("--summary-only", metavar="DAY")
     parser.add_argument("--hourly-only", metavar="DAY")
@@ -2251,12 +2466,18 @@ def main() -> None:
     parser.add_argument("--video", type=Path)
     parser.add_argument("--video-session", type=int)
     parser.add_argument("--screen-sequence", type=int)
+    parser.add_argument("--promote-tags", metavar="DAY", help="Funde e promove as tags candidatas do dia")
+    parser.add_argument("--preview-tags", metavar="DAY", help="Mostra o que a promoção faria, sem gravar")
     args = parser.parse_args()
     with exclusive_lock(LOCK_PATH) as acquired:
         if not acquired:
             print(json.dumps({"status": "already-running"}))
             return
-        if args.screen_sequence:
+        if args.preview_tags:
+            result = tag_vocabulary.promote(args.preview_tags, describe=describe_tag_candidates, commit=False)
+        elif args.promote_tags:
+            result = promote_day_tags(args.promote_tags)
+        elif args.screen_sequence:
             result = process_screen_sequence_job(args.screen_sequence)
         elif args.video_session:
             result = process_video_session(args.video_session)
@@ -2278,7 +2499,7 @@ def main() -> None:
         else:
             result = discover() if args.discover_only else (
                 {"status": "paused"} if pipeline_pause_flag().is_file()
-                else run_pipeline(args.limit_audio, args.limit_screen, not args.no_summary)
+                else run_pipeline(args.limit_audio, args.limit_screen, not args.no_summary, drain=not args.single_batch)
             )
         print(json.dumps(result, ensure_ascii=False))
 

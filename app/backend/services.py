@@ -28,6 +28,7 @@ from typing import Callable, Sequence
 
 import shutil
 
+from . import mode
 from .main_paths import AUDIO_DIR, CONFIG_DIR, MEDIA_ROOT
 from .runtime import IS_WINDOWS, runtime_dir, video_recording_flag
 
@@ -459,6 +460,19 @@ _UNITS: dict[str, _UnitDef] = {
     ),
     "lume.service": _UnitDef(kind="external", description="interface Lume"),
 }
+
+#: Units que só existem no Lume completo: o pipeline e a captura do dia, que é o
+#: insumo dele. No Lumini elas saem da tabela — oferecer no supervisor um
+#: processamento que depende de um Ollama ausente seria oferecer uma falha.
+#: Sair da tabela é seguro: ``state()`` devolve "desconhecida/inativa" para unit
+#: que não existe, e a pausa por inatividade simplesmente não acha o que pausar.
+_UNITS_DA_ANALISE = (
+    "lume-process.service", "lume-summary@", "lume-hourly@",
+    "captura-dia-audio.service", "captura-dia-tela.service", "captura-dia.target",
+)
+if mode.e_lumini():
+    for _unit in _UNITS_DA_ANALISE:
+        _UNITS.pop(_unit, None)
 
 
 def _resolve(unit: str) -> tuple[_UnitDef | None, str]:

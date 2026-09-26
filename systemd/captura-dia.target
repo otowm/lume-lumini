@@ -1,6 +1,9 @@
 [Unit]
 Description=Captura local do dia (áudio e telas)
-Wants=captura-dia-audio.service captura-dia-tela.service
+# Sem `Wants=` fixo: quem entra aqui é o `WantedBy=` de cada captura, criado
+# pelo `enable` e removido pelo `disable`. Com a dependência escrita no alvo,
+# uma captura pausada voltava sozinha no boot — o alvo a puxava de qualquer
+# jeito, habilitada ou não.
 After=pipewire-pulse.service graphical-session.target
 
 [Install]

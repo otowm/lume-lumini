@@ -331,6 +331,10 @@ main{min-width:0;flex:1;display:flex;flex-direction:column}
 .error-banner span{color:#f2b3bd;flex:1}
 .error-banner button{border:0;background:transparent;color:#fff;cursor:pointer}
 .overlay{position:fixed;inset:0;background:rgba(4,5,10,.65);backdrop-filter:blur(10px);display:grid;place-items:center;padding:24px;z-index:10;animation:fade-in .16s ease}
+/* Um modal aberto *de dentro* do player ou da sessão tem de ficar por cima
+   deles: com o z-index base da sobreposição, o painel de envio nascia atrás da
+   janela que o abriu — visível só pela camada escura. */
+.overlay:has(>.modal){z-index:60}
 .modal{width:min(680px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:linear-gradient(180deg,#1b1c2b,var(--surface) 120px);border-radius:18px;box-shadow:0 0 0 1px rgba(255,255,255,.1),inset 0 1px 0 rgba(255,255,255,.06),var(--shadow-pop);padding:20px;animation:pop-in .18s cubic-bezier(.2,.9,.3,1.2)}
 .modal>header{display:flex;align-items:start;margin-bottom:17px}
 .modal h2{font-size:20px;font-weight:500;margin:0}
@@ -608,6 +612,84 @@ main{min-width:0;flex:1;display:flex;flex-direction:column}
 .settings-tab-content>.settings-group:first-child{margin-top:12px}
 .settings-tab-card{margin-top:12px!important;margin-bottom:0!important}
 .settings-modal>footer{flex:none;margin:0;padding:13px 17px;border-top:1px solid var(--divider);background:var(--surface)}
+.settings-error{margin-right:auto;max-width:60ch;color:#f4a6b1;font-size:11px;line-height:1.45}
+/* Painel "Enviar": tudo o que decide um anexo de Discord numa tela só — peso
+   atual, peso da versão leve e o link, sem sair para outra aba. */
+.share-modal{width:min(620px,calc(100vw - 48px))}
+.share-modal .help{font-size:11px;margin:0 0 12px;line-height:1.5}
+.share-modal code{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px;color:var(--accent3)}
+.share-modal h3{margin:0 0 6px;font-size:12px}
+.share-facts{display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:0 0 12px;padding:10px 11px;border:1px solid var(--divider);border-radius:9px;background:rgba(0,0,0,.25)}
+.share-facts div{display:contents}
+.share-facts dt{font-size:10px;color:var(--muted)}
+.share-facts dd{margin:0;font-size:11px;text-align:right}
+.share-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:9px;margin:10px 0 0}
+.share-row label>span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}
+.share-row select{border:1px solid var(--divider);border-radius:7px;background:rgba(0,0,0,.3);color:var(--text);padding:6px 8px;font-size:12px}
+.share-row .primary,.share-row .ghost,.share-download{padding:7px 13px;font-size:12px;text-decoration:none}
+.share-light,.share-link{margin-top:14px;padding:11px;border:1px solid var(--divider);border-radius:9px;background:rgba(255,255,255,.02)}
+.share-light p,.share-link p{margin:0;font-size:11px;line-height:1.5}
+.share-link{border-color:rgba(255,176,90,.28);background:rgba(255,176,90,.05)}
+.share-ok{color:var(--accent3)}
+.share-warn{color:#f4a6b1}
+.share-note{margin:12px 0 0;font-size:11px;color:var(--accent3)}
+/* A barra mede o que está acontecendo agora: recodificação ou subida. */
+.share-progress{position:relative;height:16px;margin:9px 0 0;border:1px solid var(--divider);border-radius:8px;background:rgba(0,0,0,.3);overflow:hidden}
+.share-progress>div{height:100%;background:linear-gradient(90deg,#7b68ef,#9d8dfc);transition:width .4s}
+.share-progress>span{position:absolute;inset:0;display:grid;place-items:center;font-size:9px;color:#fff}
+.share-links{list-style:none;margin:11px 0 0;padding:0;display:grid;gap:7px}
+.share-links li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--divider);border-radius:8px;background:rgba(0,0,0,.25);font-size:11px}
+.share-links a{flex:1;min-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent3)}
+.share-links small{color:var(--muted);font-size:9px}
+.share-links .ghost{padding:4px 9px;font-size:10px}
+.share-button{padding:6px 12px;font-size:11px}
+.viewer-header-actions{display:flex;align-items:center;gap:9px}
+.editing-modal{width:min(760px,calc(100vw - 48px))}
+.editing-modal .help{font-size:11px;margin:0 0 12px}
+.editing-modal code{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px}
+.editing-path{display:flex;align-items:center;gap:8px;padding:9px 11px;border:1px solid var(--divider);border-radius:9px;background:rgba(0,0,0,.25)}
+.editing-path code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent3)}
+.editing-path .ghost{flex:none;padding:5px 10px;font-size:11px}
+.editing-timeline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin-top:10px;padding:10px 11px;border:1px solid rgba(141,124,245,.3);border-radius:9px;background:rgba(141,124,245,.06)}
+.editing-timeline label>span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}
+.editing-timeline input{width:120px;border:1px solid var(--divider);border-radius:7px;background:rgba(0,0,0,.3);color:var(--text);padding:6px 8px;font-size:12px}
+.editing-timeline input:focus{outline:0;border-color:rgba(141,124,245,.6)}
+.editing-timeline .secondary{padding:6px 12px;font-size:12px}
+.editing-timeline small{flex-basis:100%;font-size:10px;color:var(--muted);line-height:1.5}
+.editing-list{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:42vh;overflow:auto}
+.editing-list article{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--divider);border-radius:8px;background:var(--surface2)}
+.editing-list article>div{flex:1;min-width:0}
+.editing-list strong{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.editing-list small{font-size:10px;color:var(--muted)}
+.editing-list .ghost{flex:none;padding:5px 10px;font-size:11px}
+.editing-howto{margin-top:12px!important;font-size:10px!important}
+.editing-total{margin-right:auto;font-size:11px;color:var(--muted)}
+.card-menu{margin-left:auto;flex:none;width:30px;height:28px;display:grid;place-items:center;border:1px solid var(--divider);border-radius:8px;background:rgba(255,255,255,.03);color:var(--muted);font-size:15px;line-height:1;cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.card-menu:hover,.card-menu[aria-expanded=true]{border-color:rgba(141,124,245,.55);background:rgba(141,124,245,.08);color:var(--text)}
+.card-menu:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.card-progress{font-size:10px;color:var(--accent3);white-space:nowrap}
+.video-actions,.session-actions{display:flex;align-items:center;gap:7px}
+.prompts-tab>.settings-group-title p{margin:4px 0 0;max-width:74ch;color:var(--muted);font-size:11px;line-height:1.55}
+.prompt-group{margin-top:15px}
+.prompt-group h4{margin:0 0 7px;font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:rgba(238,240,247,.4)}
+.prompt-card{margin-bottom:7px;border:1px solid var(--divider);border-radius:9px;background:rgba(0,0,0,.18);overflow:hidden}
+.prompt-card[open]{border-color:rgba(141,124,245,.4);background:rgba(141,124,245,.05)}
+.prompt-card>summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;list-style:none}
+.prompt-card>summary::-webkit-details-marker{display:none}
+.prompt-card>summary:hover{background:rgba(255,255,255,.03)}
+.prompt-card>summary strong{font-size:12px;font-weight:600}
+.prompt-card>summary em{font-style:normal;font-size:9px;padding:2px 7px;border-radius:99px;border:1px solid rgba(141,124,245,.4);background:rgba(141,124,245,.12);color:var(--accent3)}
+.prompt-card>summary em.dirty{border-color:rgba(200,161,90,.5);background:rgba(200,161,90,.12);color:#dfc38d}
+.prompt-card>summary i{margin-left:auto;font-style:normal;color:var(--muted);transition:transform .15s}
+.prompt-card[open]>summary i{transform:rotate(90deg)}
+.prompt-card>summary small{flex-basis:100%;font-size:10px;line-height:1.5;color:var(--muted)}
+.prompt-vars{display:flex;flex-wrap:wrap;gap:5px;padding:0 12px 8px}
+.prompt-vars span{padding:2px 7px;border:1px solid var(--divider);border-radius:6px;background:rgba(255,255,255,.04);color:var(--accent3);font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:10px;cursor:help}
+.prompt-editor{display:block;width:calc(100% - 24px);height:230px;margin:0 12px;padding:10px;resize:vertical;border:1px solid var(--divider);border-radius:8px;background:rgba(0,0,0,.3);color:var(--text);font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px;line-height:1.6}
+.prompt-editor:focus{outline:0;border-color:rgba(141,124,245,.6);box-shadow:0 0 0 3px rgba(141,124,245,.14)}
+.prompt-card-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px}
+.prompt-card-foot small{font-size:10px;color:var(--muted)}
+.prompt-card-foot .ghost{padding:5px 10px;font-size:11px}
 .storage-heading>span{font-size:10px;color:var(--green);white-space:nowrap}
 .ai-inspector{margin-top:8px;border:1px solid rgba(82,214,166,.28);border-radius:7px;background:#12141e;overflow:hidden}
 .ai-inspector>summary{display:flex;align-items:center;gap:7px;padding:7px 9px;color:var(--green);font-size:9px;cursor:pointer}

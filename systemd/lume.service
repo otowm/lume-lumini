@@ -5,8 +5,14 @@ Wants=captura-dia.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Documentos/lume
-ExecStart=%h/Documentos/lume/.venv/bin/python -m uvicorn app.backend.main:app --host 127.0.0.1 --port 8876
+WorkingDirectory=@LUME_ROOT@
+# Fechado em 127.0.0.1 por padrão. Abrir para a rede é uma decisão de quem
+# instala, e não basta trocar este endereço: o backend também confere o IP de
+# origem (LUME_REMOTE_NETWORKS) e o cabeçalho Host (LUME_REMOTE_HOSTS), então
+# quem só mudasse o bind levaria um 400 sem explicação. O instalador escreve as
+# três de uma vez.
+Environment=LUME_BIND_HOST=127.0.0.1
+ExecStart=@LUME_PYTHON@ -m uvicorn app.backend.main:app --host ${LUME_BIND_HOST} --port 8876
 Restart=on-failure
 RestartSec=5
 Nice=5

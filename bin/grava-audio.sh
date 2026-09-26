@@ -4,6 +4,12 @@
 #   c0 = MicBus.monitor      (microfone)
 #   c1 = DiscordBus.monitor  (voz do Discord, derivada via pw-link)
 #   c2 = RecordBus.monitor   (mixagem das saídas do sistema)
+#
+# O ``map=`` do join é obrigatório: as três entradas são mono e, portanto, todas
+# chamam seu único canal de FC. Sem o mapeamento explícito o ffmpeg resolve o
+# conflito de nomes por conta própria e entrega os canais rotacionados — o mic
+# saía em c2, o Discord em c0 e o sistema em c1, e o pipeline transcrevia cada
+# faixa com o rótulo da outra.
 # Depois do processamento bem-sucedido o pipeline compacta para mono.
 set -euo pipefail
 
@@ -46,12 +52,18 @@ if [[ -x "$BUS_SCRIPT" ]]; then
 fi
 
 echo ">> Gravando 3 faixas (mic/Discord/sistema) -> $OUTDIR (blocos de ${SEG_SECONDS}s, 16 kHz)"
-exec ffmpeg -hide_banner -loglevel warning -nostdin \
+set +e
+ffmpeg -hide_banner -loglevel warning -nostdin \
   -f pulse -thread_queue_size 1024 -i "$MIC_SRC" \
   -f pulse -thread_queue_size 1024 -i "$DISCORD_SRC" \
   -f pulse -thread_queue_size 1024 -i "$SYSTEM_SRC" \
-  -filter_complex "[0:a]pan=mono|c0=c0[mic];[1:a]pan=mono|c0=c0[dis];[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];[mic][dis][sys]join=inputs=3:channel_layout=3.0[out]" \
+  -filter_complex "[0:a]pan=mono|c0=c0[mic];[1:a]pan=mono|c0=c0[dis];[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];[mic][dis][sys]join=inputs=3:channel_layout=3.0:map=0.0-FL|1.0-FR|2.0-FC[out]" \
   -map "[out]" -ar 16000 -c:a pcm_s16le \
   -flush_packets 1 \
   -f segment -segment_time "$SEG_SECONDS" -reset_timestamps 1 -strftime 1 \
   "$OUTDIR/audio-%Y%m%d-%H%M%S.wav"
+status=$?
+set -e
+# O watch morre pelo trap de EXIT registrado acima; matá-lo aqui de novo só
+# mascararia um trap que tivesse deixado de ser registrado.
+exit "$status"

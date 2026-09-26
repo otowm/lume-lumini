@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -70,7 +72,36 @@ def read_pcm16(path: Path):
     return np.ascontiguousarray(samples.astype(np.float32) / 32768.0), 16000
 
 
-def diarize(samples) -> list[dict]:
+#: A segmentação pyannote consome o áudio em janelas de 10 s. Um resto parcial
+#: no fim faz o sherpa-onnx devolver um turno que começa depois do último
+#: sample e então abortar em ComputeEmbeddings ("This segment is too short")
+#: com exit(-1) — mata o processo sem lançar exceção. Completar a última janela
+#: com silêncio elimina o resto parcial e o turno degenerado com ele.
+SEGMENTATION_WINDOW_SECONDS = 10
+
+
+def pad_to_segmentation_window(samples, sample_rate: int = 16000):
+    import numpy as np
+
+    window = SEGMENTATION_WINDOW_SECONDS * sample_rate
+    missing = (-len(samples)) % window
+    if not missing:
+        return samples
+    return np.ascontiguousarray(np.concatenate([samples, np.zeros(missing, dtype=np.float32)]))
+
+
+def turns_within_duration(turns: list[dict], duration: float) -> list[dict]:
+    """Descarta o que a diarização inventou sobre o silêncio de completamento."""
+    result = []
+    for turn in turns:
+        start, end = float(turn["start"]), min(float(turn["end"]), duration)
+        if end - start <= 0:
+            continue
+        result.append({**turn, "start": round(start, 3), "end": round(end, 3)})
+    return result
+
+
+def diarize(samples, sample_rate: int = 16000) -> list[dict]:
     import sherpa_onnx
 
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
@@ -84,13 +115,35 @@ def diarize(samples) -> list[dict]:
     )
     if not config.validate():
         raise RuntimeError("modelos de diarização inválidos")
-    raw = sherpa_onnx.OfflineSpeakerDiarization(config).process(samples).sort_by_start_time()
+    duration = len(samples) / sample_rate
+    padded = pad_to_segmentation_window(samples, sample_rate)
+    raw = sherpa_onnx.OfflineSpeakerDiarization(config).process(padded).sort_by_start_time()
     identities: dict[int, str] = {}
     result = []
     for item in raw:
         speaker = identities.setdefault(item.speaker, f"speaker_{len(identities) + 1}")
         result.append({"start": round(float(item.start), 3), "end": round(float(item.end), 3), "speaker": speaker})
-    return result
+    return turns_within_duration(result, duration)
+
+
+def diarize_file(path: Path) -> list[dict]:
+    """Diariza um WAV num processo separado.
+
+    O sherpa-onnx chama exit(-1) de dentro do C++ quando topa com um turno
+    degenerado, em vez de lançar exceção. Em processo, isso derrubava o
+    pipeline inteiro e deixava a captura presa em 'processing' — reposta na
+    fila e derrubando o serviço outra vez a cada rodada. Isolar a chamada
+    converte o aborto num RuntimeError que o pipeline sabe tratar.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "app.backend.audio_intelligence", str(path)],
+        capture_output=True, text=True, timeout=1800,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "sem saída").strip()[-2000:]
+        raise RuntimeError(f"diarização falhou (código {result.returncode}): {detail}")
+    return json.loads(result.stdout or "[]")
 
 
 def _event_name(name: str) -> str | None:
@@ -324,7 +377,7 @@ def analyze_video_audio(video: Path, transcript_segments: list[dict], known_prof
                 wav = Path(directory) / f"{source}.wav"
                 extract_audio(video, wav, channel=None if source in stream_map else channel_map[source], stream=stream_map.get(source))
                 samples, sample_rate = read_pcm16(wav)
-                turns = diarize(samples)
+                turns = diarize_file(wav)
                 for turn in turns:
                     turn["speaker"] = f"{source}_{turn['speaker'].rsplit('_', 1)[-1]}"
                 track_events = consolidate_events(detect_events(samples, sample_rate) + overlapping_speech(turns))
@@ -345,7 +398,7 @@ def analyze_video_audio(video: Path, transcript_segments: list[dict], known_prof
             wav = Path(directory) / "audio.wav"
             extract_audio(video, wav)
             samples, sample_rate = read_pcm16(wav)
-            turns = diarize(samples)
+            turns = diarize_file(wav)
             events = consolidate_events(detect_events(samples, sample_rate) + overlapping_speech(turns))
             enriched = enrich_segments(transcript_segments, turns, events)
             used = {item.get("speaker") for item in enriched if item.get("speaker")}
@@ -374,3 +427,10 @@ def analyze_video_audio(video: Path, transcript_segments: list[dict], known_prof
         "speaker_embeddings": embeddings,
         "events": events,
     }
+
+
+if __name__ == "__main__":
+    # Ponto de entrada de diarize_file: só o C++ isolado roda aqui, e o
+    # resultado sai em JSON no stdout (os logs do sherpa vão para o stderr).
+    _samples, _rate = read_pcm16(Path(sys.argv[1]))
+    print(json.dumps(diarize(_samples, _rate), ensure_ascii=False))

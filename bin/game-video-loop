@@ -6,19 +6,227 @@ config_file="$config_dir/video.conf"
 apps_file="$config_dir/video-apps.txt"
 storage_file="$config_dir/storage.conf"
 VIDEO_ENABLED=false VIDEO_FPS=30 VIDEO_GEOMETRY=1920x1080 VIDEO_SEGMENT_SECONDS=60
-VIDEO_CODEC=h264 VIDEO_QUALITY=high VIDEO_AUDIO=default_output
+VIDEO_CODEC=h264 VIDEO_QUALITY=high
+# `clips` mantém o gpu-screen-recorder em replay: nada vai para o disco até o
+# atalho pedir, e o que se salva são os últimos VIDEO_REPLAY_SECONDS segundos.
+VIDEO_CAPTURE_MODE=continuous VIDEO_REPLAY_SECONDS=60
+# Segurar o atalho no modo clipes abre uma gravação longa: salva o pré-roll que
+# já está em RAM e passa a gravar dali em diante, até a próxima segurada. Quem
+# mede a segurada é o `app.capture.hotkeyd`; aqui o valor só viaja para ele.
+VIDEO_HOTKEY_HOLD_SECONDS=0.6
+# Um gravador que morre logo depois de subir vira um laço de reinícios: a HUD
+# zera o tempo a cada volta e o buffer de replay nunca chega a existir. Abaixo
+# deste tempo de vida a próxima tentativa espera, para o erro ficar legível.
+RECORDER_MIN_SECONDS=5 RECORDER_RETRY_SECONDS=10
+# A primeira entrada é a mixagem das três fontes; as seguintes são as faixas
+# isoladas. Os players tocam apenas a primeira faixa de áudio do arquivo, e o
+# resto do Lume numera as fontes a partir dela (0=mixagem, 1=microfone,
+# 2=Discord, 3=sistema). Sem a mixagem na frente ouvia-se só o microfone, e a
+# transcrição por fonte caía no caminho de faixa única.
+VIDEO_AUDIO='device:MicBus.monitor|device:DiscordBus.monitor|device:RecordBus.monitor,device:MicBus.monitor,device:DiscordBus.monitor,device:RecordBus.monitor'
 PAUSE_OTHER_CAPTURES=true
 VIDEO_FOCUS_GRACE_SECONDS=20
+# Nem toda janela que toma a ativação do KWin é "o usuário foi fazer outra
+# coisa". O painel, a área de trabalho, o OSD de volume, as notificações, o
+# alternador de tarefas e o agente do polkit aparecem por cima do jogo e
+# devolvem o foco sozinhos — e o KWin chega a segurar a ativação no
+# plasmashell por dezenas de segundos depois de um clique no painel. Tratar
+# isso como saída fazia a HUD anunciar "Fora do jogo" com o jogo na tela.
+# O `:=` em vez de uma atribuição direta porque este valor não vive no
+# `video.conf`: aquele arquivo é reescrito inteiro pela interface a cada
+# gravada de ajustes, e um valor posto ali à mão sumiria na próxima. Aqui um
+# `Environment=` no unit — ou o próprio video.conf, se um dia ele ganhar o
+# campo — continua valendo por cima do padrão.
+: "${VIDEO_FOCUS_IGNORE_CLASSES:=^(org\.kde\.plasmashell|org\.kde\.krunner|plasmashell|krunner|org\.kde\.polkit-kde-authentication-agent-1|xwaylandvideobridge)$}"
 STORAGE_ROOT="$HOME/captura-dia"
 [[ -r "$config_file" ]] && source "$config_file"
 [[ -r "$storage_file" ]] && source "$storage_file"
 output_dir="$STORAGE_ROOT/video-buffer"
+# O gsr nomeia os replays do jeito dele e escreve enquanto muxa. Fora do buffer
+# ninguém enxerga um clipe pela metade; entram lá já prontos e renomeados.
+clip_stage="$STORAGE_ROOT/.clipes-parciais"
+# O gsr grava a "gravação normal" do modo replay (`-ro`) com nome próprio, e
+# ela só vira vídeo do Lume depois de colada ao clipe de pré-roll. Até lá fica
+# aqui, fora do buffer que o pipeline observa.
+long_stage="$STORAGE_ROOT/.gravacoes-longas"
+# Dois atalhos dentro da mesma janela de replay descrevem um trecho só: o
+# segundo clipe começa antes do fim do primeiro, e publicar os dois deixaria a
+# mesma jogada em dois arquivos, contada duas vezes. Enquanto a janela ainda
+# pode receber outro atalho o clipe espera aqui, fora do buffer que o pipeline
+# observa — publicado já mesclado quando ela fecha.
+pending_dir="$STORAGE_ROOT/.clipe-pendente"
 mkdir -p "$output_dir"
 pause_state="${XDG_RUNTIME_DIR:-/tmp}/captura-dia-video-paused"
+recording_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-video-recording"
+activity_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-video-active"
+audio_bus_script="${CAPTURA_DIA_AUDIO_BUS:-$HOME/bin/audio-bus.sh}"
 captures_paused=false
+event_seq=0
+# Contagem de tempo por jogo. É o mesmo registro que o gravador do Windows
+# escreve em ``game_activity_sessions``: vale mesmo quando nada foi para o
+# disco, porque o dia precisa saber que o jogo esteve aberto e por quanto tempo.
+# Os sidecars ao lado dos vídeos não servem para isso — só existem se houver
+# arquivo.
+lume_root="${LUME_ROOT:-}"
+lume_python="${LUME_PYTHON:-}"
+if [[ -z "$lume_root" ]]; then
+  # Rodando direto do checkout (bin/game-video-loop), a raiz é o diretório
+  # acima. Instalado em ~/bin, quem diz é o unit do systemd.
+  candidate="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+  [[ -f "$candidate/app/capture/gamesession.py" ]] && lume_root="$candidate"
+fi
+if [[ -z "$lume_python" && -n "$lume_root" ]]; then
+  if [[ -x "$lume_root/.venv/bin/python" ]]; then
+    lume_python="$lume_root/.venv/bin/python"
+  else
+    lume_python="$(command -v python3 || true)"
+  fi
+fi
+game_session_key=''
+game_session_started=0
+game_session_beat=0
+game_session_warned=false
+marker_count=0
+session_started_epoch=0
+# De quanto em quanto tempo o laço reconfere a janela ativa. É também o passo
+# da contagem de saída, por isso tem nome.
+FOCUS_TICK_SECONDS=2
+focus_away=0
+session_window=''
+session_window_id=''
+session_class=''
+session_monitor=''
+session_mode=continuous
+clips_saved=0
+last_clip_name=''
+# Clipe salvo que ainda espera a janela de replay fechar: o arquivo, o instante
+# do último atalho (que reabre a espera) e o do primeiro, que dá nome ao vídeo.
+pending_clip_file=''
+pending_clip_epoch=0
+pending_clip_start=0
+focus_grace_deadline=null
+# Gravação longa: o pedido de "isto vai ser longo, quero tudo". Enquanto ela
+# corre, o toque do atalho volta a significar marcador, como no modo contínuo.
+long_recording=false
+long_started_epoch=0
+long_started=0
+long_clip_file=''
+long_markers=()
 
 log() {
   printf 'captura-video: %s\n' "$*" >&2
+}
+
+json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  printf '%s' "$value"
+}
+
+# Uma falha do banco nunca pode derrubar a gravação em curso: aqui o erro vira
+# linha de log e o laço segue.
+run_game_session() {
+  [[ -n "$lume_root" && -n "$lume_python" ]] || return 0
+  ( cd "$lume_root" && "$lume_python" -m app.capture.gamesession "$@" ) >/dev/null 2>&1 \
+    || log "falha ao registrar tempo de jogo ($1)"
+}
+
+# Em segundo plano por causa do atalho: enquanto um comando roda em primeiro
+# plano o bash segura o USR1, e um marcador que demora a confirmar faz a pessoa
+# apertar de novo. A ordem entre as chamadas não é crítica — o único par que
+# poderia inverter é um `begin` seguido de um `finish` quase imediato, e aí a
+# sessão fica com a duração perto de zero que ela realmente teve.
+game_session() {
+  if [[ -z "$lume_root" || -z "$lume_python" ]]; then
+    if [[ "$game_session_warned" == false ]]; then
+      log "sem LUME_ROOT/LUME_PYTHON: o tempo de jogo não será contado"
+      game_session_warned=true
+    fi
+    return 0
+  fi
+  run_game_session "$@" &
+}
+
+begin_game_session() {
+  [[ "$game_session_key" == "$session_id" ]] && return 0
+  end_game_session
+  game_session_key="$session_id"
+  game_session_started="$(date +%s)"
+  game_session_beat="$game_session_started"
+  game_session begin --key "$game_session_key" --window "$session_window" \
+    --mode "$session_mode" --started "$game_session_started"
+}
+
+# Os mesmos 10 segundos de ``gamesession.HEARTBEAT_SECONDS``. O batimento é o
+# que permite recuperar o tempo de uma queda abrupta: ``close-stale`` fecha a
+# sessão pelo último instante em que o jogo foi visto.
+heartbeat_game_session() {
+  [[ -n "$game_session_key" ]] || return 0
+  local now; now="$(date +%s)"
+  ((now - game_session_beat >= 10)) || return 0
+  game_session_beat="$now"
+  game_session heartbeat --key "$game_session_key"
+}
+
+# `sync` é para o encerramento do laço: ali o processo em segundo plano morreria
+# junto com o shell antes de escrever, e esperar não atrapalha mais ninguém.
+end_game_session() {
+  [[ -n "$game_session_key" ]] || return 0
+  if [[ "${1:-}" == sync ]]; then
+    run_game_session finish --key "$game_session_key" --started "$game_session_started"
+  else
+    game_session finish --key "$game_session_key" --started "$game_session_started"
+  fi
+  game_session_key='' game_session_started=0 game_session_beat=0
+}
+
+publish_activity() {
+  [[ -n "${rec_pid:-}" ]] || return 0
+  local kind="${1:-}" label="${2:-}" event=null now
+  now="$(date +%s)"
+  if [[ -n "$kind" ]]; then
+    ((event_seq += 1))
+    event="{\"kind\":\"$(json_escape "$kind")\",\"label\":\"$(json_escape "$label")\",\"seq\":$event_seq,\"at\":$now}"
+  elif [[ -n "${last_event_json:-}" ]]; then
+    event="$last_event_json"
+  fi
+  last_event_json="$event"
+  printf '{"window":"%s","monitor":"%s","started_at":%s,"mode":"%s","markers":%s,"clips":%s,"last_clip":"%s","focus_grace_deadline":%s,"long_recording":%s,"long_started_at":%s,"event":%s}\n' \
+    "$(json_escape "$session_window")" "$(json_escape "$session_monitor")" \
+    "$session_started_epoch" "$session_mode" "$marker_count" "$clips_saved" \
+    "$(json_escape "$last_clip_name")" "$focus_grace_deadline" \
+    "$long_recording" "$long_started_epoch" "$event" > "$activity_flag"
+  touch "$recording_flag"
+}
+
+# Um `sleep` comum só entrega um sinal com trap depois de terminar: o marcador
+# ou o clipe pedido no meio da espera chegaria até dois segundos atrasado, e uma
+# confirmação atrasada não confirma nada — a pessoa aperta de novo. O `wait`
+# volta na hora em que o sinal chega.
+interruptible_sleep() {
+  local pid
+  sleep "$1" & pid=$!
+  wait "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+}
+
+# Três confirmações, deliberadamente diferentes entre si: quem está jogando
+# reconhece o que aconteceu sem tirar os olhos do jogo. `complete` é o aceite de
+# sempre (marcador, clipe); `device-added` abre a gravação longa e
+# `device-removed` a fecha — um par que sobe e desce, como um interruptor.
+confirmation_sound() {
+  local theme="${1:-complete}"
+  # O player de tema pode demorar para abrir o servidor de áudio. Rodar em
+  # segundo plano mantém o trap de USR1 instantâneo e não congela o gravador.
+  (
+    canberra-gtk-play -i "$theme" >/dev/null 2>&1 && exit 0
+    sound="/usr/share/sounds/freedesktop/stereo/$theme.oga"
+    [[ -r "$sound" ]] && paplay "$sound" >/dev/null 2>&1 && exit 0
+    printf '\a' >/dev/tty 2>/dev/null || true
+  ) &
 }
 
 # User units may be started before Plasma has imported the graphical session
@@ -67,48 +275,218 @@ pause_background_captures() {
   captures_paused=true
 }
 
-# Recupera capturas deixadas pausadas por uma interrupção abrupta anterior.
-resume_background_captures
+# A última janela lida por `window_info`, em variável e não só na saída
+# padrão. Quem decide o foco precisa do id para perguntar em que monitor ela
+# está, e ler a saída com `$(window_info)` abre um subshell — de onde o id não
+# voltaria. Perguntar de novo ao kdotool também não serve: entre uma pergunta e
+# outra a janela ativa pode ser outra.
+window_info_id=''
+window_info_text=''
 
 window_info() {
   local id title class
+  window_info_id='' window_info_text=''
   id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+  # O kdotool sai com 0 e não devolve nada quando o KWin está entre uma janela
+  # e outra — numa amostragem de 4 min com o jogo em primeiro plano isso
+  # aconteceu em 1,3% das leituras. Sem esta guarda, cada hipótese dessas
+  # virava uma saída do jogo: o laço lia " | " e nenhuma regra casava.
+  [[ -n "$id" ]] || return 1
   title="$(kdotool getwindowname "$id" 2>/dev/null || true)"
   class="$(kdotool getwindowclassname "$id" 2>/dev/null || true)"
-  printf '%s | %s\n' "$title" "$class"
+  [[ -n "$class" ]] || return 1
+  window_info_id="$id"
+  window_info_text="$title | $class"
+  printf '%s\n' "$window_info_text"
 }
 
+# Regra sem prefixo procura só na classe da janela, que é a identidade estável
+# do app. Procurar também no título fazia um vídeo de navegador chamado
+# "mrekk | osu! ..." iniciar a gravação: o nome do jogo estava no título, mas a
+# classe (firefox, brave) não mente. `title:` pede o título explicitamente e
+# `class:` — ou `exe:`, o nome que as mesmas regras usam no Windows — a classe.
+matched_rule='' matched_mode=continuous matched_fps=60 matched_geometry=1920x1080
 is_selected_app() {
-  local info="$1" pattern
+  local info="$1" pattern expression field target title class
+  local metadata token rule_mode rule_fps rule_geometry
+  local -a tokens
+  matched_rule='' matched_mode="$VIDEO_CAPTURE_MODE"
+  matched_fps="$VIDEO_FPS" matched_geometry="$VIDEO_GEOMETRY"
   [[ "$VIDEO_ENABLED" == true && -r "$apps_file" ]] || return 1
+  # Separa no último " | ": o próprio título pode conter a sequência.
+  if [[ "$info" == *" | "* ]]; then
+    title="${info% | *}"; class="${info##* | }"
+  else
+    title=''; class="$info"
+  fi
   while IFS= read -r pattern || [[ -n "$pattern" ]]; do
     [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
-      if [[ "$pattern" =~ ^\[(continuous|clips)([[:space:]][^]]*)?\][[:space:]]+ ]]; then
-        pattern="${pattern:${#BASH_REMATCH[0]}}"
-      fi
-    grep -Eiq -- "$pattern" <<<"$info" && return 0
+    # Mesma metadata que o Windows lê em ``parse_video_app_rule``: modo, fps e
+    # geometria valem por app, e o que a regra não disser cai no valor global.
+    rule_mode="$VIDEO_CAPTURE_MODE" rule_fps="$VIDEO_FPS" rule_geometry="$VIDEO_GEOMETRY"
+    if [[ "$pattern" =~ ^\[([^]]+)\][[:space:]]+(.+)$ ]]; then
+      metadata="${BASH_REMATCH[1]}"; pattern="${BASH_REMATCH[2]}"
+      read -ra tokens <<<"$metadata"
+      for token in "${tokens[@]}"; do
+        case "${token,,}" in
+          continuous|clips) rule_mode="${token,,}" ;;
+          fps=*) [[ "${token#*=}" =~ ^[0-9]+$ ]] && rule_fps="${token#*=}" ;;
+          geometry=*|resolution=*)
+            [[ "${token#*=}" =~ ^[0-9]{2,4}x[0-9]{2,4}$ ]] && rule_geometry="${token#*=}" ;;
+        esac
+      done
+    fi
+    field=class expression="$pattern"
+    case "${pattern,,}" in
+      title:*) field=title expression="${pattern:6}" ;;
+      class:*) field=class expression="${pattern:6}" ;;
+      exe:*) field=class expression="${pattern:4}" ;;
+    esac
+    expression="${expression#"${expression%%[![:space:]]*}"}"
+    [[ -n "$expression" ]] || continue
+    [[ "$field" == title ]] && target="$title" || target="$class"
+    if grep -Eiq -- "$expression" <<<"$target"; then
+      matched_rule="$pattern"
+      matched_mode="$rule_mode" matched_fps="$rule_fps" matched_geometry="$rule_geometry"
+      return 0
+    fi
   done < "$apps_file"
   return 1
 }
 
-active_monitor() {
-  local id geometry wx wy ww wh cx cy name screen sx sy sw sh
-  id="$(kdotool getactivewindow 2>/dev/null)" || return 1
+# `captura-video-loop.sh --match ["<título> | <classe>"]` responde se a janela
+# seria gravada e por qual regra, sem mexer em serviço nenhum. Sem argumento
+# consulta a janela em foco. Fica antes de qualquer efeito colateral para poder
+# rodar com uma gravação em curso.
+if [[ "${1:-}" == "--match" ]]; then
+  probe="${2:-$(window_info || true)}"
+  if [[ "$VIDEO_ENABLED" != true ]]; then
+    printf 'desativado\t%s\t\n' "$probe"; exit 1
+  fi
+  if [[ -z "$probe" ]]; then
+    printf 'desconhecido\t\t\n'; exit 1
+  fi
+  if is_selected_app "$probe"; then
+    printf 'grava\t%s\t%s\t%s\n' "$probe" "$matched_rule" "$matched_mode"; exit 0
+  fi
+  printf 'ignora\t%s\t\n' "$probe"; exit 1
+fi
+
+# O layout das telas muda quando se liga um monitor, não a cada volta do laço.
+# Consultá-lo de dois em dois segundos seria um `kscreen-doctor` por volta só
+# para redescobrir a mesma coisa.
+screens_cache='' screens_cache_at=0
+screen_layout() {
+  local now; now="$(date +%s)"
+  if [[ -z "$screens_cache" ]] || ((now - screens_cache_at >= 30)); then
+    screens_cache="$(kscreen-doctor -o 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | awk '/^Output:/{n=$3;e=0}/^[[:space:]]+enabled[[:space:]]*$/{e=1}/Geometry:/&&e{for(i=1;i<=NF;i++)if($i=="Geometry:"){split($(i+1),p,",");split($(i+2),s,"x");print n,s[1]"x"s[2]"+"p[1]"+"p[2]}}')"
+    screens_cache_at="$now"
+  fi
+  printf '%s\n' "$screens_cache"
+}
+
+window_monitor() {
+  local id="$1" geometry wx wy ww wh cx cy name screen sx sy sw sh
+  [[ -n "$id" ]] || return 1
   geometry="$(kdotool getwindowgeometry "$id" 2>/dev/null)" || return 1
+  [[ -n "$geometry" ]] || return 1
   read -r wx wy < <(awk -F'[:, ]+' '/Position:/ {print $3,$4}' <<<"$geometry")
   read -r ww wh < <(awk -F'[:x ]+' '/Geometry:/ {print $3,$4}' <<<"$geometry")
   cx=$((wx+ww/2)); cy=$((wy+wh/2))
   while read -r name screen; do
     read -r sx sy sw sh < <(sed -E 's/^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$/\3 \4 \1 \2/' <<<"$screen")
     ((cx>=sx && cx<sx+sw && cy>=sy && cy<sy+sh)) && { printf '%s\n' "$name"; return 0; }
-  done < <(kscreen-doctor -o 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | awk '/^Output:/{n=$3;e=0}/^[[:space:]]+enabled[[:space:]]*$/{e=1}/Geometry:/&&e{for(i=1;i<=NF;i++)if($i=="Geometry:"){split($(i+1),p,",");split($(i+2),s,"x");print n,s[1]"x"s[2]"+"p[1]"+"p[2]}}')
+  done < <(screen_layout)
   return 1
+}
+
+active_monitor() {
+  window_monitor "$(kdotool getactivewindow 2>/dev/null || true)"
+}
+
+# --- Ainda estou no jogo? -------------------------------------------------
+#
+# A pergunta parece a mesma que "o jogo está em foco?", mas não é, e a
+# diferença era o bug: o gpu-screen-recorder grava um *monitor*, não uma
+# janela. Com dois monitores, clicar no navegador da segunda tela não tira o
+# jogo de lugar nenhum — ele continua inteiro no monitor que está sendo
+# gravado, e encerrar a sessão ali joga fora justamente o buffer de clipes da
+# partida que continua acontecendo.
+#
+# Daí três respostas em vez de duas, publicadas em `focus_now`:
+#   jogo    — a janela ativa casa com uma regra;
+#   na-tela — o jogo continua no monitor gravado: quem tomou o foco é o painel
+#             do Plasma, um OSD, outro monitor, ou a leitura simplesmente
+#             falhou. Nada muda, nem a contagem que já estiver correndo;
+#   fora    — outra janela, no monitor que está sendo gravado. Só isto conta.
+focus_now=''
+focus_reason=''
+game_missing_ticks=0
+
+# Segurar a sessão enquanto o painel do Plasma está em foco só é seguro se o
+# jogo ainda estiver aberto. Fechar um jogo em tela cheia costuma devolver o
+# foco justamente para a área de trabalho — sem esta pergunta, o "segura"
+# viraria "grava a área de trabalho para sempre".
+game_window_alive() {
+  local id
+  [[ -n "$session_window_id" ]] || return 0
+  [[ -n "$(kdotool getwindowclassname "$session_window_id" 2>/dev/null)" ]] && return 0
+  # O id morreu, o que nem sempre quer dizer que o jogo foi embora: trocar de
+  # tela cheia para janela, ou reiniciar o renderizador, cria uma janela nova.
+  # Por isso a segunda pergunta, pela classe da janela que abriu a sessão.
+  [[ -n "$session_class" ]] || return 1
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    session_window_id="$id"
+    return 0
+  done < <(kdotool search --class "^${session_class}$" 2>/dev/null)
+  return 1
+}
+focus_verdict() {
+  local class monitor
+  # Sem `$(...)`: o id da janela precisa sobreviver à chamada.
+  if ! window_info >/dev/null; then
+    focus_now=na-tela focus_reason='janela ativa ilegível'
+    return 0
+  fi
+  if is_selected_app "$window_info_text"; then
+    focus_now=jogo focus_reason="$window_info_text"
+    return 0
+  fi
+  if game_window_alive; then
+    game_missing_ticks=0
+  else
+    # Uma volta só não basta: as mesmas leituras em branco que o kdotool
+    # devolve para a janela ativa valem para esta pergunta, e não custa nada
+    # confirmar antes de encerrar a sessão de quem ainda está jogando.
+    game_missing_ticks=$((game_missing_ticks + 1))
+    if ((game_missing_ticks >= 2)); then
+      focus_now=fora focus_reason='a janela do jogo sumiu'
+      return 0
+    fi
+    focus_now=na-tela focus_reason='janela do jogo não encontrada (conferindo)'
+    return 0
+  fi
+  class="${window_info_text##* | }"
+  if [[ -n "$VIDEO_FOCUS_IGNORE_CLASSES" ]] \
+     && grep -Eiq -- "$VIDEO_FOCUS_IGNORE_CLASSES" <<<"$class"; then
+    focus_now=na-tela focus_reason="$class (janela do ambiente)"
+    return 0
+  fi
+  monitor="$(window_monitor "$window_info_id" || true)"
+  if [[ -n "$monitor" && -n "$session_monitor" && "$monitor" != "$session_monitor" ]]; then
+    focus_now=na-tela focus_reason="$class em $monitor"
+    return 0
+  fi
+  focus_now=fora focus_reason="$class${monitor:+ em $monitor}"
+  return 0
 }
 
 finish_segment() {
   local pid="$1" partial="$2" final="$3" info="$4" session_id="$5"
   kill -INT "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  rm -f "$recording_flag" "$activity_flag"
   if [[ -s "$partial" ]]; then
     mv "$partial" "$final"
     printf '%s\n' "$info" > "$final.window"
@@ -120,54 +498,521 @@ finish_segment() {
 }
 
 cleanup() {
-  [[ -n "${rec_pid:-}" ]] && kill -INT "$rec_pid" 2>/dev/null || true
+  local status=$?
+  trap - EXIT TERM INT
+  end_game_session sync
+  [[ -n "${audio_watch_pid:-}" ]] && kill "$audio_watch_pid" 2>/dev/null || true
+  if [[ -n "${rec_pid:-}" && -n "${partial:-}" && -n "${final:-}" ]]; then
+    # Um restart/stop também é um encerramento válido de sessão. Finalizar aqui
+    # preserva vídeo, sidecars e marcadores em vez de deixar um .partial órfão.
+    finish_segment "$rec_pid" "$partial" "$final" "${session_window:-${info:-}}" "${session_id:-}"
+    rec_pid=''
+  else
+    [[ -n "${rec_pid:-}" ]] && kill -INT "$rec_pid" 2>/dev/null || true
+    # Um clipe salvo no último segundo ainda pode estar no diretório de replay.
+    [[ "$session_mode" == clips ]] && stop_long_recording >/dev/null || true
+    [[ "$session_mode" == clips ]] && flush_pending_clip >/dev/null || true
+    [[ "$session_mode" == clips ]] && collect_clips >/dev/null || true
+    rm -f "$recording_flag" "$activity_flag"
+  fi
   resume_background_captures
+  exit "$status"
 }
 add_marker() {
   [[ -n "${rec_pid:-}" && -n "${final:-}" ]] || return 0
   local offset=$((SECONDS-started))
   printf '%s\n' "$offset" >> "$final.markers"
-  command -v canberra-gtk-play >/dev/null && canberra-gtk-play -i complete >/dev/null 2>&1 || true
+  ((marker_count += 1))
+  publish_activity marker "Marcador $marker_count · $((offset / 60)):$(printf '%02d' $((offset % 60)))"
+  confirmation_sound
+}
+# Recupera capturas deixadas pausadas por uma interrupção abrupta anterior.
+resume_background_captures
+# O gsr em modo replay nomeia o arquivo sozinho e o escreve enquanto muxa. Aqui
+# o clipe vira um segmento como qualquer outro — `<data>_<hora>_<monitor>.mp4`
+# com os sidecars de janela e sessão — para que os clipes de uma partida virem
+# capítulos da mesma sessão no Lume.
+collect_clips() {
+  local file target epoch size previous collected=1
+  for file in "$clip_stage"/*; do
+    [[ -f "$file" ]] || continue
+    # Esperar o tamanho estabilizar: adotar o arquivo no meio da muxagem daria
+    # um vídeo truncado ao pipeline.
+    previous=-1; size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+    while ((size != previous)); do
+      previous=$size; sleep 0.5; size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+    done
+    if ((size == 0)); then rm -f "$file"; continue; fi
+    epoch="$(stat -c %Y "$file" 2>/dev/null || date +%s)"
+    target="$output_dir/$(date -d "@$epoch" +%F_%H-%M-%S)_${session_monitor}.mp4"
+    while [[ -e "$target" ]]; do
+      ((epoch += 1))
+      target="$output_dir/$(date -d "@$epoch" +%F_%H-%M-%S)_${session_monitor}.mp4"
+    done
+    mv "$file" "$target"
+    printf '%s\n' "$session_window" > "$target.window"
+    printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
+    last_clip_name="$(basename "$target")"
+    ((clips_saved += 1))
+    collected=0
+    echo "$target"
+  done
+  return $collected
+}
+
+# Salva os últimos segundos e os guarda como clipe pendente. O arquivo só entra
+# no buffer quando a janela de replay fechar sem outro atalho: até lá, um atalho
+# novo estende este mesmo clipe em vez de abrir outro.
+save_clip() {
+  local now staged
+  [[ -n "${rec_pid:-}" ]] || return 0
+  # O instante do atalho, e não a data do arquivo: o clipe cobre os segundos
+  # *anteriores* a ele, e é essa borda que decide se dois pedidos se sobrepõem.
+  now="$(date +%s.%N)"
+  kill -USR1 "$rec_pid" 2>/dev/null || return 0
+  publish_activity clip_saving "Salvando clipe…"
+  confirmation_sound
+  mkdir -p "$pending_dir"
+  # O replay vive em RAM; escrever os últimos segundos é rápido, não instantâneo.
+  staged="$(wait_for_stage_file "$clip_stage" "${now%%.*}" || true)"
+  if [[ -z "$staged" ]]; then
+    log "o gpu-screen-recorder não escreveu nada em $clip_stage"
+    publish_activity clip_failed "Clipe não salvo"
+    return 0
+  fi
+  if merge_pending_clip "$staged" "$now"; then
+    publish_activity clip_merged \
+      "Clipe estendido · $(clock_label "$(media_seconds "$pending_clip_file")")"
+    return 0
+  fi
+  # Sem sobreposição: o que esperava vira arquivo do buffer e o novo assume a vez.
+  flush_pending_clip >/dev/null || true
+  mv -f "$staged" "$pending_dir/pendente.mp4"
+  pending_clip_file="$pending_dir/pendente.mp4"
+  pending_clip_epoch="$now"
+  pending_clip_start="${now%%.*}"
+  ((clips_saved += 1))
+  publish_activity clip_saved "Clipe salvo · ${VIDEO_REPLAY_SECONDS}s"
+}
+
+# Espera um arquivo aparecer num diretório de estágio e parar de crescer.
+# Adotá-lo no meio da muxagem daria um vídeo truncado ao pipeline, e desistir
+# cedo demais perderia a gravação inteira.
+# O segundo argumento é o piso de idade: um arquivo mais velho do que ele é
+# sobra de uma queda anterior, não o que acabamos de pedir, e adotá-lo colaria
+# a partida de ontem no vídeo de hoje.
+wait_for_stage_file() {
+  local dir="$1" min_epoch="${2:-0}" waited=0 name='' file previous size
+  while ((waited < 120)); do
+    name="$(find "$dir" -maxdepth 1 -type f -newermt "@$((min_epoch - 2))" -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | head -n1 | cut -d' ' -f2-)"
+    [[ -n "$name" ]] && break
+    sleep 0.5; ((waited += 1))
+  done
+  [[ -n "$name" ]] || return 1
+  file="$name"
+  previous=-1; size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+  while ((size != previous)); do
+    previous=$size; sleep 0.5; size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+  done
+  if ((size == 0)); then rm -f "$file"; return 1; fi
+  printf '%s\n' "$file"
+}
+
+media_duration() {
+  ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null \
+    | awk 'NR==1 && $1+0>0 {printf "%d", $1}'
+}
+
+# Nome livre no buffer, no padrão `<data>_<hora>_<monitor>.mp4` que o resto do
+# Lume já sabe ler.
+buffer_target() {
+  local epoch="$1" target
+  target="$output_dir/$(date -d "@$epoch" +%F_%H-%M-%S)_${session_monitor}.mp4"
+  while [[ -e "$target" ]]; do
+    ((epoch += 1))
+    target="$output_dir/$(date -d "@$epoch" +%F_%H-%M-%S)_${session_monitor}.mp4"
+  done
+  printf '%s\n' "$target"
+}
+
+adopt_video() {
+  local file="$1" target="$2"
+  mv "$file" "$target"
+  printf '%s\n' "$session_window" > "$target.window"
+  printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
+  echo "$target"
+}
+
+# Um arquivo só, como pedido: o clipe de pré-roll emendado na gravação que veio
+# depois. Os dois saem do mesmo gpu-screen-recorder, com o mesmo codec e o mesmo
+# número de faixas, então a cópia de streams basta — recodificar uma partida
+# inteira para juntar dois pedaços seria absurdo.
+concat_videos() {
+  local out="$1"; shift
+  local list file status
+  list="$(mktemp)"
+  for file in "$@"; do printf "file '%s'\n" "$file" >> "$list"; done
+  ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$list" -c copy "$out" \
+    >/dev/null 2>&1; status=$?
+  rm -f "$list"
+  return $status
+}
+
+# A duração com as casas decimais: a emenda de dois clipes é feita em frações
+# de segundo, e arredondar aqui repetiria — ou comeria — meio segundo de jogo.
+media_seconds() {
+  ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null \
+    | awk 'NR==1 && $1+0>0 {printf "%.3f", $1}'
+}
+
+clock_label() {
+  local total="${1%%.*}"
+  printf '%d:%02d' $(( ${total:-0} / 60 )) $(( ${total:-0} % 60 ))
+}
+
+# Verdadeiro enquanto outro atalho ainda estenderia o clipe pendente, em vez de
+# abrir um novo: a janela dura o mesmo tanto que o replay configurado.
+pending_clip_window_open() {
+  [[ -n "$pending_clip_file" ]] || return 1
+  awk -v n="$(date +%s.%N)" -v p="$pending_clip_epoch" -v r="$VIDEO_REPLAY_SECONDS" \
+    'BEGIN{exit !(n - p < r)}'
+}
+
+# Publica o clipe que esperava: ele vira um segmento como qualquer outro —
+# `<data>_<hora>_<monitor>.mp4` com os sidecars de janela e sessão — para que os
+# clipes de uma partida virem capítulos da mesma sessão no Lume.
+flush_pending_clip() {
+  local file="$pending_clip_file" start="$pending_clip_start" target
+  [[ -n "$file" ]] || return 1
+  pending_clip_file='' pending_clip_epoch=0 pending_clip_start=0
+  [[ -f "$file" ]] || return 1
+  ((start > 0)) || start="$(date +%s)"
+  target="$(buffer_target "$start")"
+  adopt_video "$file" "$target"
+  last_clip_name="$(basename "$target")"
+}
+
+# Sobra de uma queda abrupta: um clipe salvo que não chegou a ser publicado e de
+# cuja sessão não se sabe mais nada. Vale mais como vídeo solto do que perdido —
+# sem sidecars, porque inventar a sessão o penduraria na partida errada.
+rescue_stale_pending_clip() {
+  local file="$pending_dir/pendente.mp4" target
+  # Pedaços de uma emenda interrompida no meio não servem a ninguém.
+  rm -f "$pending_dir/inicio.mp4" "$pending_dir/uniao.mp4"
+  [[ -f "$file" ]] || return 0
+  target="$(buffer_target "$(stat -c %Y "$file" 2>/dev/null || date +%s)")"
+  mv "$file" "$target"
+  log "clipe pendente de uma execução anterior publicado em $(basename "$target")"
+}
+
+# Estende o clipe pendente com o pedido novo, quando os dois se sobrepõem.
+#
+# O pendente termina no atalho anterior; o novo cobre os segundos anteriores a
+# este. Se o começo do novo cai dentro do pendente, o trecho em comum não pode
+# aparecer duas vezes: o corte sai do *fim* do pendente, que com cópia de
+# streams é exato — cortar o começo do novo cairia no quadro-chave anterior e
+# repetiria segundos já vistos.
+merge_pending_clip() {
+  local incoming="$1" now="$2" delta head pending_seconds incoming_seconds
+  local head_file="$pending_dir/inicio.mp4" union="$pending_dir/uniao.mp4"
+  [[ -n "$pending_clip_file" && -f "$pending_clip_file" ]] || return 1
+  pending_seconds="$(media_seconds "$pending_clip_file")"
+  incoming_seconds="$(media_seconds "$incoming")"
+  [[ -n "$pending_seconds" && -n "$incoming_seconds" ]] || return 1
+  delta="$(awk -v a="$now" -v b="$pending_clip_epoch" 'BEGIN{printf "%.3f", a - b}')"
+  awk -v d="$delta" -v i="$incoming_seconds" 'BEGIN{exit !(d < i)}' || return 1
+  head="$(awk -v p="$pending_seconds" -v d="$delta" -v i="$incoming_seconds" \
+    'BEGIN{h = p + d - i; printf "%.3f", (h > 0 ? h : 0)}')"
+  rm -f "$head_file" "$union"
+  if awk -v h="$head" 'BEGIN{exit !(h < 0.2)}'; then
+    # O clipe novo contém o pendente inteiro: não há começo a preservar.
+    mv -f "$incoming" "$pending_clip_file"
+  elif ffmpeg -hide_banner -loglevel error -y -i "$pending_clip_file" -t "$head" \
+         -c copy "$head_file" >/dev/null 2>&1 \
+       && concat_videos "$union" "$head_file" "$incoming"; then
+    mv -f "$union" "$pending_clip_file"
+    rm -f "$head_file" "$incoming"
+  else
+    # Emendar falhou: os dois pedaços valem mais soltos do que perdidos.
+    log "não consegui mesclar os clipes vizinhos; seguem separados"
+    rm -f "$head_file" "$union"
+    return 1
+  fi
+  # O arquivo começa onde começava — só o fim andou. O nome, que sai do primeiro
+  # atalho, continua valendo; a espera reabre a partir deste atalho.
+  pending_clip_epoch="$now"
+  return 0
+}
+
+add_long_marker() {
+  local offset=$((SECONDS-long_started))
+  long_markers+=("$offset")
+  ((marker_count += 1))
+  publish_activity marker "Marcador $marker_count · $((offset / 60)):$(printf '%02d' $((offset % 60)))"
+  confirmation_sound
+}
+
+start_long_recording() {
+  [[ -n "${rec_pid:-}" ]] || { publish_activity ignored "Nenhum jogo monitorado"; return 0; }
+  # A gravação longa tem pré-roll próprio: o clipe que esperava não é estendido
+  # por ela, e ficar pendente só atrasaria a publicação dele.
+  flush_pending_clip >/dev/null || true
+  long_started_epoch="$(date +%s)"
+  long_started=$SECONDS
+  long_markers=()
+  long_clip_file=''
+  # A ordem importa: primeiro o pré-roll que já está em RAM, depois a gravação
+  # que segue daqui para a frente. Invertida, o clipe sairia com o começo da
+  # gravação dentro dele.
+  kill -USR1 "$rec_pid" 2>/dev/null || true
+  kill -s RTMIN "$rec_pid" 2>/dev/null || true
+  long_recording=true
+  publish_activity long_started "Gravação longa iniciada"
+  confirmation_sound device-added
+  long_clip_file="$(wait_for_stage_file "$clip_stage" "$long_started_epoch" || true)"
+  [[ -n "$long_clip_file" ]] || log "o pré-roll não saiu; a gravação longa terá só o que vier daqui"
+  # Sem evento: o estado "gravando tudo" é permanente, e quem o mostra é o ponto
+  # vermelho da HUD. Como evento, ele ainda competiria com o marcador pela mesma
+  # faixa — e chegaria depois dele, por causa da espera pelo pré-roll.
+  publish_activity
+}
+
+stop_long_recording() {
+  [[ "$long_recording" == true ]] || return 0
+  long_recording=false
+  kill -s RTMIN "${rec_pid:-0}" 2>/dev/null || true
+  publish_activity long_saving "Fechando gravação longa…"
+  confirmation_sound device-removed
+  local recording_file target offset preroll=0
+  recording_file="$(wait_for_stage_file "$long_stage" "$long_started_epoch" || true)"
+  target="$(buffer_target "$long_started_epoch")"
+  if [[ -n "$long_clip_file" && -n "$recording_file" ]]; then
+    preroll="$(media_duration "$long_clip_file")"; preroll="${preroll:-0}"
+    if concat_videos "$target" "$long_clip_file" "$recording_file"; then
+      rm -f "$long_clip_file" "$recording_file"
+      printf '%s\n' "$session_window" > "$target.window"
+      printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
+      echo "$target"
+    else
+      # Emendar falhou: os dois pedaços valem mais soltos do que perdidos.
+      log "não consegui emendar clipe e gravação; adotando os dois separados"
+      preroll=0
+      adopt_video "$long_clip_file" "$target"
+      target="$(buffer_target "$((long_started_epoch + 1))")"
+      adopt_video "$recording_file" "$target"
+    fi
+  elif [[ -n "$recording_file" ]]; then
+    adopt_video "$recording_file" "$target"
+  elif [[ -n "$long_clip_file" ]]; then
+    adopt_video "$long_clip_file" "$target"
+  else
+    log "a gravação longa não produziu arquivo nenhum"
+    long_clip_file='' long_markers=()
+    publish_activity long_failed "Gravação longa sem arquivo"
+    return 0
+  fi
+  # Os marcadores foram anotados a partir do início da gravação longa, mas o
+  # arquivo começa antes dela — no pré-roll. Sem o deslocamento, cada destaque
+  # apontaria para alguns segundos antes do que a pessoa marcou.
+  for offset in "${long_markers[@]:-}"; do
+    [[ -n "$offset" ]] || continue
+    printf '%s\n' "$((offset + preroll))" >> "$target.markers"
+  done
+  last_clip_name="$(basename "$target")"
+  ((clips_saved += 1))
+  long_clip_file='' long_markers=()
+  publish_activity long_saved "Gravação longa salva · $last_clip_name"
+}
+
+# O mesmo atalho guarda o mesmo significado dos dois lados: no modo contínuo
+# marca o instante, no modo clipes salva os últimos segundos. Durante uma
+# gravação longa ele volta a ser marcador — salvar um clipe do que já está
+# sendo gravado inteiro não faria sentido.
+on_hotkey() {
+  if [[ "$long_recording" == true ]]; then add_long_marker
+  elif [[ "$session_mode" == clips ]]; then save_clip
+  else add_marker; fi
+}
+
+# Segurar: abre a gravação longa e, na segurada seguinte, a fecha. Só existe no
+# modo clipes — no contínuo já está tudo sendo gravado.
+on_hotkey_hold() {
+  if [[ "$session_mode" != clips ]]; then
+    publish_activity ignored "Segurar só vale no modo clipes"
+    return 0
+  fi
+  if [[ "$long_recording" == true ]]; then stop_long_recording; else start_long_recording; fi
+}
+
+finish_clip_session() {
+  local pid="$1"
+  # Uma gravação longa em curso é fechada antes de derrubar o gravador: o INT
+  # abaixo descartaria o arquivo que ela estava escrevendo.
+  stop_long_recording >/dev/null || true
+  # Em replay o INT encerra sem salvar: o que valia já saiu a cada atalho.
+  kill -INT "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  # A sessão acabou: não há próximo atalho para estender o clipe que esperava.
+  flush_pending_clip >/dev/null || true
+  collect_clips >/dev/null || true
+  rm -f "$recording_flag" "$activity_flag"
 }
 trap cleanup EXIT TERM INT
-trap add_marker USR1
+trap on_hotkey USR1
+trap on_hotkey_hold USR2
+audio_watch_pid=''
+if [[ -x "$audio_bus_script" ]]; then
+  "$audio_bus_script" watch &
+  audio_watch_pid=$!
+fi
 session_id=''
 session_wait_logged=false
+# Uma queda no meio da partida deixaria a sessão anterior aberta para sempre.
+run_game_session close-stale
 while true; do
+  # Preferências salvas no Lume passam a valer sem reiniciar uma gravação em
+  # curso. A próxima volta/sessão lê o arquivo novamente. O `|| true` importa:
+  # sob `set -e`, um config removido derrubaria o laço em vez de seguir com os
+  # padrões já carregados no topo.
+  if [[ -r "$config_file" ]]; then source "$config_file" || true; fi
   if ! graphical_session_ready; then
     if [[ "$session_wait_logged" == false ]]; then
       log "aguardando sessão gráfica (DISPLAY=${DISPLAY:-ausente}, WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-ausente})"
       session_wait_logged=true
     fi
-    session_id=''; resume_background_captures; sleep 2; continue
+    session_id=''; end_game_session; resume_background_captures; sleep 2; continue
   fi
   if [[ "$session_wait_logged" == true ]]; then
     log "sessão gráfica disponível"
     session_wait_logged=false
   fi
-  info="$(window_info || true)"
-  if ! is_selected_app "$info"; then session_id=''; resume_background_captures; sleep 2; continue; fi
+  window_info >/dev/null || true
+  info="$window_info_text"
+  if ! is_selected_app "$info"; then
+    session_id=''; end_game_session; resume_background_captures; sleep 2; continue
+  fi
   [[ -n "$session_id" ]] || session_id="$(date +%s)-$$-$RANDOM"
   pause_background_captures
   monitor="$(active_monitor || true)"; [[ -n "$monitor" ]] || { sleep 2; continue; }
-  stamp="$(date +%F_%H-%M-%S)"; final="$output_dir/${stamp}_${monitor}.mp4"; partial="$final.partial.mp4"
-  command=(gpu-screen-recorder -w "$monitor" -f "$VIDEO_FPS" -s "$VIDEO_GEOMETRY" -c mp4 -k "$VIDEO_CODEC" -q "$VIDEO_QUALITY" -fm cfr -cursor yes -o "$partial")
-  [[ -n "$VIDEO_AUDIO" ]] && command+=( -a "$VIDEO_AUDIO" )
-  "${command[@]}" & rec_pid=$!
-  started=$SECONDS
-  focus_lost_at=-1
-  session_ended=false
-  while kill -0 "$rec_pid" 2>/dev/null && ((VIDEO_SEGMENT_SECONDS==0 || SECONDS-started<VIDEO_SEGMENT_SECONDS)); do
-    sleep 2; current="$(window_info || true)"
-    if is_selected_app "$current"; then
-      focus_lost_at=-1
-    elif ((focus_lost_at < 0)); then
-      focus_lost_at=$SECONDS
-    elif ((SECONDS-focus_lost_at >= VIDEO_FOCUS_GRACE_SECONDS)); then
-      session_ended=true
-      break
-    fi
+  session_mode="$matched_mode"
+  stamp="$(date +%F_%H-%M-%S)"
+  command=(gpu-screen-recorder -w "$monitor" -f "$matched_fps" -s "$matched_geometry" -c mp4 \
+           -k "$VIDEO_CODEC" -q "$VIDEO_QUALITY" -fm cfr -cursor yes)
+  if [[ "$session_mode" == clips ]]; then
+    # Nada vai para o disco até o atalho pedir: o gsr mantém em RAM os últimos
+    # VIDEO_REPLAY_SECONDS. Sem `final`/`partial`, o `cleanup` sabe que não há
+    # segmento a finalizar.
+    final='' partial=''
+    mkdir -p "$clip_stage" "$long_stage"
+    # Em replay o `-o` é um *diretório*, e é obrigatório: o gsr recusa `-r` sem
+    # ele ("Option -o is required when using option -r") e sai na hora. `-ro` é
+    # outra coisa — a gravação contínua paralela ao replay — e usá-lo no lugar
+    # fazia o gravador morrer a cada tentativa, sem buffer e sem clipe.
+    # `-ro` é a gravação normal *durante* o replay, ligada e desligada por
+    # SIGRTMIN. É o que permite a gravação longa sem derrubar o buffer: o clipe
+    # de pré-roll continua disponível o tempo todo.
+    command+=(-r "$VIDEO_REPLAY_SECONDS" -o "$clip_stage" -ro "$long_stage")
+  else
+    final="$output_dir/${stamp}_${monitor}.mp4"; partial="$final.partial.mp4"
+    command+=(-o "$partial")
+  fi
+  # Cada item vira um -a separado e, portanto, uma faixa separada no arquivo.
+  # Um valor sem vírgulas continua funcionando para configurações antigas.
+  IFS=',' read -ra audio_sources <<< "$VIDEO_AUDIO"
+  for audio_source in "${audio_sources[@]}"; do
+    audio_source="${audio_source#"${audio_source%%[![:space:]]*}"}"
+    audio_source="${audio_source%"${audio_source##*[![:space:]]}"}"
+    [[ -n "$audio_source" ]] && command+=( -a "$audio_source" )
   done
-  finish_segment "$rec_pid" "$partial" "$final" "$info" "$session_id"; rec_pid=''
-  [[ "$session_ended" == true ]] && session_id=''
+  # Os buses de áudio nascem no ExecStartPre da captura de áudio. Com ela
+  # pausada — ou logo depois de um boot em que ela não subiu — eles não existem,
+  # o gsr recusa as fontes ("is not a valid audio device") e morre. Garanti-los
+  # aqui é o que deixa o gravador de jogo independente da captura contínua. O
+  # `timeout` existe porque o `ensure` espera o pipewire: sem ele, um servidor
+  # de áudio ausente seguraria a partida inteira.
+  if [[ -x "$audio_bus_script" ]]; then
+    timeout 15 "$audio_bus_script" ensure >/dev/null 2>&1 \
+      || log "não consegui garantir os buses de áudio; o gravador pode recusar as fontes"
+  fi
+  "${command[@]}" & rec_pid=$!
+  session_window="$info"
+  session_window_id="$window_info_id"
+  session_class="${info##* | }"
+  session_monitor="$monitor"
+  session_started_epoch="$(date +%s)"
+  marker_count=0
+  clips_saved=0
+  last_clip_name=''
+  pending_clip_file='' pending_clip_epoch=0 pending_clip_start=0
+  [[ "$session_mode" == clips ]] && rescue_stale_pending_clip || true
+  long_recording=false
+  long_started_epoch=0
+  long_clip_file=''
+  long_markers=()
+  event_seq=0
+  last_event_json=''
+  focus_grace_deadline=null
+  publish_activity
+  begin_game_session
+  started=$SECONDS
+  focus_away=0
+  session_ended=false
+  # O modo clipes não rotaciona: o replay fica de pé enquanto o jogo estiver em
+  # foco, e cada atalho é que produz um arquivo.
+  while kill -0 "$rec_pid" 2>/dev/null && { [[ "$session_mode" == clips ]] \
+        || ((VIDEO_SEGMENT_SECONDS==0 || SECONDS-started<VIDEO_SEGMENT_SECONDS)); }; do
+    interruptible_sleep "$FOCUS_TICK_SECONDS"
+    focus_verdict
+    case "$focus_now" in
+      jogo)
+        if ((focus_away > 0)); then
+          log "foco de volta no jogo; contagem cancelada"
+        fi
+        focus_away=0
+        focus_grace_deadline=null
+        ;;
+      na-tela)
+        # Segura o que estiver valendo. Se a contagem já corria, ela fica onde
+        # está em vez de andar: um OSD que aparece no meio de uma saída real
+        # não deve nem cancelar nem acelerar o encerramento.
+        ;;
+      *)
+        # A contagem anda em passos do laço, não em tempo de relógio, para que
+        # segurar de fato segure: um minuto de painel do Plasma no meio não
+        # encurta a folga de quem ainda está jogando.
+        focus_away=$((focus_away + FOCUS_TICK_SECONDS))
+        focus_grace_deadline=$(( $(date +%s) + VIDEO_FOCUS_GRACE_SECONDS - focus_away ))
+        if ((focus_away == FOCUS_TICK_SECONDS)); then
+          log "foco em $focus_reason, no monitor gravado; encerro em ${VIDEO_FOCUS_GRACE_SECONDS}s se continuar assim"
+        fi
+        if ((focus_away >= VIDEO_FOCUS_GRACE_SECONDS)); then
+          log "sessão encerrada: ${VIDEO_FOCUS_GRACE_SECONDS}s fora do jogo ($focus_reason)"
+          session_ended=true
+          break
+        fi
+        ;;
+    esac
+    # A janela de mesclagem fechou: o clipe que esperava vira arquivo do buffer.
+    if [[ -n "$pending_clip_file" ]] && ! pending_clip_window_open; then
+      flush_pending_clip >/dev/null || true
+    fi
+    publish_activity
+    heartbeat_game_session
+  done
+  if [[ "$session_mode" == clips ]]; then
+    finish_clip_session "$rec_pid"
+  else
+    finish_segment "$rec_pid" "$partial" "$final" "$info" "$session_id"
+  fi
+  rec_pid=''
+  # Só o fim de sessão é um encerramento esperado. Sair antes disso, e rápido,
+  # é o gravador falhando ao subir — sem a espera o laço tentaria de novo dois
+  # segundos depois, para sempre, com a HUD fingindo que está tudo bem.
+  if [[ "$session_ended" == true ]]; then
+    session_id=''; end_game_session
+  elif ((SECONDS - started < RECORDER_MIN_SECONDS)); then
+    log "o gravador saiu em $((SECONDS - started))s; nova tentativa em ${RECORDER_RETRY_SECONDS}s (veja o erro do gpu-screen-recorder acima)"
+    interruptible_sleep "$RECORDER_RETRY_SECONDS"
+  fi
 done

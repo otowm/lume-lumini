@@ -1,16 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, uploadVideo, type ActivitySession, type Capture, type CleanupSettings, type DaySummary, type HourSummary, type OllamaModel, type PipelineQueue, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
+import { api, uploadVideo, type ActivitySession, type Capture, type CleanupSettings, type DaySummary, type EditingEntry, type EditingFolder, type HourSummary, type OllamaModel, type PipelineQueue, type PromptSetting, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type AppMode, type LightVersion, type ShareUpload, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
 import "./styles.css";
 import "./markers.css";
 import "./selection.css";
 import "./playback-performance.css";
 import "./retention.css";
 import "./activity-sessions.css";
+import { DayPicker } from "./DayPicker";
+import { ActivitiesView } from "./ActivitiesView";
+import { TagsView } from "./TagsView";
 
 type View = "busca" | "resumo" | "atividades" | "jogos" | "videos" | "timeline" | "captura";
 type Panel = "settings" | "privacy" | null;
-type CapturaTab = "fila" | "arquivos" | "diagnostico";
+type CapturaTab = "fila" | "arquivos" | "diagnostico" | "tags";
 //: Prioridade e rótulo de cada faixa nas legendas simultâneas.
 const CAPTION_ORDER:Record<string,number>={microphone:0,discord:1,system:2};
 const CAPTION_LABELS:Record<string,string>={microphone:"MIC",discord:"DISCORD",system:"JOGO"};
@@ -37,6 +40,32 @@ const labels: Record<View, [string, string]> = {
 };
 
 const lensLabels: [View, string][] = [["resumo", "Resumo"], ["timeline", "Linha do tempo"], ["atividades", "Atividades"], ["jogos", "Jogos"]];
+
+//: As telas que só existem com a análise instalada. No Lumini sobra a
+//: biblioteca de clipes — e é ela que a pessoa abriu o app para usar.
+//: `captura` entra aqui porque suas quatro abas são fila (IA), arquivos de
+//: print/áudio do dia, tags (IA) e um diagnóstico que testa justamente o que o
+//: Lumini não captura; o teste que importa, "Testar janela", vive nos ajustes.
+const VIEWS_DA_ANALISE: View[] = ["busca", "resumo", "atividades", "jogos", "timeline", "captura"];
+const ABAS_DE_AJUSTES_DA_ANALISE = ["capture", "ai", "prompts"] as const;
+type SettingsTab = "capture" | "storage" | "ai" | "video" | "prompts";
+
+function viewsDisponiveis(mode: AppMode): View[] {
+  const todas = Object.keys(labels) as View[];
+  return mode === "lumini" ? todas.filter(item => !VIEWS_DA_ANALISE.includes(item)) : todas;
+}
+
+function abasDeAjustesDisponiveis(mode: AppMode): SettingsTab[] {
+  const todas: [SettingsTab, string][] = [["capture","Captura"],["storage","Armazenamento"],
+    ["ai","Inteligência artificial"],["video","Vídeo seletivo"],["prompts","Prompts"]];
+  return todas.map(([chave]) => chave).filter(chave =>
+    mode !== "lumini" || !ABAS_DE_AJUSTES_DA_ANALISE.includes(chave as never));
+}
+
+//: O nome que a pessoa vê. Mesma base, instalações diferentes.
+function nomeDoApp(mode: AppMode): string {
+  return mode === "lumini" ? "Lumini" : "Lume";
+}
 
 function bytes(value = 0) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(0)} KB`;
@@ -299,7 +328,7 @@ function ChapterReader({chapter,speakers=[],onPlay,onRename,onClose}:{chapter:Vi
   </div>
 }
 
-function CustomVideoPlayer({src,mediaPath,title,chapters=[],segments=[],speakers=[],editableSpeakers,markers=[],videoId,preroll=8,hotkey="F8",onMarkersChanged,onEnded,autoPlay=false}:{src:string;mediaPath?:string;title:string;chapters?:VideoChapter[];segments?:VideoTranscriptSegment[];speakers?:VideoSpeaker[];editableSpeakers?:EditableVideoSpeaker[];markers?:VideoMarker[];videoId?:number;preroll?:number;hotkey?:string;onMarkersChanged?:()=>void;onEnded?:()=>void;autoPlay?:boolean}){
+function CustomVideoPlayer({src,mediaPath,title,chapters=[],segments=[],speakers=[],editableSpeakers,markers=[],videoId,preroll=8,hotkey="F8",ia=true,onMarkersChanged,onEnded,autoPlay=false}:{src:string;mediaPath?:string;title:string;chapters?:VideoChapter[];segments?:VideoTranscriptSegment[];speakers?:VideoSpeaker[];editableSpeakers?:EditableVideoSpeaker[];markers?:VideoMarker[];videoId?:number;preroll?:number;hotkey?:string;ia?:boolean;onMarkersChanged?:()=>void;onEnded?:()=>void;autoPlay?:boolean}){
   const video=useRef<HTMLVideoElement>(null);const stage=useRef<HTMLDivElement>(null);const lastClock=useRef(0);const audioNodes=useRef(new Map<number,HTMLAudioElement>());const scrubbing=useRef(false);const [playing,setPlaying]=useState(false);const [current,setCurrent]=useState(0);const [scrubTime,setScrubTime]=useState<number|null>(null);const [duration,setDuration]=useState(0);const [captions,setCaptions]=useState(true);const [fullscreen,setFullscreen]=useState(false);const [timelineZoom,setTimelineZoom]=useState(1);const [timelineWindowStart,setTimelineWindowStart]=useState(0);const [readingChapter,setReadingChapter]=useState<number|null>(null);const [audioTracks,setAudioTracks]=useState<VideoAudioTrack[]>([]);const [audioTracksPreparing,setAudioTracksPreparing]=useState(false);const [audioTracksManual,setAudioTracksManual]=useState(false);const [audioTrackJobId,setAudioTrackJobId]=useState<string>();const [manualAudioPath,setManualAudioPath]=useState<string|null>(null);const [cancelledAudioPath,setCancelledAudioPath]=useState<string|null>(null);const [trackVolumes,setTrackVolumes]=useState<Record<number,number>>({});const [trimOpen,setTrimOpen]=useState(false);const [trimStart,setTrimStart]=useState(0);const [trimEnd,setTrimEnd]=useState(0);const [trimming,setTrimming]=useState(false);const [trimMessage,setTrimMessage]=useState("");const [mediaRevision,setMediaRevision]=useState(0);
   // Todas as faixas que falam ao mesmo tempo, não só a primeira: microfone,
   // Discord e jogo costumam se sobrepor, e `find` devolvia quem tivesse
@@ -330,7 +359,11 @@ function CustomVideoPlayer({src,mediaPath,title,chapters=[],segments=[],speakers
   const mediaSrc=`${src}${src.includes("?")?"&":"?"}v=${mediaRevision}`;
   return <div className="custom-video-player">
     <div className="custom-video-stage" ref={stage}>
-      <video ref={video} src={mediaSrc} muted={audioTracks.length>0} preload="metadata" onLoadedMetadata={event=>{setDuration(event.currentTarget.duration);if(!trimEnd)setTrimEnd(event.currentTarget.duration)}} onTimeUpdate={event=>{if(!scrubbing.current)updateClock(event.currentTarget.currentTime);syncTrackAudio(event.currentTarget.currentTime)}} onPlay={()=>{setPlaying(true);playTrackAudio()}} onPlaying={playTrackAudio} onPause={()=>{setPlaying(false);pauseTrackAudio()}} onWaiting={pauseTrackAudio} onSeeked={event=>{if(!event.currentTarget.paused)playTrackAudio()}} onEnded={()=>{setPlaying(false);pauseTrackAudio();setCurrent(duration);onEnded?.()}} onClick={()=>{const player=video.current!;player.paused?player.play():player.pause()}}/>
+      <video ref={video} src={mediaSrc} muted={audioTracks.length>0} preload="metadata" onLoadedMetadata={event=>{setDuration(event.currentTarget.duration);if(!trimEnd)setTrimEnd(event.currentTarget.duration)}} onTimeUpdate={event=>{if(!scrubbing.current)updateClock(event.currentTarget.currentTime);syncTrackAudio(event.currentTarget.currentTime)}} onPlay={()=>{setPlaying(true);playTrackAudio()}} onPlaying={playTrackAudio} onPause={()=>{setPlaying(false);pauseTrackAudio()}} onWaiting={pauseTrackAudio} onSeeked={event=>{if(!event.currentTarget.paused)playTrackAudio()}} onEnded={()=>{setPlaying(false);pauseTrackAudio();setCurrent(duration);
+        // Com o trimmer aberto, o fim do vídeo não passa para o próximo trecho:
+        // a sessão remontaria o player e o corte que a pessoa estava marcando
+        // iria embora sem aviso.
+        if(!trimOpen)onEnded?.()}} onClick={()=>{const player=video.current!;player.paused?player.play():player.pause()}}/>
       {!!activeCaptions.length&&<div className="custom-caption">{activeCaptions.map((segment,index)=>{
         const who=segment.speaker?speakers.find(speaker=>speaker.id===segment.speaker)?.label:"";
         const events=(segment.events||[]).map(event=>`[${event}]`).join(" ");
@@ -363,19 +396,19 @@ function CustomVideoPlayer({src,mediaPath,title,chapters=[],segments=[],speakers
     {!!audioTracks.length&&<div className="video-audio-mixer"><div><strong>Faixas de áudio</strong><span>Volumes independentes</span></div>{audioTracks.map(track=><label key={track.track}><audio ref={node=>{if(node)audioNodes.current.set(track.track,node);else audioNodes.current.delete(track.track)}} src={track.url} preload="metadata" onLoadedMetadata={event=>{const node=event.currentTarget;const seconds=video.current?.currentTime||0;node.currentTime=seconds;node.volume=trackVolumes[track.track]??1;if(video.current&&!video.current.paused)void node.play().catch(()=>{})}} onError={()=>setAudioTracks([])}/><span>{track.label}</span><input aria-label={`Volume de ${track.label}`} type="range" min="0" max="1" step="0.01" value={trackVolumes[track.track]??1} onChange={event=>{const value=+event.target.value;const node=audioNodes.current.get(track.track);if(node)node.volume=value;setTrackVolumes(volumes=>({...volumes,[track.track]:value}))}}/><output>{Math.round((trackVolumes[track.track]??1)*100)}%</output></label>)}</div>}
     {!!markers.length&&<div className="marker-list"><strong>Destaques</strong>{markers.map(marker=><div key={marker.id}><button onClick={()=>seek(Math.max(0,marker.offset_seconds-preroll))}><time>{videoTime(marker.offset_seconds)}</time><span>{marker.title||"Sem título · a IA nomeará na análise"}{marker.ai_generated?" ✦":""}</span></button><button title="Editar título" onClick={async()=>{const title=prompt("Título do destaque",marker.title);if(title!==null){await api.updateVideoMarker(marker.id,title);onMarkersChanged?.()}}}>✎</button><button title="Excluir" onClick={async()=>{await api.deleteVideoMarker(marker.id);onMarkersChanged?.()}}>×</button></div>)}</div>}
     {!!chapters.length&&<div className="chapter-strip"><div><strong>Capítulos</strong><span>Reproduza o trecho ou abra a leitura completa</span></div>{chapters.map((chapter,index)=><article key={`${chapter.time}-${index}`} className={current>=chapterStart(chapter)&&(index===chapters.length-1||current<chapterStart(chapters[index+1]))?"active":""}><button className="chapter-seek" title="Reproduzir a partir deste capítulo" onClick={()=>seek(chapterStart(chapter))}><time>{chapter.time}</time><strong>{chapter.title}</strong><span>{chapter.summary}</span></button><button className="chapter-read" onClick={()=>setReadingChapter(index)}>Ler capítulo</button></article>)}</div>}
-    {!chapters.length&&<div className="chapter-strip empty-chapters">A análise ainda não gerou capítulos para este vídeo.</div>}
+    {!chapters.length&&ia&&<div className="chapter-strip empty-chapters">A análise ainda não gerou capítulos para este vídeo.</div>}
     {readingChapter!==null&&chapters[readingChapter]&&<ChapterReader chapter={chapters[readingChapter]} speakers={chapterSpeakers} onRename={renameSpeaker} onClose={()=>setReadingChapter(null)} onPlay={()=>{seek(chapterStart(chapters[readingChapter]));setReadingChapter(null)}}/>}
     {chapters.some(chapter=>chapter.web_sources?.length)&&<details className="web-sources"><summary>Fontes pesquisadas na internet</summary>{chapters.flatMap(chapter=>chapter.web_sources||[]).filter((source,index,all)=>all.findIndex(item=>item.url===source.url)===index).map(source=><a href={source.url} target="_blank" rel="noreferrer" key={source.url}><strong>{source.title||source.url}</strong><span>{source.snippet}</span></a>)}</details>}
   </div>
 }
 
-function VideoViewer({file,preroll,hotkey,onRefresh,onClose}:{file:VideoFile;preroll:number;hotkey:string;onRefresh:()=>void;onClose:()=>void}){
+function VideoViewer({file,preroll,hotkey,ia,onRefresh,onShare,onClose}:{file:VideoFile;preroll:number;hotkey:string;ia:boolean;onRefresh:()=>void;onShare:()=>void;onClose:()=>void}){
   const label=(speaker?:string)=>file.speakers?.find(item=>item.id===speaker)?.label||"";
   const rename=async(speaker:{id:string;label:string})=>{if(!file.id)return;const next=prompt("Nome deste locutor",speaker.label);if(next?.trim()){await api.renameVideoSpeaker(file.id,speaker.id,next.trim());onRefresh()}};
-  return <div className="overlay video-viewer" onMouseDown={onClose}><section onMouseDown={event=>event.stopPropagation()}><header><div><span className="eyebrow">{file.available?"Playback analisado":"Análise preservada"}</span><h2>{file.title||file.name}</h2></div><button className="icon-button" onClick={onClose}>×</button></header><div className="video-viewer-body">{file.available?<CustomVideoPlayer src={file.url} mediaPath={file.path} title={file.title||file.name} chapters={file.chapters} segments={file.transcript_segments} speakers={file.speakers} markers={file.markers} videoId={file.id} preroll={preroll} hotkey={hotkey} onMarkersChanged={onRefresh}/>:<div className="missing-video viewer-missing">Arquivo removido — a análise continua disponível.</div>}{file.available&&!!file.speakers?.length&&<section className="speaker-panel"><h3>Vozes identificadas</h3><p>Ouça uma amostra e atribua nomes manualmente.</p><div>{file.speakers.map(speaker=><article key={speaker.id}><strong>{speaker.label}</strong>{file.id&&<AudioPlayer src={`/api/videos/${file.id}/speakers/${speaker.id}/sample`}/>}<button className="ghost" onClick={()=>rename(speaker)}>Renomear</button></article>)}</div></section>}{!!file.audio_events?.length&&<section className="audio-events"><h3>Eventos acústicos</h3><div>{file.audio_events.map((event,index)=><button disabled={!file.available} key={`${event.start}-${event.event}-${index}`} onClick={()=>{const target=document.querySelector<HTMLVideoElement>(".video-viewer video");if(target){target.currentTime=event.start;target.play()}}}><time>{videoTime(event.start)}</time><strong>[{event.event}]</strong><span>{Math.round(event.confidence*100)}%</span></button>)}</div></section>}{file.description&&<section className="viewer-description"><h3>Análise da IA</h3><p>{file.description}</p></section>}{file.transcript&&<details className="video-transcript"><summary>Transcrição por locutor</summary>{file.transcript_segments?.length?<div className="transcript-segments">{file.transcript_segments.map((segment,index)=><button disabled={!file.available} key={`${segment.start}-${index}`} onClick={()=>{const target=document.querySelector<HTMLVideoElement>(".video-viewer video");if(target){target.currentTime=segment.start;target.play()}}}><time>{videoTime(segment.start)}</time><span>{label(segment.speaker)&&<strong>{label(segment.speaker)}: </strong>}{segment.text} {(segment.events||[]).map(event=><em key={event}>[{event}]</em>)}</span></button>)}</div>:<p>{file.transcript}</p>}</details>}</div></section></div>
+  return <div className="overlay video-viewer" onMouseDown={onClose}><section onMouseDown={event=>event.stopPropagation()}><header><div><span className="eyebrow">{file.available?"Playback analisado":"Análise preservada"}</span><h2>{file.title||file.name}</h2></div><div className="viewer-header-actions">{file.available&&<button className="ghost share-button" onClick={onShare}>Enviar</button>}<button className="icon-button" onClick={onClose}>×</button></div></header><div className="video-viewer-body">{file.available?<CustomVideoPlayer src={file.url} mediaPath={file.path} title={file.title||file.name} chapters={file.chapters} segments={file.transcript_segments} speakers={file.speakers} markers={file.markers} videoId={file.id} preroll={preroll} hotkey={hotkey} ia={ia} onMarkersChanged={onRefresh}/>:<div className="missing-video viewer-missing">Arquivo removido — a análise continua disponível.</div>}{file.available&&!!file.speakers?.length&&<section className="speaker-panel"><h3>Vozes identificadas</h3><p>Ouça uma amostra e atribua nomes manualmente.</p><div>{file.speakers.map(speaker=><article key={speaker.id}><strong>{speaker.label}</strong>{file.id&&<AudioPlayer src={`/api/videos/${file.id}/speakers/${speaker.id}/sample`}/>}<button className="ghost" onClick={()=>rename(speaker)}>Renomear</button></article>)}</div></section>}{!!file.audio_events?.length&&<section className="audio-events"><h3>Eventos acústicos</h3><div>{file.audio_events.map((event,index)=><button disabled={!file.available} key={`${event.start}-${event.event}-${index}`} onClick={()=>{const target=document.querySelector<HTMLVideoElement>(".video-viewer video");if(target){target.currentTime=event.start;target.play()}}}><time>{videoTime(event.start)}</time><strong>[{event.event}]</strong><span>{Math.round(event.confidence*100)}%</span></button>)}</div></section>}{file.description&&<section className="viewer-description"><h3>Análise da IA</h3><p>{file.description}</p></section>}{file.transcript&&<details className="video-transcript"><summary>Transcrição por locutor</summary>{file.transcript_segments?.length?<div className="transcript-segments">{file.transcript_segments.map((segment,index)=><button disabled={!file.available} key={`${segment.start}-${index}`} onClick={()=>{const target=document.querySelector<HTMLVideoElement>(".video-viewer video");if(target){target.currentTime=segment.start;target.play()}}}><time>{videoTime(segment.start)}</time><span>{label(segment.speaker)&&<strong>{label(segment.speaker)}: </strong>}{segment.text} {(segment.events||[]).map(event=><em key={event}>[{event}]</em>)}</span></button>)}</div>:<p>{file.transcript}</p>}</details>}</div></section></div>
 }
 
-function VideoSettingsTab({tab,settings,patterns,models,ollamaOnline,busy,advanced=false,onSettings,onPatterns}:{tab:"ai"|"video";settings:VideoSettings;patterns:string;models:OllamaModel[];ollamaOnline:boolean;busy:boolean;advanced?:boolean;onSettings:(settings:VideoSettings)=>void;onPatterns:(value:string)=>void}){
+function VideoSettingsTab({tab,settings,patterns,models,ollamaOnline,busy,ia=true,advanced=false,onSettings,onPatterns}:{tab:"ai"|"video";settings:VideoSettings;patterns:string;models:OllamaModel[];ollamaOnline:boolean;busy:boolean;ia?:boolean;advanced?:boolean;onSettings:(settings:VideoSettings)=>void;onPatterns:(value:string)=>void}){
   const profile=(value:VideoSettings["analysis_profile"])=>{const values={fast:[10,24],balanced:[5,48],detailed:[2,80],custom:[settings.scan_interval_seconds,settings.max_keyframes]}[value];onSettings({...settings,analysis_profile:value,scan_interval_seconds:values[0],max_keyframes:values[1]})};
   const choices=(current:string,visionOnly=false)=>{const available=models.filter(model=>!visionOnly||!model.capabilities.length||model.capabilities.includes("vision"));return available.some(model=>model.name===current)?available:[{name:current,size:0,modified_at:"",capabilities:[]},...available]};
   const modelLabel=(model:OllamaModel)=>`${model.name}${model.size?` · ${(model.size/1024**3).toFixed(1)} GB`:" · não encontrado"}`;
@@ -383,7 +416,7 @@ function VideoSettingsTab({tab,settings,patterns,models,ollamaOnline,busy,advanc
   const [windowTest,setWindowTest]=useState<{title?:string;window_class?:string;matched?:boolean;matched_pattern?:string;message?:string}|null>(null);
   const testWindow=async()=>{setTestingWindow(true);setWindowTest({message:"Troque para o jogo ou aplicativo que deseja testar…"});await new Promise(resolve=>setTimeout(resolve,3000));try{setWindowTest(await api.testVideoWindow(patterns.split("\n").map(value=>value.trim()).filter(Boolean)))}catch(error){setWindowTest({message:error instanceof Error?error.message:"Falha ao testar a janela"})}finally{setTestingWindow(false)}};
   if(tab==="ai")return <section className="ai-settings settings-tab-card"><h3>Modelos e recursos de IA</h3><div className="form-grid ai-model-selectors"><label><span>IA visual · telas e vídeo</span><select value={settings.vision_model} onChange={event=>onSettings({...settings,vision_model:event.target.value})}>{choices(settings.vision_model,true).map(model=><option key={model.name} value={model.name}>{modelLabel(model)}</option>)}</select></label><label><span>IA de texto · sínteses e resumos</span><select value={settings.text_model} onChange={event=>onSettings({...settings,text_model:event.target.value})}>{choices(settings.text_model).map(model=><option key={model.name} value={model.name}>{modelLabel(model)}</option>)}</select></label></div><small className={`ollama-status ${ollamaOnline?"online":"offline"}`}>{ollamaOnline?`${models.length} modelos instalados no Ollama`:"Ollama indisponível; mantendo os modelos já configurados"}</small><label className="check"><input type="checkbox" checked={settings.thinking_enabled} onChange={event=>onSettings({...settings,thinking_enabled:event.target.checked})}/><span><strong>Raciocínio do modelo</strong><small>Permite análise interna mais longa; aumenta o tempo e o uso de memória.</small></span></label><label className="check"><input type="checkbox" checked={settings.web_search_enabled} onChange={event=>onSettings({...settings,web_search_enabled:event.target.checked})}/><span><strong>Pesquisa adaptativa na internet</strong><small>Pesquisa jogos, missões, itens e mecânicas quando houver dúvidas.</small></span></label>{settings.web_search_enabled&&<div className="form-grid"><label><span>Endereço do SearXNG</span><input value={settings.searxng_url} onChange={event=>onSettings({...settings,searxng_url:event.target.value})}/></label><label><span>Teto de segurança por vídeo</span><input type="number" min="5" max="500" value={settings.web_search_safety_limit} onChange={event=>onSettings({...settings,web_search_safety_limit:+event.target.value})}/></label></div>}</section>;
-  return <><section className="settings-group"><div className="settings-group-title"><span className="eyebrow">Gravação seletiva</span><h3>Captura e análise de vídeo</h3></div><div className="form-grid"><label><span>Gravador</span><select value={settings.enabled?"on":"off"} onChange={event=>onSettings({...settings,enabled:event.target.value==="on"})}><option value="on">Ativado</option><option value="off">Desativado</option></select></label><label><span>Modo de captura</span><select value={settings.capture_mode} onChange={event=>onSettings({...settings,capture_mode:event.target.value as VideoSettings["capture_mode"]})}><option value="continuous">Gravação contínua</option><option value="clips">Clipes · Replay Buffer</option></select></label><label><span>FPS</span><input type="number" min="1" max="60" value={settings.fps} onChange={event=>onSettings({...settings,fps:+event.target.value})}/></label><label><span>Parar após sair do jogo (s)</span><input type="number" min="0" max="3600" value={settings.focus_grace_seconds} onChange={event=>onSettings({...settings,focus_grace_seconds:+event.target.value})}/></label>{settings.capture_mode==="continuous"?<><label><span>Modo de arquivo</span><select value={settings.segment_seconds===0?"session":"segments"} onChange={event=>onSettings({...settings,segment_seconds:event.target.value==="session"?0:60})}><option value="session">Um arquivo por sessão</option><option value="segments">Dividir em segmentos</option></select></label><label><span>Segmento (segundos)</span><input type="number" min="10" disabled={settings.segment_seconds===0} value={settings.segment_seconds||60} onChange={event=>onSettings({...settings,segment_seconds:+event.target.value})}/></label></>:<label><span>Duração do clipe (segundos)</span><input type="number" min="10" max="300" value={settings.replay_seconds} onChange={event=>onSettings({...settings,replay_seconds:+event.target.value})}/></label>}<label><span>Frames básicos para IA</span><input type="number" min="2" max="16" value={settings.sample_frames} onChange={event=>onSettings({...settings,sample_frames:+event.target.value})}/></label><label><span>Perfil da análise</span><select value={settings.analysis_profile} onChange={event=>profile(event.target.value as VideoSettings["analysis_profile"])}><option value="fast">Rápida · 10s</option><option value="balanced">Equilibrada · 5s</option><option value="detailed">Detalhada · 2s</option><option value="custom">Personalizada</option></select></label><label><span>Intervalo da IA (s)</span><input type="number" min=".5" max="30" step=".5" disabled={settings.analysis_profile!=="custom"} value={settings.scan_interval_seconds} onChange={event=>onSettings({...settings,scan_interval_seconds:+event.target.value})}/></label><label><span>Máximo de keyframes</span><input type="number" min="8" max="160" disabled={settings.analysis_profile!=="custom"} value={settings.max_keyframes} onChange={event=>onSettings({...settings,max_keyframes:+event.target.value})}/></label></div>{settings.capture_mode==="continuous"&&<label className="check"><input type="checkbox" checked={settings.pause_other_captures} onChange={event=>onSettings({...settings,pause_other_captures:event.target.checked})}/><span>Pausar prints e áudio durante a gravação</span></label>}<label className="check"><input type="checkbox" checked={settings.delete_after_description} onChange={event=>onSettings({...settings,delete_after_description:event.target.checked})}/><span>Excluir o original depois da análise, exceto clips preservados</span></label></section><section className="marker-settings"><h3>{settings.capture_mode==="clips"?"Salvar clipe":"Destaques da gameplay"}</h3><div className="form-grid"><label><span>Atalho</span><input value={settings.marker_hotkey} onChange={event=>onSettings({...settings,marker_hotkey:event.target.value})}/></label>{settings.capture_mode==="continuous"&&<label><span>Voltar antes do evento (s)</span><input type="number" min="0" max="120" value={settings.marker_preroll_seconds} onChange={event=>onSettings({...settings,marker_preroll_seconds:+event.target.value})}/></label>}</div><p>{settings.capture_mode==="clips"?`Ao pressionar ${settings.marker_hotkey||"F8"}, o OBS salva os últimos ${settings.replay_seconds}s e toca uma confirmação. Os clipes são agrupados por sessão.`:"O atalho adiciona um marcador e toca uma confirmação. O player usa o pré-roll configurado."}</p></section><section className="marker-settings"><h3>HUD de gravação</h3><label className="check"><input type="checkbox" checked={settings.hud_enabled} onChange={event=>onSettings({...settings,hud_enabled:event.target.checked})}/><span><strong>Mostrar a HUD durante a gravação</strong><small>Uma faixa com o tempo, os medidores de microfone e Discord, e avisos quando a captura não engata.</small></span></label>{settings.hud_enabled&&<><div className="form-grid"><label><span>Onde aparecer</span><select value={settings.hud_placement} onChange={event=>onSettings({...settings,hud_placement:event.target.value as VideoSettings["hud_placement"]})}><option value="second">No outro monitor</option><option value="game">Sobre o jogo</option><option value="both">Nos dois</option></select></label><label><span>Canto</span><select value={settings.hud_corner} onChange={event=>onSettings({...settings,hud_corner:event.target.value as VideoSettings["hud_corner"]})}><option value="top-right">Superior direito</option><option value="top-left">Superior esquerdo</option><option value="bottom-right">Inferior direito</option><option value="bottom-left">Inferior esquerdo</option></select></label><label><span>Atalho para alternar modo</span><input value={settings.hud_hotkey} onChange={event=>onSettings({...settings,hud_hotkey:event.target.value})}/></label></div><label className="check"><input type="checkbox" checked={settings.hud_sound} onChange={event=>onSettings({...settings,hud_sound:event.target.checked})}/><span>Avisar com som quando a captura falhar</span></label><p>{settings.hud_placement==="game"?"Jogos em tela cheia exclusiva podem esconder a HUD — é limitação do Windows, não do Lume. Se ela sumir, use “No outro monitor”; o aviso sonoro chega de qualquer jeito.":"O atalho alterna entre Compacto, Expandido e Oculto. No modo Oculto, avisos e animações de clip ou marcador continuam aparecendo."}</p></>}</section>{advanced&&<div className="video-advanced-panel"><label className="video-pattern-field"><span>Apps e jogos monitorados · um por linha</span><textarea value={patterns} onChange={event=>onPatterns(event.target.value)} placeholder={'steam_app_[0-9]+\ngamescope\nNome do jogo'}/></label><section className={`window-test ${windowTest?.matched?"matched":windowTest?"unmatched":""}`}><div><strong>Testar detecção da janela</strong><span>Clique e troque para o jogo em até 3 segundos. Nenhuma gravação será iniciada.</span></div><button className="secondary" disabled={testingWindow||busy} onClick={testWindow}>{testingWindow?"Aguardando…":"Testar janela"}</button>{windowTest&&<p>{windowTest.message||(windowTest.matched?`Gravaria · regra: ${windowTest.matched_pattern}`:"Não gravaria · nenhuma regra correspondeu")} {windowTest.title&&<small>{windowTest.title} · {windowTest.window_class}</small>}</p>}</section></div>}</>;
+  return <><section className="settings-group"><div className="settings-group-title"><span className="eyebrow">Gravação seletiva</span><h3>Captura e análise de vídeo</h3></div><div className="form-grid"><label><span>Gravador</span><select value={settings.enabled?"on":"off"} onChange={event=>onSettings({...settings,enabled:event.target.value==="on"})}><option value="on">Ativado</option><option value="off">Desativado</option></select></label><label><span>Modo de captura</span><select value={settings.capture_mode} onChange={event=>onSettings({...settings,capture_mode:event.target.value as VideoSettings["capture_mode"]})}><option value="continuous">Gravação contínua</option><option value="clips">Clipes · Replay Buffer</option></select></label><label><span>FPS</span><input type="number" min="1" max="60" value={settings.fps} onChange={event=>onSettings({...settings,fps:+event.target.value})}/></label><label><span>Parar após sair do jogo (s)</span><input type="number" min="0" max="3600" value={settings.focus_grace_seconds} onChange={event=>onSettings({...settings,focus_grace_seconds:+event.target.value})}/></label>{settings.capture_mode==="continuous"?<><label><span>Modo de arquivo</span><select value={settings.segment_seconds===0?"session":"segments"} onChange={event=>onSettings({...settings,segment_seconds:event.target.value==="session"?0:60})}><option value="session">Um arquivo por sessão</option><option value="segments">Dividir em segmentos</option></select></label><label><span>Segmento (segundos)</span><input type="number" min="10" disabled={settings.segment_seconds===0} value={settings.segment_seconds||60} onChange={event=>onSettings({...settings,segment_seconds:+event.target.value})}/></label></>:<label><span>Duração do clipe (segundos)</span><input type="number" min="10" max="300" value={settings.replay_seconds} onChange={event=>onSettings({...settings,replay_seconds:+event.target.value})}/></label>}{ia&&<label><span>Frames básicos para IA</span><input type="number" min="2" max="16" value={settings.sample_frames} onChange={event=>onSettings({...settings,sample_frames:+event.target.value})}/></label>}{ia&&<label><span>Perfil da análise</span><select value={settings.analysis_profile} onChange={event=>profile(event.target.value as VideoSettings["analysis_profile"])}><option value="fast">Rápida · 10s</option><option value="balanced">Equilibrada · 5s</option><option value="detailed">Detalhada · 2s</option><option value="custom">Personalizada</option></select></label>}{ia&&<label><span>Intervalo da IA (s)</span><input type="number" min=".5" max="30" step=".5" disabled={settings.analysis_profile!=="custom"} value={settings.scan_interval_seconds} onChange={event=>onSettings({...settings,scan_interval_seconds:+event.target.value})}/></label>}{ia&&<label><span>Máximo de keyframes</span><input type="number" min="8" max="160" disabled={settings.analysis_profile!=="custom"} value={settings.max_keyframes} onChange={event=>onSettings({...settings,max_keyframes:+event.target.value})}/></label>}</div>{settings.capture_mode==="continuous"&&<label className="check"><input type="checkbox" checked={settings.pause_other_captures} onChange={event=>onSettings({...settings,pause_other_captures:event.target.checked})}/><span>Pausar prints e áudio durante a gravação</span></label>}{ia&&<label className="check"><input type="checkbox" checked={settings.delete_after_description} onChange={event=>onSettings({...settings,delete_after_description:event.target.checked})}/><span>Excluir o original depois da análise, exceto clips preservados</span></label>}</section><section className="marker-settings"><h3>{settings.capture_mode==="clips"?"Salvar clipe":"Destaques da gameplay"}</h3><div className="form-grid"><label><span>Atalho</span><input value={settings.marker_hotkey} onChange={event=>onSettings({...settings,marker_hotkey:event.target.value})}/></label>{settings.capture_mode==="clips"&&<label><span>Segurar por (s)</span><input type="number" min=".2" max="3" step=".1" value={settings.hotkey_hold_seconds} onChange={event=>onSettings({...settings,hotkey_hold_seconds:+event.target.value})}/></label>}{settings.capture_mode==="continuous"&&<label><span>Voltar antes do evento (s)</span><input type="number" min="0" max="120" value={settings.marker_preroll_seconds} onChange={event=>onSettings({...settings,marker_preroll_seconds:+event.target.value})}/></label>}</div><p>{settings.capture_mode==="clips"?`Tocar ${settings.marker_hotkey||"F8"} salva os últimos ${settings.replay_seconds}s; tocar de novo dentro desse tempo estende o mesmo clipe em vez de abrir outro, e por isso ele chega à biblioteca quando a janela fecha. Segurar por ${settings.hotkey_hold_seconds||0.6}s abre uma gravação longa — o clipe emendado com tudo o que vier depois, até você segurar de novo; durante ela o toque vira marcador. Cada ação tem som e aviso próprios na HUD.`:"O atalho adiciona um marcador e toca uma confirmação. O player usa o pré-roll configurado."}</p></section><section className="marker-settings"><h3>HUD de gravação</h3><label className="check"><input type="checkbox" checked={settings.hud_enabled} onChange={event=>onSettings({...settings,hud_enabled:event.target.checked})}/><span><strong>Mostrar a HUD durante a gravação</strong><small>Uma faixa com o tempo, os medidores de microfone e Discord, e avisos quando a captura não engata.</small></span></label>{settings.hud_enabled&&<><div className="form-grid"><label><span>Onde aparecer</span><select value={settings.hud_placement} onChange={event=>onSettings({...settings,hud_placement:event.target.value as VideoSettings["hud_placement"]})}><option value="second">No outro monitor</option><option value="game">Sobre o jogo</option><option value="both">Nos dois</option></select></label><label><span>Canto</span><select value={settings.hud_corner} onChange={event=>onSettings({...settings,hud_corner:event.target.value as VideoSettings["hud_corner"]})}><option value="top-right">Superior direito</option><option value="top-left">Superior esquerdo</option><option value="bottom-right">Inferior direito</option><option value="bottom-left">Inferior esquerdo</option></select></label><label><span>Atalho para alternar modo</span><input value={settings.hud_hotkey} onChange={event=>onSettings({...settings,hud_hotkey:event.target.value})}/></label></div><label className="check"><input type="checkbox" checked={settings.hud_sound} onChange={event=>onSettings({...settings,hud_sound:event.target.checked})}/><span>Avisar com som quando a captura falhar</span></label><p>{settings.hud_placement==="game"?"Jogos em tela cheia exclusiva podem esconder a HUD — é limitação do Windows, não do Lume. Se ela sumir, use “No outro monitor”; o aviso sonoro chega de qualquer jeito.":"O atalho alterna entre Compacto, Expandido e Oculto. No modo Oculto, avisos e animações de clip ou marcador continuam aparecendo."}</p></>}</section>{advanced&&<div className="video-advanced-panel"><label className="video-pattern-field"><span>Apps e jogos monitorados · um por linha</span><textarea value={patterns} onChange={event=>onPatterns(event.target.value)} placeholder={'steam_app_[0-9]+\ngamescope\nNome do jogo'}/></label><section className={`window-test ${windowTest?.matched?"matched":windowTest?"unmatched":""}`}><div><strong>Testar detecção da janela</strong><span>Clique e troque para o jogo em até 3 segundos. Nenhuma gravação será iniciada.</span></div><button className="secondary" disabled={testingWindow||busy} onClick={testWindow}>{testingWindow?"Aguardando…":"Testar janela"}</button>{windowTest&&<p>{windowTest.message||(windowTest.matched?`Gravaria · regra: ${windowTest.matched_pattern}`:"Não gravaria · nenhuma regra correspondeu")} {windowTest.title&&<small>{windowTest.title} · {windowTest.window_class}</small>}</p>}</section></div>}</>;
 }
 
 function AppCaptureRules({settings,patterns,advanced,onAdvanced,onSettings,onPatterns}:{settings:VideoSettings;patterns:string;advanced:boolean;onAdvanced:(value:boolean)=>void;onSettings:(settings:VideoSettings)=>void;onPatterns:(patterns:string)=>void}){
@@ -445,46 +478,267 @@ function SummaryView({ summary, onOpenMedia }: { summary: DaySummary|null; onOpe
   </div>;
 }
 
-function ActivitiesView({items,running,onGenerate,onOpen}:{items:ActivitySession[];running:boolean;onGenerate:()=>void;onOpen:(frame:ActivitySession["key_frames"][number])=>void}){
-  return <div className="visual-activities"><div className="activity-overview"><div><strong>{items.length} sessões visuais</strong><span>{items.reduce((total,item)=>total+item.source_count,0)} prints analisados em sequência</span></div><button className="primary" disabled={running} onClick={onGenerate}>{running?"Analisando sequências…":items.length?"Reanalisar atividades":"Analisar atividades"}</button></div>{items.map(item=>{const start=new Date(item.started_at);const end=new Date(item.ended_at);const minutes=Math.max(0,Math.round((end.getTime()-start.getTime())/60000));return <article className="visual-activity" key={item.id}><header><div className="activity-app-icon">{item.app.slice(0,1).toUpperCase()}</div><div><span>{item.app}</span><h2>{item.title}</h2><small>{start.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}–{end.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})} · {item.source_count} prints{minutes?` · cerca de ${minutes} min`:""}</small></div></header>{item.key_frames.length>0&&<div className="activity-filmstrip">{item.key_frames.map(frame=><button key={frame.id} onClick={()=>onOpen(frame)}>{frame.url?<img src={frame.url} loading="lazy"/>:<span>Imagem removida</span>}<time>{new Date(frame.captured_at).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})}</time>{frame.preserved&&<b>◆</b>}</button>)}</div>}<div className="activity-story">{item.narrative.split(/\n+/).filter(Boolean).map((paragraph,index)=><p key={index}>{paragraph}</p>)}</div>{item.events.length>0&&<details><summary>Linha de acontecimentos · {item.events.length}</summary><ol>{item.events.map((event,index)=><li key={index}>{event}</li>)}</ol></details>}<div className="tags">{item.tags.map(tag=><span key={tag}>{tag}</span>)}</div></article>})}{!items.length&&!running&&<div className="result">Gere a análise para transformar os prints do dia em sessões contínuas por aplicativo.</div>}</div>
+function EditingFolderModal({settings,onSettings,onClose,onError}:{settings:VideoSettings|null;onSettings:(settings:VideoSettings)=>void;onClose:()=>void;onError:(message:string)=>void}){
+  const [folder,setFolder]=useState<EditingFolder|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [fps,setFps]=useState(String(settings?.resolve_fps??0));
+  const [start,setStart]=useState(settings?.resolve_start_timecode||"01:00:00:00");
+  const [note,setNote]=useState("");
+  const load=()=>api.editingFolder().then(setFolder).catch(error=>onError((error as Error).message));
+  useEffect(()=>{void load()},[]);
+  const remove=async(item:EditingEntry)=>{
+    setBusy(true);
+    try{await api.removeFromEditing(item.name);await load();setNote(`${item.name} saiu da pasta — o vídeo original continua no lugar.`)}
+    catch(error){onError((error as Error).message)} finally{setBusy(false)}
+  };
+  const saveTimeline=async()=>{
+    if(!settings)return;setBusy(true);
+    try{const saved=await api.saveVideoSettings({...settings,resolve_fps:Math.max(0,Number(fps)||0),resolve_start_timecode:start});onSettings(saved);setNote("Os próximos EDLs vão usar esses valores.")}
+    catch(error){onError((error as Error).message)} finally{setBusy(false)}
+  };
+  return <Modal title="Pasta de edição" className="editing-modal" onClose={onClose}>
+    <p className="help">Cada clipe enviado para cá ganha um nome legível e um <code>.edl</code> ao lado com os seus marcadores e os capítulos da IA. É um atalho no disco, não uma cópia: o arquivo original não sai do lugar e nada é duplicado.</p>
+    <div className="editing-path"><code>{folder?.root||"…"}</code><button className="ghost" disabled={busy} onClick={()=>void api.openEditingFolder().catch(error=>onError((error as Error).message))}>Abrir pasta</button><button className="ghost" disabled={!folder} onClick={()=>{void navigator.clipboard?.writeText(folder?.root||"");setNote("Caminho copiado.")}}>Copiar caminho</button></div>
+    <div className="editing-timeline">
+      <label><span>FPS da timeline</span><input type="number" min="0" max="120" value={fps} onChange={event=>setFps(event.target.value)}/></label>
+      <label><span>Timecode inicial</span><input value={start} onChange={event=>setStart(event.target.value)} placeholder="01:00:00:00" spellCheck={false}/></label>
+      <button className="secondary" disabled={busy||!settings} onClick={saveTimeline}>Salvar</button>
+      <small>0 usa o FPS do próprio clipe. O timecode precisa ser o mesmo do começo da sua timeline no Resolve — o padrão dele é 01:00:00:00.</small>
+    </div>
+    {note&&<div className="result">{note}</div>}
+    <div className="editing-list">
+      {folder?.items.map(item=><article key={item.name}>
+        <div><strong>{item.name}</strong><small>{bytes(item.bytes)}{item.edl?` · ${item.edl}`:" · sem marcadores"}</small></div>
+        <button className="ghost" disabled={busy} onClick={()=>void remove(item)}>Tirar da pasta</button>
+      </article>)}
+      {folder&&!folder.items.length&&<div className="result">Nada enviado para edição ainda. Use “Enviar para edição” em um vídeo ou sessão.</div>}
+    </div>
+    {!!folder?.items.length&&<p className="help editing-howto">No Resolve: importe os vídeos e, com a timeline montada, clique nela com o botão direito no Media Pool → <b>Timelines › Import › Timeline Markers from EDL</b>.</p>}
+    <footer><span className="editing-total">{folder?`${folder.items.length} ${folder.items.length===1?"item":"itens"} · ${bytes(folder.bytes)}`:""}</span><button className="primary" onClick={onClose}>Fechar</button></footer>
+  </Modal>;
+}
+
+function PromptsTab({items,drafts,busy,onDraft,onReset}:{items:PromptSetting[];drafts:Record<string,string>;busy:boolean;onDraft:(key:string,value:string)=>void;onReset:(item:PromptSetting)=>void}){
+  const groups=items.reduce<string[]>((all,item)=>all.includes(item.group)?all:[...all,item.group],[]);
+  return <section className="settings-group prompts-tab">
+    <div className="settings-group-title"><div><span className="eyebrow">Prompts</span><h3>O que o Lume pede aos modelos</h3><p>Cada análise tem um texto-base. Reescreva o que quiser: o que você não alterar continua acompanhando as atualizações do Lume. As variáveis entre chaves duplas são preenchidas na hora da análise e precisam continuar no texto — sem elas o modelo perde a informação.</p></div></div>
+    {groups.map(group=><div className="prompt-group" key={group}>
+      <h4>{group}</h4>
+      {items.filter(item=>item.group===group).map(item=>{
+        const draft=drafts[item.key]??item.text;
+        const changed=draft!==item.text;
+        return <details className="prompt-card" key={item.key}>
+          <summary><strong>{item.label}</strong>{changed?<em className="dirty">não salvo</em>:item.customized?<em>personalizado</em>:null}<i aria-hidden="true">›</i><small>{item.description}</small></summary>
+          <div className="prompt-vars">{item.variables.map(variable=><span key={variable.name} title={variable.detail}>{"{{"+variable.name+"}}"}</span>)}</div>
+          <textarea className="prompt-editor" spellCheck={false} value={draft} onChange={event=>onDraft(item.key,event.target.value)}/>
+          <div className="prompt-card-foot"><button type="button" className="ghost" disabled={busy||(!item.customized&&draft===item.default)} onClick={()=>onReset(item)}>Restaurar padrão</button><small>{draft.length.toLocaleString("pt-BR")} caracteres</small></div>
+        </details>;
+      })}
+    </div>)}
+  </section>;
+}
+
+type ShareTarget = {path:string;title:string;bytes:number;game?:string;capturedAt?:string};
+
+function ShareClipModal({target,onClose,onError}:{target:ShareTarget;onClose:()=>void;onError:(message:string)=>void}){
+  const [limit,setLimit]=useState(20);
+  const [light,setLight]=useState<LightVersion|null>(null);
+  const [upload,setUpload]=useState<ShareUpload|null>(null);
+  const [host,setHost]=useState("");
+  const [expires,setExpires]=useState("72h");
+  const [agreed,setAgreed]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [note,setNote]=useState("");
+  const chosen=upload?.hosts.find(item=>item.name===host)||upload?.hosts[0];
+  const preparing=light?.status==="preparing";
+  const sending=upload?.status==="sending";
+  const load=async(limitMb:number)=>{
+    try{const [state,shipping]=await Promise.all([api.lightVersion(target.path,limitMb),api.shareUpload(target.path)]);
+      setLight(state);setUpload(shipping);
+    }catch(error){onError((error as Error).message)}
+  };
+  useEffect(()=>{void load(limit)},[limit,target.path]);
+  // O padrão vem do servidor, mas só enquanto ninguém escolheu: sem esta
+  // guarda, cada volta do andamento devolvia o host escolhido para o padrão.
+  useEffect(()=>{if(!host&&upload?.default_host)setHost(upload.default_host)},[host,upload]);
+  // Só pergunta de novo enquanto há algo acontecendo: um painel aberto e parado
+  // não precisa bater no backend a cada segundo.
+  useEffect(()=>{
+    if(!preparing&&!sending)return;
+    const timer=setInterval(()=>void load(limit),1500);
+    return()=>clearInterval(timer);
+  },[preparing,sending,limit,target.path]);
+  const generate=async()=>{
+    setBusy(true);setNote("");
+    try{setLight(await api.startLightVersion(target.path,limit))}
+    catch(error){onError((error as Error).message)} finally{setBusy(false)}
+  };
+  const publish=async(useLight:boolean)=>{
+    setBusy(true);setNote("");
+    try{setUpload(await api.startShareUpload(target.path,chosen?.name||host,expires,useLight,useLight?limit:null))}
+    catch(error){onError((error as Error).message)} finally{setBusy(false)}
+  };
+  const copy=async(url:string)=>{
+    try{await navigator.clipboard.writeText(url);setNote("Link copiado.")}
+    catch{setNote(url)}
+  };
+  const forget=async(id:number)=>{
+    setBusy(true);
+    try{await api.forgetSharedLink(id);await load(limit);setNote("Link esquecido aqui. Ele continua no ar até o host apagá-lo.")}
+    catch(error){onError((error as Error).message)} finally{setBusy(false)}
+  };
+  const ready=light?.status==="ready";
+  const fits=light?.status==="fits";
+  const plan=light?.plan;
+  return <Modal title="Enviar clipe" className="share-modal" onClose={onClose}>
+    <p className="help">O arquivo continua onde está. O que muda é o nome oferecido no download — <code>{light?.name?.replace(/ \(\d+ MB\)\.mp4$/,".mp4")||target.title}</code> — para você achá-lo no seletor do Discord.</p>
+    <dl className="share-facts">
+      <div><dt>Clipe</dt><dd>{[target.game,target.capturedAt&&new Date(target.capturedAt).toLocaleString("pt-BR")].filter(Boolean).join(" · ")||target.title}</dd></div>
+      <div><dt>Original</dt><dd>{bytes(light?.source_bytes??target.bytes)}</dd></div>
+    </dl>
+    <div className="share-row">
+      <a className="primary share-download" href={api.downloadVideoUrl(target.path)} download>Baixar original</a>
+      <label className="share-limit"><span>Teto</span>
+        <select value={limit} disabled={preparing} onChange={event=>setLimit(Number(event.target.value))}>
+          {(light?.presets||[10,20,50,500]).map(value=><option key={value} value={value}>{value} MB</option>)}
+        </select>
+      </label>
+    </div>
+    <section className="share-light">
+      {fits&&<p className="share-ok">O original já cabe em {limit} MB — recodificar só pioraria a imagem.</p>}
+      {light?.status==="too_big"&&<p className="share-warn">{light.error}</p>}
+      {!fits&&light?.status!=="too_big"&&<>
+        <p>{plan?<>Versão leve: <b>{plan.height}p{plan.fps}</b>, uma faixa de áudio, ≈ {bytes(plan.estimated_bytes)}.</>:"Calculando a versão leve…"}</p>
+        {preparing&&<div className="share-progress"><div style={{width:`${light?.progress||0}%`}}/><span>{light?.progress||0}%</span></div>}
+        {light?.status==="error"&&<p className="share-warn">{light.error}</p>}
+        <div className="share-row">
+          {ready
+            ?<a className="primary" href={light!.url} download>Baixar versão leve · {bytes(light!.bytes)}</a>
+            :<button className="primary" disabled={busy||preparing||!plan} onClick={()=>void generate()}>{preparing?"Gerando…":"Gerar versão leve"}</button>}
+          {preparing&&<button className="ghost" onClick={()=>void api.cancelLightVersion(target.path).then(()=>load(limit))}>Cancelar</button>}
+        </div>
+      </>}
+    </section>
+    <section className="share-link">
+      <h3>Link público</h3>
+      <p className="help">O arquivo <b>sai do seu PC</b> e vai para o {chosen?.label||host}. Quem tiver o link assiste — não tem senha nem login.{chosen?.permanent?" Este host é permanente: só ele pode apagar depois.":` O link expira em ${expires}.`}</p>
+      <div className="share-row">
+        <label><span>Host</span><select value={chosen?.name||""} onChange={event=>{setHost(event.target.value);setAgreed(false)}}>
+          {(upload?.hosts||[]).map(item=><option key={item.name} value={item.name}>{item.label} · {item.permanent?"permanente":"temporário"} · até {bytes(item.max_bytes)}</option>)}
+        </select></label>
+        {!!chosen?.expiry_options.length&&<label><span>Expira em</span><select value={expires} onChange={event=>setExpires(event.target.value)}>
+          {chosen.expiry_options.map(option=><option key={option} value={option}>{option}</option>)}
+        </select></label>}
+      </div>
+      <label className="check"><input type="checkbox" checked={agreed} onChange={event=>setAgreed(event.target.checked)}/><span>Entendi que o vídeo ficará público para quem tiver o link.</span></label>
+      {sending&&<div className="share-progress"><div style={{width:`${upload?.percent||0}%`}}/><span>{upload?.percent||0}% · {bytes(upload?.sent_bytes||0)}</span></div>}
+      {upload?.status==="error"&&<p className="share-warn">{upload.error}</p>}
+      <div className="share-row">
+        <button className="primary" disabled={busy||sending||!agreed||!ready} onClick={()=>void publish(true)}>Enviar versão leve e gerar link</button>
+        {fits
+          ?<button className="ghost" disabled={busy||sending||!agreed} onClick={()=>void publish(false)}>Enviar o original</button>
+          :<button className="ghost" disabled={busy||sending||!agreed} onClick={()=>{if(confirm("O original leva as faixas isoladas do seu microfone e do Discord dos seus amigos. Enviar assim mesmo?"))void publish(false)}}>Enviar o original…</button>}
+        {sending&&<button className="ghost" onClick={()=>void api.cancelShareUpload(target.path).then(()=>load(limit))}>Cancelar envio</button>}
+      </div>
+      {!ready&&!fits&&<p className="help">Gere a versão leve primeiro, ou envie o original.</p>}
+      {!!upload?.links.length&&<ul className="share-links">{upload.links.map(item=><li key={item.id}>
+        <a href={item.url} target="_blank" rel="noreferrer">{item.url.replace(/^https:\/\//,"")}</a>
+        <small>{item.host} · {bytes(item.bytes)} · {item.expires_at?(item.expired?"expirado":`expira ${new Date(item.expires_at).toLocaleString("pt-BR")}`):"permanente"}</small>
+        <button className="ghost" onClick={()=>void copy(item.url)}>Copiar</button>
+        <button className="ghost" onClick={()=>void forget(item.id)}>Esquecer</button>
+      </li>)}</ul>}
+    </section>
+    {note&&<p className="share-note">{note}</p>}
+  </Modal>;
 }
 
 function Modal({ title, onClose, children, className="" }: { title: string; onClose: () => void; children: React.ReactNode; className?:string }) {
-  return <div className="overlay" onMouseDown={onClose}><section className={`modal ${className}`} onMouseDown={e => e.stopPropagation()}>
-    <header><div><span className="eyebrow">Configuração local</span><h2>{title}</h2></div><button className="icon-button" onClick={onClose}>×</button></header>
+  const headingId=useId();
+  const modalRef=useRef<HTMLElement>(null);
+  useEffect(()=>{
+    const previous=document.activeElement instanceof HTMLElement?document.activeElement:null;
+    modalRef.current?.focus();
+    return()=>{if(previous?.isConnected)previous.focus()};
+  },[]);
+  return <div className="overlay" onMouseDown={onClose}><section ref={modalRef} className={`modal ${className}`} role="dialog" aria-modal="true" aria-labelledby={headingId} tabIndex={-1} onMouseDown={e => e.stopPropagation()} onKeyDown={event=>{
+    if(event.key==="Escape"){event.preventDefault();event.stopPropagation();onClose()}
+    if(event.key==="Tab"){
+      const controls=Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"],summary')).filter(element=>element.getClientRects().length>0);
+      const first=controls[0],last=controls[controls.length-1];
+      if(!first){event.preventDefault();return}
+      if(event.shiftKey&&(document.activeElement===first||document.activeElement===event.currentTarget)){event.preventDefault();last.focus()}
+      else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}
+    }
+  }}>
+    <header><div><span className="eyebrow">Configuração local</span><h2 id={headingId}>{title}</h2></div><button className="icon-button" aria-label="Fechar janela" onClick={onClose}>×</button></header>
     {children}
   </section></div>;
 }
 
-function VideoThumbnail({path,title,onOpen}:{path:string;title:string;onOpen:()=>void}){
+function VideoThumbnail({path,title,src,onOpen}:{path:string;title:string;src?:string;onOpen:()=>void}){
   const [failed,setFailed]=useState(false);
+  // A URL versionada vem do backend; sem ela, um corte mantinha a miniatura
+  // antiga em cache por um dia.
+  const source=src||`/api/video-thumbnail?path=${encodeURIComponent(path)}`;
   return <button type="button" className="video-thumbnail" onClick={onOpen} aria-label={`Abrir player: ${title}`}>
     <span><b>▶</b><small>Abrir player</small></span>
-    {!failed&&<img src={`/api/video-thumbnail?path=${encodeURIComponent(path)}`} alt="" loading="lazy" onError={()=>setFailed(true)}/>}
+    {!failed&&<img src={source} alt="" loading="lazy" onError={()=>setFailed(true)}/>}
   </button>
 }
 
-function SessionCard({session,busy,selecting=false,selected=false,onToggle=()=>{},onOpen,onAnalyze,onDelete,onContext}:{session:VideoSession;busy:boolean;selecting?:boolean;selected?:boolean;onToggle?:()=>void;onOpen:(session:VideoSession)=>void;onAnalyze:(session:VideoSession)=>void;onDelete:(session:VideoSession)=>void;onContext:(session:VideoSession)=>void}){
+type ContextMenuAction={label:string;hint?:string;danger?:boolean;disabled?:boolean;run:()=>void};
+
+function ContextMenu({x,y,title,items,onClose}:{x:number;y:number;title?:string;items:ContextMenuAction[];onClose:()=>void}){
+  const menuRef=useRef<HTMLDivElement>(null);
+  const left=Math.max(8,Math.min(x,window.innerWidth-248));
+  const top=Math.max(8,Math.min(y,window.innerHeight-(title?56:18)-items.length*38));
+  useEffect(()=>{
+    const dismiss=(event:Event)=>{if(!menuRef.current?.contains(event.target as Node))onClose()};
+    const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")onClose()};
+    const close=()=>onClose();
+    document.addEventListener("pointerdown",dismiss);
+    document.addEventListener("keydown",escape);
+    window.addEventListener("blur",close);
+    window.addEventListener("resize",close);
+    window.addEventListener("scroll",close,true);
+    menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    return()=>{document.removeEventListener("pointerdown",dismiss);document.removeEventListener("keydown",escape);window.removeEventListener("blur",close);window.removeEventListener("resize",close);window.removeEventListener("scroll",close,true)};
+  },[onClose]);
+  return <div ref={menuRef} className="custom-context-menu" style={{left,top}} role="menu" onContextMenu={event=>event.preventDefault()}>
+    {title&&<div className="custom-context-title">{title}</div>}
+    {items.map((item,index)=><button type="button" role="menuitem" className={item.danger?"danger":""} disabled={item.disabled} key={`${item.label}-${index}`} onClick={()=>{onClose();item.run()}}><span>{item.label}</span>{item.hint&&<kbd>{item.hint}</kbd>}</button>)}
+  </div>
+}
+
+type MenuPoint={x:number;y:number};
+
+function CardMenuButton({label,onMenu}:{label:string;onMenu:(point:MenuPoint)=>void}){
+  return <button type="button" className="card-menu" aria-haspopup="menu" aria-label={label} title={`${label} — ou clique com o botão direito no card`}
+    onClick={event=>{const box=event.currentTarget.getBoundingClientRect();onMenu({x:box.left,y:box.bottom+4})}}>⋯</button>;
+}
+
+function SessionCard({session,selecting=false,selected=false,onToggle=()=>{},onOpen,onMenu}:{session:VideoSession;selecting?:boolean;selected?:boolean;onToggle?:()=>void;onOpen:(session:VideoSession)=>void;onMenu:(session:VideoSession,point:MenuPoint)=>void}){
   const preview=session.clips.find(clip=>clip.available);
   const running=["queued","processing"].includes(session.status);
   const selectable=!running&&session.clip_count>0;
-  return <article className={`session-card ${selecting?"video-selectable":""} ${selected?"video-selected":""}`}>
-    {selecting&&selectable&&<button type="button" className="video-selection-hitbox" aria-pressed={selected} aria-label={`${selected?"Remover":"Selecionar"} sessão ${session.name}`} onClick={onToggle}/>} 
+  return <article className={`session-card ${selecting?"video-selectable":""} ${selected?"video-selected":""}`} onContextMenu={selecting?undefined:event=>{event.preventDefault();onMenu(session,{x:event.clientX,y:event.clientY})}}>
+    {selecting&&selectable&&<button type="button" className="video-selection-hitbox" aria-pressed={selected} aria-label={`${selected?"Remover":"Selecionar"} sessão ${session.name}`} onClick={onToggle}/>}
     {selecting&&<div className="video-selection-indicator"><b>{selectable&&selected?"✓":""}</b><span>{selectable?(selected?"Selecionada":"Selecionar sessão"):running?"Em processamento":"Sem clipes"}</span></div>}
-    {preview?<VideoThumbnail path={preview.path} title={session.name} onOpen={()=>onOpen(session)}/>:<div className={`session-cover${session.clip_count?" session-cover-openable":""}`} role={session.clip_count?"button":undefined} tabIndex={session.clip_count?0:undefined} onClick={session.clip_count&&!selecting?()=>onOpen(session):undefined} onKeyDown={session.clip_count&&!selecting?event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onOpen(session)}}:undefined}><b>{session.clip_count}</b><span>{session.clip_count?"clipes · análise preservada":"clipes na sessão"}</span></div>}
+    {preview?<VideoThumbnail path={preview.path} src={preview.thumbnail_url} title={session.name} onOpen={()=>onOpen(session)}/>:<div className={`session-cover${session.clip_count?" session-cover-openable":""}`} role={session.clip_count?"button":undefined} tabIndex={session.clip_count?0:undefined} onClick={session.clip_count&&!selecting?()=>onOpen(session):undefined} onKeyDown={session.clip_count&&!selecting?event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onOpen(session)}}:undefined}><b>{session.clip_count}</b><span>{session.clip_count?"clipes · análise preservada":"clipes na sessão"}</span></div>}
     <span className="session-badge">Sessão completa</span>
     <h3>{session.name}</h3>
     <small>{new Date(session.captured_at).toLocaleString("pt-BR")} · {session.clip_count} clipes · {session.duration_seconds>0?`duração total ${sessionDuration(session.duration_seconds)}`:"duração indisponível"} · {bytes(session.bytes)} · {session.status}</small>
     {session.summary&&<p className="session-summary-preview">{session.summary}</p>}
-    {!selecting&&<div className="session-actions"><button className="open-video" disabled={!session.clip_count} onClick={()=>onOpen(session)}>{preview?"Abrir sessão":"Abrir análise"}</button><button className="ghost" onClick={()=>onContext(session)}>Contexto</button><button className="secondary" disabled={busy||running||!session.clip_count} onClick={()=>onAnalyze(session)}>{running?`${session.stage} · ${session.progress}%`:"Analisar sessão completa"}</button><button className="delete-video" disabled={busy||running} onClick={()=>onDelete(session)}>Excluir</button></div>}
+    {!selecting&&<div className="session-actions"><button className="open-video" disabled={!session.clip_count} onClick={()=>onOpen(session)}>{preview?"Abrir sessão":"Abrir análise"}</button>{running&&<span className="card-progress">{session.stage} · {session.progress}%</span>}<CardMenuButton label={`Ações da sessão ${session.name}`} onMenu={point=>onMenu(session,point)}/></div>}
   </article>
 }
 
-function VideoCard({file,busy,selecting,selected,onToggle,onContext,onDate,onOpen,onAnalyze,onPreserve,onDelete,onVideoRef,onSeek}:{file:VideoFile;busy:boolean;selecting:boolean;selected:boolean;onToggle:()=>void;onContext:()=>void;onDate:()=>void;onOpen:()=>void;onAnalyze:()=>void;onPreserve:()=>void;onDelete:()=>void;onVideoRef:(element:HTMLVideoElement|null)=>void;onSeek:(seconds:number)=>void}){
-  return <article className={`${selecting?"video-selectable":""} ${selected?"video-selected":""}`}>
-    {selecting&&file.available&&<button type="button" className="video-selection-hitbox" aria-pressed={selected} aria-label={`${selected?"Remover":"Selecionar"} ${file.title||file.name}`} onClick={onToggle}/>} 
+function VideoCard({file,selecting,selected,onToggle,onOpen,onMenu,onShare,onVideoRef,onSeek}:{file:VideoFile;selecting:boolean;selected:boolean;onToggle:()=>void;onOpen:()=>void;onMenu:(file:VideoFile,point:MenuPoint)=>void;onShare:()=>void;onVideoRef:(element:HTMLVideoElement|null)=>void;onSeek:(seconds:number)=>void}){
+  const analyzing=["queued","processing"].includes(file.status);
+  return <article className={`${selecting?"video-selectable":""} ${selected?"video-selected":""}`} onContextMenu={selecting?undefined:event=>{event.preventDefault();onMenu(file,{x:event.clientX,y:event.clientY})}}>
+    {selecting&&file.available&&<button type="button" className="video-selection-hitbox" aria-pressed={selected} aria-label={`${selected?"Remover":"Selecionar"} ${file.title||file.name}`} onClick={onToggle}/>}
     {selecting&&<div className="video-selection-indicator"><b>{file.available&&selected?"✓":""}</b><span>{file.available?(selected?"Selecionado":"Selecionar"):"Indisponível"}</span></div>}
-    {file.available?<VideoThumbnail path={file.path} title={file.title||file.name} onOpen={onOpen}/>:<div className="missing-video standalone-missing"><strong>Arquivo removido</strong><span>A análise foi preservada</span></div>}
+    {file.available?<VideoThumbnail path={file.path} src={file.thumbnail_url} title={file.title||file.name} onOpen={onOpen}/>:<div className="missing-video standalone-missing"><strong>Arquivo removido</strong><span>A análise foi preservada</span></div>}
     <h3>{file.title||file.name}</h3>
     <small>{new Date(file.captured_at||file.modified_at).toLocaleString("pt-BR")} · {bytes(file.bytes)} · {file.status}</small>
     {file.game&&<div className="video-tags"><span className="tag game">▣ {file.game}</span></div>}
@@ -492,19 +746,36 @@ function VideoCard({file,busy,selecting,selected,onToggle,onContext,onDate,onOpe
     {!!file.chapters?.length&&<details className="video-chapters"><summary>{file.chapters.length} capítulos analisados</summary>{file.chapters.map(chapter=><section key={chapter.time}><time>{chapter.time}</time><h4>{chapter.title}</h4><p>{chapter.summary}</p>{!!chapter.events?.length&&<ul>{chapter.events.map((event,index)=><li key={index}>{event}</li>)}</ul>}</section>)}</details>}
     {file.transcript&&<details className="video-transcript"><summary>Transcrição sincronizada</summary>{file.transcript_segments?.length?<div className="transcript-segments">{file.transcript_segments.map((segment,index)=><button disabled={!file.available} key={`${segment.start}-${index}`} onClick={()=>onSeek(segment.start)}><time>{`${Math.floor(segment.start/60)}:${Math.floor(segment.start%60).toString().padStart(2,"0")}`}</time><span>{segment.text}</span></button>)}</div>:<p>{file.transcript}</p>}</details>}
     {file.error&&<p className="video-error">{file.error}</p>}
-    {!selecting&&<div><button className="open-video" onClick={onOpen}>{file.available?"Abrir player":"Abrir análise"}</button><button className="ghost" onClick={onContext}>Contexto</button><button className="ghost" onClick={onDate}>Data</button><button className="secondary" disabled={!file.available||busy||["queued","processing"].includes(file.status)} onClick={onAnalyze}>{["queued","processing"].includes(file.status)?`${file.stage||"Analisando"} · ${file.progress||0}%`:"Analisar áudio + vídeo"}</button><button className="ghost" disabled={!file.available||busy} onClick={onPreserve}>Preservar clip</button><button className="delete-video" disabled={busy||["queued","processing"].includes(file.status)} onClick={onDelete}>{file.available?"Excluir":"Excluir análise"}</button></div>}
+    {!selecting&&<div className="video-actions"><button className="open-video" onClick={onOpen}>{file.available?"Abrir player":"Abrir análise"}</button>{file.available&&<button className="ghost share-button" onClick={onShare}>Enviar</button>}{analyzing&&<span className="card-progress">{file.stage||"Analisando"} · {file.progress||0}%</span>}<CardMenuButton label={`Ações de ${file.title||file.name}`} onMenu={point=>onMenu(file,point)}/></div>}
   </article>
 }
 
-function SessionViewer({session,preroll,hotkey,onRefresh,onEditDate,onClose}:{session:VideoSession;preroll:number;hotkey:string;onRefresh:()=>void;onEditDate:(clip:VideoSession["clips"][number])=>void;onClose:()=>void}){
+//: Hora do dia do trecho — é por ela que a pessoa lembra a jogada ("aquela das
+//: onze e pouco"), não pelo número do arquivo.
+function clipClock(value:string){
+  const moment=new Date(value);
+  return Number.isNaN(moment.getTime())?"--:--":moment.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+}
+
+function SessionViewer({session,preroll,hotkey,busy,ia,onRefresh,onEditDate,onShare,onRemoveClip,onDeleteClip,onClose}:{session:VideoSession;preroll:number;hotkey:string;busy:boolean;ia:boolean;onRefresh:()=>Promise<void>;onEditDate:(clip:VideoSession["clips"][number])=>void;onShare:(clip:VideoSession["clips"][number])=>void;onRemoveClip:(clip:VideoSession["clips"][number])=>void;onDeleteClip:(clip:VideoSession["clips"][number])=>void;onClose:()=>void}){
   const [active,setActive]=useState(0);const clip=session.clips[active];
+  const [clipFilter,setClipFilter]=useState("");
+  // O índice original viaja junto: o filtro reduz a lista, mas "trecho 4" tem de
+  // continuar sendo o quarto da sessão, não o quarto do que sobrou na tela.
+  const indexed=session.clips.map((item,index)=>({item,index}));
+  const needle=clipFilter.trim().toLowerCase();
+  const visibleClips=needle?indexed.filter(({item,index})=>
+    `${index+1} ${clipClock(item.captured_at)} ${item.title} ${item.description} ${item.name}`.toLowerCase().includes(needle)):indexed;
+  const [clipMenu,setClipMenu]=useState<{x:number;y:number;clip:VideoSession["clips"][number];index:number}|null>(null);
+  useEffect(()=>setActive(value=>Math.min(value,Math.max(0,session.clips.length-1))),[session.clips.length]);
   const sessionSpeakers:EditableVideoSpeaker[]=session.clips.flatMap((item,index)=>item.speakers.filter(speaker=>!speaker.fixed).map(speaker=>({...speaker,videoId:item.id,clipLabel:`Trecho ${index+1} · ${item.title||item.name}`})));
   return <div className="overlay session-viewer" onMouseDown={onClose}><section onMouseDown={event=>event.stopPropagation()}>
     <header><div><span className="session-badge">Sessão completa</span><h2>{session.name}</h2><p>{session.clip_count} clipes · {session.duration_seconds>0?`duração total ${sessionDuration(session.duration_seconds)}`:"duração indisponível"} · {bytes(session.bytes)} · {session.status}</p></div><button className="icon-button" onClick={onClose} aria-label="Fechar">×</button></header>
     <div className="session-viewer-body">
-      <section className="session-analysis"><h3>Análise conjunta da IA</h3>{session.summary?<p>{session.summary}</p>:<p className="session-empty">A sessão ainda não possui uma síntese conjunta.</p>}{session.context&&<><h3>Contexto informado</h3><p>{session.context}</p></>}</section>
-      {clip&&<div className="continuous-session"><div className="session-continuous-head"><strong>Reprodução contínua · trecho {active+1} de {session.clips.length}</strong><span>{new Date(clip.captured_at).toLocaleString("pt-BR")} · <button className="edit-clip-date" onClick={()=>onEditDate(clip)}>Corrigir data</button></span></div>{clip.available?<CustomVideoPlayer key={clip.id} src={clip.url} mediaPath={clip.path} title={clip.title||clip.name} chapters={clip.chapters} segments={clip.transcript_segments} speakers={clip.speakers} editableSpeakers={sessionSpeakers} markers={clip.markers} videoId={clip.id} preroll={preroll} hotkey={hotkey} onMarkersChanged={onRefresh} autoPlay={active>0} onEnded={()=>setActive(value=>Math.min(session.clips.length-1,value+1))}/>:<div className="missing-video">Arquivo removido — análise preservada abaixo.</div>}{!clip.available&&<div className="clip-preserved-analysis">{clip.description&&<><h4>Análise da IA</h4><p>{clip.description}</p></>}{!!clip.chapters?.length&&<details className="video-chapters" open><summary>{clip.chapters.length} capítulos analisados</summary>{clip.chapters.map(chapter=><section key={chapter.time}><time>{chapter.time}</time><h4>{chapter.title}</h4><p>{chapter.summary}</p>{!!chapter.events?.length&&<ul>{chapter.events.map((event,index)=><li key={index}>{event}</li>)}</ul>}</section>)}</details>}{clip.transcript&&<details className="video-transcript"><summary>Transcrição por locutor</summary>{clip.transcript_segments?.length?<div className="transcript-segments">{clip.transcript_segments.map((segment,index)=><div key={`${segment.start}-${index}`}><time>{videoTime(segment.start)}</time><span>{segment.text}</span></div>)}</div>:<p>{clip.transcript}</p>}</details>}{!clip.description&&!clip.chapters?.length&&!clip.transcript&&<p className="session-empty">Este trecho não chegou a ser analisado antes de ser removido.</p>}</div>}<div className="session-piece-tabs">{session.clips.map((item,index)=><button className={index===active?"active":""} onClick={()=>setActive(index)} key={item.id}>{index+1}. {item.title||item.name}</button>)}</div></div>}
+      {ia&&<section className="session-analysis"><h3>Análise conjunta da IA</h3>{session.summary?<p>{session.summary}</p>:<p className="session-empty">A sessão ainda não possui uma síntese conjunta.</p>}{session.context&&<><h3>Contexto informado</h3><p>{session.context}</p></>}</section>}
+      {clip&&<div className="continuous-session"><div className="session-continuous-head"><strong>Reprodução contínua · trecho {active+1} de {session.clips.length}</strong>{session.clips.length>6&&<input className="picker-search session-clip-search" value={clipFilter} onChange={event=>setClipFilter(event.target.value)} placeholder="Filtrar trechos por hora, título ou análise"/>}<span>{new Date(clip.captured_at).toLocaleString("pt-BR")} · clique direito nas miniaturas para mais ações</span>{clip.available&&<button className="ghost share-button" onClick={()=>onShare(clip)}>Enviar este trecho</button>}</div>{clip.available?<CustomVideoPlayer key={clip.id} src={clip.url} mediaPath={clip.path} title={clip.title||clip.name} chapters={clip.chapters} segments={clip.transcript_segments} speakers={clip.speakers} editableSpeakers={sessionSpeakers} markers={clip.markers} videoId={clip.id} preroll={preroll} hotkey={hotkey} ia={ia} onMarkersChanged={onRefresh} autoPlay={active>0} onEnded={()=>setActive(value=>Math.min(session.clips.length-1,value+1))}/>:<div className="missing-video">Arquivo removido — análise preservada abaixo.</div>}{!clip.available&&<div className="clip-preserved-analysis">{clip.description&&<><h4>Análise da IA</h4><p>{clip.description}</p></>}{!!clip.chapters?.length&&<details className="video-chapters" open><summary>{clip.chapters.length} capítulos analisados</summary>{clip.chapters.map(chapter=><section key={chapter.time}><time>{chapter.time}</time><h4>{chapter.title}</h4><p>{chapter.summary}</p>{!!chapter.events?.length&&<ul>{chapter.events.map((event,index)=><li key={index}>{event}</li>)}</ul>}</section>)}</details>}{clip.transcript&&<details className="video-transcript"><summary>Transcrição por locutor</summary>{clip.transcript_segments?.length?<div className="transcript-segments">{clip.transcript_segments.map((segment,index)=><div key={`${segment.start}-${index}`}><time>{videoTime(segment.start)}</time><span>{segment.text}</span></div>)}</div>:<p>{clip.transcript}</p>}</details>}{!clip.description&&!clip.chapters?.length&&!clip.transcript&&<p className="session-empty">Este trecho não chegou a ser analisado antes de ser removido.</p>}</div>}<div className="session-piece-tabs">{visibleClips.map(({item,index})=><button className={index===active?"active":""} onClick={()=>setActive(index)} onContextMenu={event=>{event.preventDefault();setClipMenu({x:event.clientX,y:event.clientY,clip:item,index})}} onKeyDown={event=>{if(event.key==="ContextMenu"||(event.shiftKey&&event.key==="F10")){event.preventDefault();const box=event.currentTarget.getBoundingClientRect();setClipMenu({x:box.left+18,y:box.top+18,clip:item,index})}}} key={item.id}>{item.available?<img src={item.thumbnail_url||`/api/video-thumbnail?path=${encodeURIComponent(item.path)}`} alt="" loading="lazy"/>:<span className="session-piece-missing">Sem arquivo</span>}<span className="session-piece-meta"><b>{index+1}.</b> <time>{clipClock(item.captured_at)}</time>{item.duration_seconds>0&&<span>{sessionDuration(item.duration_seconds)}</span>}{!!item.markers?.length&&<span className="session-piece-markers">◆ {item.markers.length}</span>}</span><span className="session-piece-title">{item.title||(item.status==="pending"?"sem análise":item.name)}</span></button>)}{!visibleClips.length&&<p className="session-empty">Nenhum trecho casa com “{clipFilter}”.</p>}</div></div>}
     </div>
+    {clipMenu&&<ContextMenu x={clipMenu.x} y={clipMenu.y} title={`${clipMenu.index+1}. ${clipMenu.clip.title||clipMenu.clip.name}`} onClose={()=>setClipMenu(null)} items={[{label:"Abrir este trecho",run:()=>setActive(clipMenu.index)},{label:"Enviar para um amigo…",hint:"Discord",disabled:!clipMenu.clip.available,run:()=>onShare(clipMenu.clip)},{label:"Corrigir data e hora",run:()=>onEditDate(clipMenu.clip)},{label:"Tirar da sessão",hint:"o arquivo fica",disabled:busy,run:()=>onRemoveClip(clipMenu.clip)},{label:"Excluir trecho",danger:true,disabled:busy||["queued","processing"].includes(clipMenu.clip.status),run:()=>onDeleteClip(clipMenu.clip)}]}/>}
   </section></div>
 }
 
@@ -521,9 +792,19 @@ function ContextPickerModal({sessions,files,target,draft,busy,onTarget,onDraft,o
 }
 
 function App() {
+  // O modo vem do backend, mas fica espelhado aqui: sem isso, a primeira
+  // abertura no Lumini mostraria a interface completa por um segundo antes de
+  // sumir com metade dela na cara da pessoa.
+  const [mode,setMode]=useState<AppMode>(()=>
+    localStorage.getItem("lume-mode")==="lumini"?"lumini":"completo");
+  const ia = mode !== "lumini";
   const [view, setView] = useState<View>(()=>{
-    const saved=sessionStorage.getItem("lume-active-view");
-    return saved&&saved in labels?saved as View:"busca";
+    const salvo=sessionStorage.getItem("lume-active-view") as View|null;
+    const modo:AppMode=localStorage.getItem("lume-mode")==="lumini"?"lumini":"completo";
+    const disponiveis=viewsDisponiveis(modo);
+    // A view guardada pode não existir mais neste modo — abrir numa tela em
+    // branco seria a primeira impressão do app.
+    return salvo&&disponiveis.includes(salvo)?salvo:(modo==="lumini"?"videos":"busca");
   });
   const [panel, setPanel] = useState<Panel>(null);
   const [mobileNavOpen,setMobileNavOpen]=useState(false);
@@ -560,6 +841,11 @@ function App() {
   const [voiceProfiles,setVoiceProfiles]=useState<VoiceIdentity[]|null>(null);
   const [fileTotal, setFileTotal] = useState(0);
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [settingsError,setSettingsError]=useState("");
+  const [editingOpen,setEditingOpen]=useState(false);
+  const [cardMenu,setCardMenu]=useState<{x:number;y:number;title:string;items:ContextMenuAction[]}|null>(null);
+  const [promptItems,setPromptItems]=useState<PromptSetting[]|null>(null);
+  const [promptDrafts,setPromptDrafts]=useState<Record<string,string>>({});
   const [queueCounts,setQueueCounts]=useState<QueueCounts|null>(null);
   const [queueSpeed,setQueueSpeed]=useState<QueueSpeed|null>(null);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -582,7 +868,8 @@ function App() {
   const [videoSessions,setVideoSessions]=useState<VideoSession[]>([]);
   const [openSessionId,setOpenSessionId]=useState<number|null>(null);
   const [openVideoPath,setOpenVideoPath]=useState<string|null>(null);
-  const [settingsTab,setSettingsTab]=useState<"capture"|"storage"|"ai"|"video">("capture");
+  const [shareTarget,setShareTarget]=useState<ShareTarget|null>(null);
+  const [settingsTab,setSettingsTab]=useState<"capture"|"storage"|"ai"|"video"|"prompts">("capture");
   const [videoAdvanced,setVideoAdvanced]=useState(false);
   const [videoPatterns,setVideoPatterns]=useState("");
   const [uploadProgress,setUploadProgress]=useState<number|null>(null);
@@ -604,8 +891,6 @@ function App() {
   if(isDayView)lastLensRef.current=view;
   const navigate=(next:View)=>{setView(next);setMobileNavOpen(false)};
   const queueCount=(pipeline?.counts.pending||0)+(pipeline?.counts.processing||0)+queueJobs.filter(job=>job.status!=="error").length;
-  const dayIndex=memoryDays.findIndex(item=>item.day===selectedDay);
-  const stepDay=(direction:1|-1)=>{const next=memoryDays[dayIndex+direction];if(next)setSelectedDay(next.day)};
   const openQueuePanel=()=>{setView("captura");setCapturaTab("fila")};
   const openDiagnostics=()=>{setView("captura");setCapturaTab("diagnostico");setMobileNavOpen(false)};
   const dateValue=(value?:string)=>new Date(value||0).getTime()||0;
@@ -649,7 +934,13 @@ function App() {
   const refresh = () => {
     if(statusRefreshInFlight.current)return statusRefreshInFlight.current;
     const request=api.status().then(next=>{
-      setStatus(next); setSettings(current=>current||next.settings); setError("");
+      setStatus(next); setSettings(current=>current||next.settings);
+      const modo:AppMode=next.mode==="lumini"?"lumini":"completo";
+      setMode(modo);
+      localStorage.setItem("lume-mode",modo);
+      // Uma instalação que trocou de modo (ou um navegador com a memória de
+      // outra máquina) não pode ficar presa numa tela que já não existe.
+      setView(atual=>viewsDisponiveis(modo).includes(atual)?atual:"videos");
     }).catch(err=>setError((err as Error).message)).finally(()=>{
       if(statusRefreshInFlight.current===request)statusRefreshInFlight.current=null;
     });
@@ -657,7 +948,14 @@ function App() {
     return request;
   };
 
+  const memoryRequestId=useRef(0);
+  const memorySelection=useRef("");
+  memorySelection.current=JSON.stringify([selectedDay,query,kind]);
+  const [memoryLoadedDay,setMemoryLoadedDay]=useState("");
   const refreshMemory = async () => {
+    const requestId=++memoryRequestId.current;
+    const selection=memorySelection.current;
+    const isCurrent=()=>requestId===memoryRequestId.current&&selection===memorySelection.current;
     try {
       const [found, job] = await Promise.all([
         query.trim() ? api.search(query, kind) : api.captures(kind),
@@ -668,9 +966,11 @@ function App() {
       const available=await api.days().catch(()=>({items:fallbackDays}));
       const dayKey=available.items.some(item=>item.day===selectedDay)?selectedDay:(available.items[0]?.day||selectedDay);
       const [day,timeline,activityResult]=await Promise.all([api.summary(dayKey),api.timeline(dayKey),api.activities(dayKey)]);
+      if(!isCurrent())return;
+      setMemoryLoadedDay(dayKey);
       setMemoryDays(available.items);if(dayKey!==selectedDay)setSelectedDay(dayKey);
       setItems(groupCaptures(found.items)); setSummary(day.summary); setPipeline(job);setHours(timeline.hours);setHourSources(timeline.source_hours);setHourlyRunning(timeline.running||activityResult.running);setActivities(activityResult.items);
-    } catch (err) { setError((err as Error).message); }
+    } catch (err) { if(isCurrent())setError((err as Error).message); }
   };
 
   const refreshCurrentView=async()=>{
@@ -678,14 +978,17 @@ function App() {
     try{
       if(view==="videos"){
         const [nextStatus,files,sessions,nextVideoSettings,ollama]=await Promise.all([
-          api.status(),api.videos(),api.videoSessions(),api.videoSettings(),api.ollamaModels(),
+          api.status(),api.videos(),api.videoSessions(),api.videoSettings(),
+          // Perguntar pelos modelos numa instalação sem Ollama é uma requisição
+          // que só pode falhar.
+          ia?api.ollamaModels():Promise.resolve({online:false,models:[]}),
         ]);
         setStatus(nextStatus);setSettings(current=>current||nextStatus.settings);
         setVideoFiles(files.items);setVideoSessions(sessions.items);setVideoSettings(nextVideoSettings);
         setVideoPatterns(nextVideoSettings.patterns.join("\n"));setOllamaModels(ollama.models);setOllamaOnline(ollama.online);
         setError("");
       }else{
-        await Promise.all([refresh(),refreshMemory()]);
+        await Promise.all([refresh(),ia?refreshMemory():Promise.resolve()]);
       }
     }catch(err){setError((err as Error).message)}finally{setRefreshing(false)}
   };
@@ -702,31 +1005,49 @@ function App() {
   useEffect(()=>{if(!status?.video.recording)return;setStatusClock(Date.now());const timer=setInterval(()=>setStatusClock(Date.now()),1000);return()=>clearInterval(timer)},[status?.video.recording,status?.video.started_at]);
   useEffect(() => { const timer=setTimeout(refreshMemory,250); return()=>clearTimeout(timer); }, [query,kind,selectedDay]);
   useEffect(() => {
-    if (view!=="captura"||capturaTab!=="fila") return;
+    if (!ia||view!=="captura"||capturaTab!=="fila") return;
     const load=()=>api.pipelineQueue(selectedDay).then(result=>{if(queueWasRunning.current&&!result.running)void refreshMemory();queueWasRunning.current=result.running;applyQueueResult(result)}).catch(err=>setError((err as Error).message));
     load(); const timer=setInterval(load,2000); return()=>clearInterval(timer);
   }, [view,capturaTab,selectedDay]);
   useEffect(()=>{
+    // Ctrl+K abre a busca e as ações de IA; no Lumini nenhuma das cinco existe,
+    // e um atalho que abre uma caixa vazia é pior do que atalho nenhum.
+    if(!ia)return;
     const handler=(event:KeyboardEvent)=>{
       if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setPalette(open=>!open)}
       if(event.key==="Escape")setPalette(false);
     };
     window.addEventListener("keydown",handler);
     return()=>window.removeEventListener("keydown",handler);
-  },[]);
+  },[ia]);
   useEffect(()=>{
-    if(!palette)return;
+    if(!palette||!ia)return;
     const term=paletteQuery.trim();
     if(!term){setPaletteItems([]);return}
-    const timer=setTimeout(()=>{api.search(term,"all").then(result=>setPaletteItems(groupCaptures(result.items).slice(0,6))).catch(()=>{})},200);
-    return()=>clearTimeout(timer);
+    let active=true;
+    const timer=setTimeout(()=>{api.search(term,"all").then(result=>{if(active)setPaletteItems(groupCaptures(result.items).slice(0,6))}).catch(()=>{})},200);
+    return()=>{active=false;clearTimeout(timer)};
   },[palette,paletteQuery]);
   useEffect(() => {
-    if (view!=="timeline"||!hourlyRunning) return;
-    const timer=setInterval(()=>api.timeline(selectedDay).then(result=>{setHours(result.hours);setHourSources(result.source_hours);setHourlyRunning(result.running)}).catch(()=>{}),3000);
-    return()=>clearInterval(timer);
-  },[view,hourlyRunning,selectedDay]);
-  useEffect(()=>{if(view!=="videos")return;Promise.all([api.videoSettings(),api.ollamaModels()]).then(([settings,ollama])=>{setVideoSettings(settings);setVideoPatterns(settings.patterns.join("\n"));setOllamaModels(ollama.models);setOllamaOnline(ollama.online)}).catch(err=>setError((err as Error).message))},[view]);
+    if (!isDayView||(!hourlyRunning&&!queueRunning)) return;
+    let active=true;
+    let loading=false;
+    const load=async()=>{
+      if(loading)return;
+      loading=true;
+      try{
+        const [timeline,activityResult,queueResult]=await Promise.all([api.timeline(selectedDay),api.activities(selectedDay),api.pipelineQueue(selectedDay)]);
+        if(!active)return;
+        setHours(timeline.hours);setHourSources(timeline.source_hours);setActivities(activityResult.items);
+        setHourlyRunning(timeline.running||activityResult.running);
+        applyQueueResult(queueResult);
+        if(!timeline.running&&!activityResult.running&&!queueResult.running)void refreshMemory();
+      }catch(err){if(active)setError((err as Error).message)}finally{loading=false}
+    };
+    const timer=setInterval(()=>void load(),3000);
+    return()=>{active=false;clearInterval(timer)};
+  },[isDayView,hourlyRunning,queueRunning,selectedDay]);
+  useEffect(()=>{if(view!=="videos")return;Promise.all([api.videoSettings(),ia?api.ollamaModels():Promise.resolve({online:false,models:[]})]).then(([settings,ollama])=>{setVideoSettings(settings);setVideoPatterns(settings.patterns.join("\n"));setOllamaModels(ollama.models);setOllamaOnline(ollama.online)}).catch(err=>setError((err as Error).message))},[view,ia]);
   useEffect(()=>{if(view!=="videos"||mediaPlaybackOpen)return;let active=true;const load=()=>Promise.all([api.videos(),api.videoSessions()]).then(([files,sessions])=>{if(active){setVideoFiles(files.items);setVideoSessions(sessions.items)}}).catch(err=>{if(active)setError((err as Error).message)});load();const timer=setInterval(load,3000);return()=>{active=false;clearInterval(timer)}},[view,mediaPlaybackOpen]);
   useEffect(()=>{folderUploadRef.current?.setAttribute("webkitdirectory","")},[]);
   useEffect(()=>{if(view!=="videos")return;const prevent=(event:DragEvent)=>event.preventDefault();window.addEventListener("dragover",prevent);window.addEventListener("drop",prevent);return()=>{window.removeEventListener("dragover",prevent);window.removeEventListener("drop",prevent)}},[view]);
@@ -748,17 +1069,34 @@ function App() {
 
   const openSettings = async () => {
     setMobileNavOpen(false);
-    setSettingsTab(view==="videos"?"video":"capture");
+    setSettingsTab(ia?(view==="videos"?"video":"capture"):"video");setSettingsError("");
     setPanel("settings");
     try {
-      const [nextSchedule,nextStorage,nextVideo,nextCleanup,ollama]=await Promise.all([api.schedule(),api.storage(),api.videoSettings(),api.cleanupSettings(),api.ollamaModels()]);
-      setSchedule(nextSchedule);setStorage(nextStorage);setStorageRoot(nextStorage.root);setVideoSettings(nextVideo);setCleanupSettings(nextCleanup);setVideoPatterns(nextVideo.patterns.join("\n"));setOllamaModels(ollama.models);setOllamaOnline(ollama.online);
+      const [nextSchedule,nextStorage,nextVideo,nextCleanup,ollama,nextPrompts]=await Promise.all([
+        ia?api.schedule():Promise.resolve(null as never),api.storage(),api.videoSettings(),api.cleanupSettings(),
+        ia?api.ollamaModels():Promise.resolve({online:false,models:[]}),
+        ia?api.prompts():Promise.resolve({items:[]}),
+      ]);
+      setSchedule(nextSchedule);setStorage(nextStorage);setStorageRoot(nextStorage.root);setVideoSettings(nextVideo);setCleanupSettings(nextCleanup);setVideoPatterns(nextVideo.patterns.join("\n"));setOllamaModels(ollama.models);setOllamaOnline(ollama.online);setPromptItems(nextPrompts.items);setPromptDrafts({});
     } catch(err){setError((err as Error).message)}
   };
 
   const saveAllSettings = async () => {
-    if (!settings||!schedule||!storage||!videoSettings||!cleanupSettings||savingSettings) return;setSavingSettings(true);
+    if (!settings||!schedule||!storage||!videoSettings||!cleanupSettings||savingSettings) return;
+    setSavingSettings(true);setSettingsError("");
     try {
+      // Primeiro os prompts: uma variavel obrigatoria removida e recusada pelo
+      // backend, e o erro precisa dizer de qual prompt estamos falando.
+      const pendingPrompts=(promptItems||[]).filter(item=>(promptDrafts[item.key]??item.text)!==item.text);
+      if(pendingPrompts.length){
+        const savedPrompts:PromptSetting[]=[];
+        for(const item of pendingPrompts){
+          try{savedPrompts.push(await api.savePrompt(item.key,promptDrafts[item.key]))}
+          catch(err){throw new Error(`${item.label}: ${(err as Error).message}`)}
+        }
+        setPromptItems(current=>current?current.map(item=>savedPrompts.find(saved=>saved.key===item.key)||item):current);
+        setPromptDrafts({});
+      }
       const [,savedSchedule,savedVideo,savedCleanup]=await Promise.all([
         api.saveSettings(settings),
         api.saveSchedule({time:schedule.time,enabled:schedule.enabled}),
@@ -770,7 +1108,63 @@ function App() {
       setTestResult(savedStorage.restart_required?"Local salvo. O Lume está reiniciando para usar o novo disco.":"Configurações salvas");
       setPanel(null);if(!savedStorage.restart_required)void refresh();
     }
-    catch(err){setError((err as Error).message)} finally{setSavingSettings(false)}
+    catch(err){setSettingsError((err as Error).message)} finally{setSavingSettings(false)}
+  };
+
+  const describeEditing=(result:{name:string;markers:number;clips:number;edl:string})=>{
+    const clips=result.clips>1?`${result.clips} trechos · `:"";
+    return `${clips}${result.name} · ${result.edl?`${result.markers} marcadores no EDL`:"sem marcadores para exportar"}`;
+  };
+
+  const sendVideoToEditing=async(file:VideoFile)=>{
+    if(!file.id)return;setBusy(true);
+    try{const result=await api.sendVideoToEditing(file.id);setTestResult(describeEditing(result));await refreshVideos()}
+    catch(err){setError((err as Error).message)} finally{setBusy(false)}
+  };
+
+  const sendSessionToEditing=async(session:VideoSession)=>{
+    setBusy(true);
+    try{const result=await api.sendSessionToEditing(session.id);setTestResult(describeEditing(result));await refreshVideos()}
+    catch(err){setError((err as Error).message)} finally{setBusy(false)}
+  };
+
+  // O painel de envio trabalha só com caminho, nome e tamanho: assim serve
+  // igual para um vídeo avulso e para um trecho de sessão, que não tem card.
+  const openShare=(item:{path:string;title?:string;name:string;bytes:number;game?:string;captured_at?:string})=>
+    setShareTarget({path:item.path,title:item.title||item.name,bytes:item.bytes,
+                    game:item.game,capturedAt:item.captured_at});
+
+  const openVideoMenu=(file:VideoFile,point:MenuPoint)=>{
+    const analyzing=["queued","processing"].includes(file.status);
+    setCardMenu({...point,title:file.title||file.name,items:[
+      ...(ia?[{label:"Analisar áudio + vídeo",hint:"IA",disabled:!file.available||busy||analyzing,run:()=>void analyzeVideo(file)}]:[]),
+      {label:"Enviar para edição",hint:"Resolve",disabled:!file.available||busy||!file.id,run:()=>void sendVideoToEditing(file)},
+      {label:"Enviar para um amigo…",hint:"Discord",disabled:!file.available,run:()=>openShare(file)},
+      {label:"Preservar clip",disabled:!file.available||busy,run:()=>void preserveVideo(file)},
+      ...(ia?[{label:"Contexto para a IA",disabled:!file.id,run:()=>{if(file.id)openContextFor(`video:${file.id}`)}}]:[]),
+      {label:"Corrigir data e hora",disabled:!file.id,run:()=>void editVideoDate(file)},
+      {label:file.available?"Excluir vídeo":"Excluir análise",danger:true,disabled:busy||analyzing,run:()=>void deleteVideo(file)},
+    ]});
+  };
+
+  const openSessionMenu=(session:VideoSession,point:MenuPoint)=>{
+    const running=["queued","processing"].includes(session.status);
+    setCardMenu({...point,title:session.name,items:[
+      ...(ia?[{label:"Analisar sessão completa",hint:"IA",disabled:busy||running||!session.clip_count,run:()=>void analyzeSession(session)}]:[]),
+      {label:"Enviar para edição",hint:"Resolve",disabled:busy||!session.clip_count,run:()=>void sendSessionToEditing(session)},
+      ...(ia?[{label:"Contexto para a IA",run:()=>openContextFor(`session:${session.id}`)}]:[]),
+      {label:"Excluir sessão",danger:true,disabled:busy||running,run:()=>void deleteSession(session)},
+    ]});
+  };
+
+  const resetPrompt = async (item:PromptSetting) => {
+    setBusy(true);
+    try{
+      const saved=await api.resetPrompt(item.key);
+      setPromptItems(current=>current?current.map(entry=>entry.key===saved.key?saved:entry):current);
+      setPromptDrafts(current=>{const next={...current};delete next[saved.key];return next});
+    }
+    catch(err){setSettingsError((err as Error).message)} finally{setBusy(false)}
   };
 
   const saveCaptureMode = async (capture_mode:VideoSettings["capture_mode"]) => {
@@ -828,13 +1222,13 @@ function App() {
 
   const runPipeline = async () => {
     setBusy(true);
-    try { const result=await api.enqueueUnprocessed(); const queueResult=await api.pipelineQueue(selectedDay);applyQueueResult(queueResult);queueWasRunning.current=true;const restored=result.requeued?` · ${result.requeued} anteriormente removidos restaurados`:"";const videos=result.queued.video+result.queued.session?` · ${result.queued.video} vídeos e ${result.queued.session} sessões`:"";const missing=result.missing?` · ${result.missing} registros sem arquivo ignorados`:"";setTestResult(`${result.queued.total} pendentes de todos os dias na fila · ${result.discovered.audio+result.discovered.screen} arquivos novos encontrados${videos}${restored}${missing}`);openQueuePanel();setTimeout(refreshMemory,1000); }
+    try { const result=await api.enqueueUnprocessed(); const queueResult=await api.pipelineQueue(selectedDay);applyQueueResult(queueResult);queueWasRunning.current=true;const deferred=result.discovered.deferred_audio?" · áudio ainda em gravação adiado":"";const restored=result.requeued?` · ${result.requeued} anteriormente removidos restaurados`:"";const videos=result.queued.video+result.queued.session?` · ${result.queued.video} vídeos e ${result.queued.session} sessões`:"";const missing=result.missing?` · ${result.missing} registros sem arquivo ignorados`:"";setTestResult(`${result.queued.total} pendentes de todos os dias na fila · ${result.discovered.audio+result.discovered.screen} arquivos novos encontrados${videos}${restored}${missing}${deferred}`);openQueuePanel();setTimeout(refreshMemory,1000); }
     catch(err){setError((err as Error).message)} finally{setBusy(false)}
   };
 
   const forceSummary = async () => {
     setBusy(true);
-    try { await api.generateSummary(selectedDay);queueWasRunning.current=true;setQueueJobs([{id:`daily-summary-${selectedDay}`,kind:"summary",stage:`Resumindo períodos e consolidando ${new Date(`${selectedDay}T12:00:00`).toLocaleDateString("pt-BR")} com Qwen`}]);setQueueRunning(true);setTestResult("Resumo detalhado iniciado em segundo plano");openQueuePanel(); }
+    try { await api.generateSummary(selectedDay);queueWasRunning.current=true;setQueueJobs([{id:`daily-summary-${selectedDay}`,kind:"summary",stage:`Resumindo períodos e consolidando ${new Date(`${selectedDay}T12:00:00`).toLocaleDateString("pt-BR")} com Qwen`}]);setQueueRunning(true);setTestResult("Resumo iniciado. Você pode continuar navegando; o resultado será atualizado aqui."); }
     catch(err){setError((err as Error).message)} finally{setBusy(false)}
   };
 
@@ -902,7 +1296,7 @@ function App() {
 
   const generateHours = async () => {
     setBusy(true);
-    try { await api.generateTimeline(selectedDay);queueWasRunning.current=true;setQueueJobs([{id:`hourly-summary-${selectedDay}`,kind:"hourly",stage:`Analisando sequências visuais e resumos por hora de ${new Date(`${selectedDay}T12:00:00`).toLocaleDateString("pt-BR")} com Qwen`}]);setQueueRunning(true);setHourlyRunning(true);setTestResult("Análise de atividades e horas iniciada");openQueuePanel(); }
+    try { await api.generateTimeline(selectedDay);queueWasRunning.current=true;setQueueJobs([{id:`hourly-summary-${selectedDay}`,kind:"hourly",stage:`Analisando sequências visuais e resumos por hora de ${new Date(`${selectedDay}T12:00:00`).toLocaleDateString("pt-BR")} com Qwen`}]);setQueueRunning(true);setHourlyRunning(true);setTestResult("Análise de atividades e horas iniciada"); }
     catch(err){setError((err as Error).message)} finally{setBusy(false)}
   };
 
@@ -919,10 +1313,15 @@ function App() {
   const preserveVideo=async(file:VideoFile)=>{try{const result=await api.preserveVideo(file.path);setTestResult(`Clip preservado em ${result.path}`)}catch(err){setError((err as Error).message)}};
   const editVideoDate=async(file:VideoFile)=>{if(!file.id)return;const current=new Date(file.captured_at||file.modified_at);const local=new Date(current.getTime()-current.getTimezoneOffset()*60000).toISOString().slice(0,16);const value=prompt("Data e hora em que o vídeo foi gravado (AAAA-MM-DDTHH:MM)",local)?.trim();if(!value)return;const parsed=new Date(value);if(Number.isNaN(parsed.getTime())){setError("Data inválida");return}setBusy(true);try{await api.saveVideoDate(file.id,parsed.toISOString());await refreshVideos();setTestResult("Data do vídeo atualizada e sessão reordenada")}catch(err){setError((err as Error).message)}finally{setBusy(false)}};
   const editSessionClipDate=async(clip:VideoSession["clips"][number])=>{const current=new Date(clip.captured_at);const local=new Date(current.getTime()-current.getTimezoneOffset()*60000).toISOString().slice(0,16);const value=prompt("Data e hora em que este trecho foi gravado (AAAA-MM-DDTHH:MM)",local)?.trim();if(!value)return;const parsed=new Date(value);if(Number.isNaN(parsed.getTime())){setError("Data inválida");return}setBusy(true);try{await api.saveVideoDate(clip.id,parsed.toISOString());await refreshVideos();setTestResult("Data atualizada; os trechos foram reordenados cronologicamente")}catch(err){setError((err as Error).message)}finally{setBusy(false)}};
-  const deleteVideo=async(file:VideoFile)=>{
+  // Aceita um trecho de sessão além do vídeo avulso: são os mesmos campos que
+  // importam aqui, e o trecho não tem card na biblioteca por onde ser apagado.
+  const deleteVideo=async(file:Pick<VideoFile,"path"|"status"|"available">&{name:string;title?:string})=>{
     const warning=file.available?`O arquivo será apagado do disco${file.status==="done"?", junto com a análise":""}.`:"O arquivo já foi removido; somente a análise salva será excluída.";
     if(!window.confirm(`Excluir permanentemente “${file.title||file.name}”? ${warning}`))return;
-    await withVideoAction(`video:${file.path}`,async()=>{try{await api.deleteVideo(file.path);setVideoFiles(current=>current.filter(item=>item.path!==file.path));setTestResult("Vídeo excluído")}
+    await withVideoAction(`video:${file.path}`,async()=>{try{await api.deleteVideo(file.path);setVideoFiles(current=>current.filter(item=>item.path!==file.path));
+      // Um trecho apagado precisa sair da sessão também, e a sessão pode ter
+      // acabado junto com ele.
+      await refreshVideos();setTestResult("Vídeo excluído")}
     catch(err){setError((err as Error).message)}})
   };
   const cancelVideoJob=async(job:QueueJob)=>{
@@ -959,7 +1358,7 @@ function App() {
     }catch(err){setError((err as Error).message)}finally{setBusy(false);setUploadProgress(null);if(folderUploadRef.current)folderUploadRef.current.value=""}
   };
   const analyzeSession=async(session:VideoSession)=>withVideoAction(`session:${session.id}`,async()=>{setVideoSessions(current=>current.map(item=>item.id===session.id?{...item,status:"queued",stage:"Enfileirando",progress:0}:item));try{await api.processVideoSession(session.id);const result=await api.pipelineQueue();setQueueJobs(result.jobs);setQueueRunning(result.running);openQueuePanel()}catch(err){void refreshVideos();setError((err as Error).message)}});
-  const joinSelectedVideos=async(name?:string)=>{const itemCount=selectedVideoPaths.length+selectedSessionIds.length;if(itemCount<2)return;const sessionName=name?.trim()||prompt("Nome da sessão unida",`Sessão ${new Date().toLocaleString("pt-BR")}`)?.trim();if(!sessionName)return;setBusy(true);try{const result=await api.joinVideoSession(selectedVideoPaths,selectedSessionIds,sessionName);setSelectedVideoPaths([]);setSelectedSessionIds([]);setJoinMode(false);if(openSessionId!==null&&selectedSessionIds.includes(openSessionId))setOpenSessionId(null);await refreshVideos();setTestResult(`${itemCount} itens unidos em “${sessionName}” · ${result.clips} clipes preservados`)}catch(err){setError((err as Error).message)}finally{setBusy(false)}};
+  const joinSelectedVideos=async(name?:string)=>{const itemCount=selectedVideoPaths.length+selectedSessionIds.length;if(itemCount<2)return;const games=[...selectedVideoPaths.map(path=>videoFiles.find(file=>file.path===path)).filter((file):file is VideoFile=>!!file).map(file=>canonicalGameName(file.game,file.game_source==="window")),...selectedSessionIds.map(id=>videoSessions.find(session=>session.id===id)).filter((session):session is VideoSession=>!!session).map(sessionGameName)].filter(Boolean);const counts=new Map<string,number>();games.forEach(game=>counts.set(game,(counts.get(game)||0)+1));const game=[...counts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],"pt-BR"))[0]?.[0]||"Sessão de jogo";const suggestedName=`${game} — ${new Date().toLocaleDateString("pt-BR")}`;const sessionName=name?.trim()||prompt("Nome da sessão unida",suggestedName)?.trim();if(!sessionName)return;setBusy(true);try{const result=await api.joinVideoSession(selectedVideoPaths,selectedSessionIds,sessionName);setSelectedVideoPaths([]);setSelectedSessionIds([]);setJoinMode(false);if(openSessionId!==null&&selectedSessionIds.includes(openSessionId))setOpenSessionId(null);await refreshVideos();setTestResult(`${itemCount} itens unidos em “${sessionName}” · ${result.clips} clipes preservados`)}catch(err){setError((err as Error).message)}finally{setBusy(false)}};
   const openContextFor=(target:string)=>{selectContextTarget(target);setContextModalOpen(true)};
   const deleteSession=async(session:VideoSession)=>{
     const clipText=session.clip_count?` e ${session.clip_count} clipe${session.clip_count===1?"":"s"} ainda existente${session.clip_count===1?"":"s"}`:"";
@@ -1099,18 +1498,19 @@ function App() {
       await refreshMemory();setTestResult(`Perfil “${result.label}” removido; ${result.updated.audio+result.updated.video} gravação(ões) foram desvinculadas.`);
     }catch(err){setError((err as Error).message)}
   };
+  const detachSessionClip=async(session:VideoSession,clip:VideoSession["clips"][number])=>{if(!window.confirm(`Tirar “${clip.title||clip.name}” da sessão “${session.name}”? O vídeo e sua análise serão preservados.`))return;setBusy(true);try{const result=await api.detachVideoFromSession(session.id,clip.id);if(result.session_deleted)setOpenSessionId(null);await refreshVideos();setTestResult(result.session_deleted?"Vídeo retirado; a sessão vazia foi removida":"Vídeo retirado da sessão e devolvido à biblioteca")}catch(err){setError((err as Error).message)}finally{setBusy(false)}};
 
   return <div className={`app-shell ${mediaPlaybackOpen?"media-playback-open":""} ${mobileNavOpen?"mobile-nav-open":""}`}>
     {mobileNavOpen&&<button className="mobile-nav-backdrop" aria-label="Fechar menu" onClick={()=>setMobileNavOpen(false)}/>}
     <aside className={`sidebar ${mobileNavOpen?"open":""}`} aria-label="Navegação principal">
-      <div className="brand"><div className="brand-mark"><i /></div><span>Lume</span><em>local</em><button className="mobile-menu-close" aria-label="Fechar menu" onClick={()=>setMobileNavOpen(false)}>×</button></div>
-      <div className="side-group">
+      <div className="brand"><div className="brand-mark"><i /></div><span>{nomeDoApp(mode)}</span><em>{ia?"local":"gravador"}</em><button className="mobile-menu-close" aria-label="Fechar menu" onClick={()=>setMobileNavOpen(false)}>×</button></div>
+      {ia&&<div className="side-group">
         <span className="eyebrow">Memória</span>
         <nav>
           <button className={isDayView ? "active" : ""} onClick={() => navigate(lastLensRef.current)}><b>◉</b>Meu dia</button>
           <button className={view === "busca" ? "active" : ""} onClick={() => navigate("busca")}><b>⌕</b>Busca<kbd className="kbd-hint">Ctrl K</kbd></button>
         </nav>
-      </div>
+      </div>}
       <div className="side-group">
         <span className="eyebrow">Gravações</span>
         <nav>
@@ -1119,51 +1519,48 @@ function App() {
       </div>
       <div className="side-group">
         <span className="eyebrow">Sistema</span>
-        <nav>
+        {ia&&<nav>
           <button className={view === "captura" ? "active" : ""} onClick={() => navigate("captura")}><b>{icons.captura}</b>Central de captura{queueCount>0&&<span className={`nav-count ${pipeline?.running||queueRunning?"hot":""}`}>{queueCount}</span>}</button>
-        </nav>
-        <button className="sensor-row" onClick={() => openFiles("audio")}><i className={`dot ${status?.audio.active ? "ok" : ""}`}/>Áudio<small>{status?.files.audio.count || 0}</small></button>
-        <button className="sensor-row" onClick={() => openFiles("screen")}><i className={`dot ${status?.screen.active ? "ok" : ""}`}/>Telas<small>{status?.files.screen.count || 0}</small></button>
+        </nav>}
+        {ia&&<button className="sensor-row" onClick={() => openFiles("audio")}><i className={`dot ${status?.audio.active ? "ok" : ""}`}/>Áudio<small>{status?.files.audio.count || 0}</small></button>}
+        {ia&&<button className="sensor-row" onClick={() => openFiles("screen")}><i className={`dot ${status?.screen.active ? "ok" : ""}`}/>Telas<small>{status?.files.screen.count || 0}</small></button>}
         <div className="sensor-row" title={status?.video.window||undefined}><i className={`dot ${status?.video.recording?"rec":status?.video.service_active?"warn":""}`}/>Vídeo<small>{status?.video.recording?`${status.video.mode==="clips"?"buffer":"gravando"} · ${sessionDuration(status.video.started_at?statusClock/1000-status.video.started_at:0)}`:status?.video.service_active?"aguardando":"desligado"}</small></div>
       </div>
-      <div className="capture-card">
+      {ia&&<div className="capture-card">
         <div className="capture-title"><i className={automaticCapturePause?"video":status?.capturing?"pulse":"off"}/><strong>{automaticCapturePause?automaticPauseTitle:status?.capturing?"Capturando":"Captura pausada"}</strong></div>
         {automaticCapturePause?<p className="video-pause-note">{automaticPauseNote}</p>:<div className="capture-meta"><span>{bytes(status?.storage.bytes)}</span><span>{status?.capturing ? captureLabel : "em pausa"}</span></div>}
         <button className="secondary block" disabled={busy || !status || automaticCapturePause} onClick={toggleCapture}>{automaticCapturePause?"Retomada automática":status?.capturing?"Pausar captura":"Retomar captura"}</button>
-      </div>
-      <div className="privacy-links"><button onClick={openDiagnostics}>Diagnóstico</button><button onClick={openPrivacy}>Privacidade</button><button onClick={openSettings}>Ajustes</button></div>
+      </div>}
+      <div className="privacy-links">{ia&&<button onClick={openDiagnostics}>Diagnóstico</button>}{ia&&<button onClick={openPrivacy}>Privacidade</button>}<button onClick={openSettings}>Ajustes</button></div>
     </aside>
 
     <main>
       <header className="topbar"><button className="mobile-menu-button" aria-label="Abrir menu" aria-expanded={mobileNavOpen} onClick={()=>setMobileNavOpen(true)}>☰</button><div className="topbar-title"><h1>{isDayView?"Meu dia":labels[view][0]}</h1>{!isDayView&&<p>{labels[view][1]}</p>}</div>
-        {isDayView&&<div className="day-nav">
-          <button className="day-step" disabled={dayIndex<0||dayIndex>=memoryDays.length-1} onClick={()=>stepDay(1)} aria-label="Dia anterior">‹</button>
-          <label className="day-chip"><select value={selectedDay} disabled={!memoryDays.length} onChange={event=>setSelectedDay(event.target.value)}>{memoryDays.map(item=><option value={item.day} key={item.day}>{new Date(`${item.day}T12:00:00`).toLocaleDateString("pt-BR",{weekday:"short",day:"numeric",month:"short"})} · {item.count}</option>)}</select></label>
-          <button className="day-step" disabled={dayIndex<=0} onClick={()=>stepDay(-1)} aria-label="Próximo dia">›</button>
-        </div>}
+        {isDayView&&<DayPicker days={memoryDays} value={selectedDay} onChange={setSelectedDay}/>}
         {isDayView&&<div className="segmented lens-switch">{lensLabels.map(([key,label])=><button key={key} className={view===key?"active":""} onClick={()=>setView(key)}>{label}</button>)}</div>}
         <div className="topbar-actions">
-          <button className="omni-button" onClick={()=>{setPaletteQuery("");setPaletteItems([]);setPalette(true)}} title="Buscar memórias e ações em qualquer tela"><span aria-hidden="true">⌕</span>Buscar<kbd>Ctrl K</kbd></button>
+          {ia&&<button className="omni-button" onClick={()=>{setPaletteQuery("");setPaletteItems([]);setPalette(true)}} title="Buscar memórias e ações em qualquer tela"><span aria-hidden="true">⌕</span>Buscar<kbd>Ctrl K</kbd></button>}
           <button className={`refresh-button ${refreshing?"refreshing":""}`} disabled={refreshing} onClick={refreshCurrentView} title="Atualizar os dados desta tela"><span aria-hidden="true">↻</span>Atualizar</button>
         </div>
       </header>
       <div className={`content ${dragActive?"drag-active":""}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={dropVideos}>
         {dragActive&&<div className="drop-overlay"><div><b>Solte para importar</b><span>MP4, MKV, WebM, MOV, AVI ou M4V</span></div></div>}
-        {view==="videos"&&<div className="media-toolbar"><div><h2>Biblioteca de vídeos</h2><p>{joinMode?"Selecione vídeos avulsos e/ou sessões para formar uma sessão maior":videoGame?`${videoLibraryItems.length} item${videoLibraryItems.length===1?"":"s"} de ${videoGame}`:"Vídeos avulsos e sessões analisadas"}</p></div>{joinMode?<><button className="ghost" onClick={()=>{setJoinMode(false);setSelectedVideoPaths([]);setSelectedSessionIds([])}}>Cancelar</button><button className="primary" disabled={selectedVideoPaths.length+selectedSessionIds.length<2||busy} onClick={()=>joinSelectedVideos()}>Concluir · {selectedVideoPaths.length+selectedSessionIds.length} itens</button></>:<><button className="secondary" disabled={videoFiles.filter(file=>!file.session_id&&file.available).length+videoSessions.filter(session=>session.clip_count>0&&!['queued','processing'].includes(session.status)).length<2} onClick={()=>{setVideoGame("");setJoinMode(true)}}>Unir vídeos/sessões</button><button className="secondary" onClick={()=>videoUploadRef.current?.click()}>+ Vídeos</button><button className="secondary" onClick={()=>folderUploadRef.current?.click()}>+ Sessão</button></>}</div>}
+        {view==="videos"&&<div className="media-toolbar"><div><h2>Biblioteca de vídeos</h2><p>{joinMode?"Selecione vídeos avulsos e/ou sessões para formar uma sessão maior":videoGame?`${videoLibraryItems.length} item${videoLibraryItems.length===1?"":"s"} de ${videoGame}`:"Vídeos avulsos e sessões analisadas"}</p></div>{joinMode?<><button className="ghost" onClick={()=>{setJoinMode(false);setSelectedVideoPaths([]);setSelectedSessionIds([])}}>Cancelar</button><button className="primary" disabled={selectedVideoPaths.length+selectedSessionIds.length<2||busy} onClick={()=>joinSelectedVideos()}>Concluir · {selectedVideoPaths.length+selectedSessionIds.length} itens</button></>:<><button className="secondary" disabled={videoFiles.filter(file=>!file.session_id&&file.available).length+videoSessions.filter(session=>session.clip_count>0&&!['queued','processing'].includes(session.status)).length<2} onClick={()=>{setVideoGame("");setJoinMode(true)}}>Unir vídeos/sessões</button><button className="secondary" onClick={()=>videoUploadRef.current?.click()}>+ Vídeos</button><button className="secondary" onClick={()=>folderUploadRef.current?.click()}>+ Sessão</button><button className="secondary" onClick={()=>setEditingOpen(true)}>Pasta de edição</button></>}</div>}
         {view==="videos"&&!joinMode&&!!gameStats.length&&<section className="game-selector" aria-label="Filtrar biblioteca por jogo"><header><div><span className="eyebrow">Filtrar por jogo</span><p>Escolha um jogo para ver somente seus clipes e sessões.</p></div>{videoGame&&<button className="ghost" onClick={()=>setVideoGame("")}>Mostrar todos</button>}</header><div className="game-selector-grid">{gameStats.map(game=><button key={game.game} className={videoGame===game.game?"active":""} aria-pressed={videoGame===game.game} onClick={()=>setVideoGame(current=>current===game.game?"":game.game)}><GameCover game={game.game}/><strong>{game.game}</strong><small>{game.clips} clipe{game.clips===1?"":"s"} · {bytes(game.bytes)}</small></button>)}</div></section>}
-        {view==="videos"&&videoSettings&&<details className="video-prefs"><summary><b aria-hidden="true">⚙</b><span>Preferências de gravação e análise</span><em>{(videoSettings.capture_mode==="clips"?`clipes F8 · ${videoSettings.replay_seconds}s`:"gravação contínua")+" · varredura "+({fast:"rápida",balanced:"equilibrada",detailed:"detalhada",custom:"personalizada"}[videoSettings.analysis_profile])+" · "+(videoSettings.delete_after_description?"exclui após descrição":"retenção segura")}</em><i aria-hidden="true">›</i></summary><div className="video-prefs-body"><div className="video-retention"><label className="check"><input type="checkbox" checked={videoSettings.delete_after_description} onChange={e=>setVideoSettings({...videoSettings,delete_after_description:e.target.checked})}/><span>Excluir segmento original depois de uma descrição bem-sucedida, exceto clips preservados</span></label><small>Desativado é o modo seguro recomendado durante os testes.</small></div>
-        <div className="game-capture-behavior"><label><span>Modo do gravador</span><select disabled={busy} value={videoSettings.capture_mode} onChange={e=>void saveCaptureMode(e.target.value as VideoSettings["capture_mode"])}><option value="continuous">Gravação contínua</option><option value="clips">Clipes pelo F8</option></select></label>{videoSettings.capture_mode==="continuous"&&<label className="check"><input type="checkbox" checked={videoSettings.segment_seconds===0} onChange={e=>setVideoSettings({...videoSettings,segment_seconds:e.target.checked?0:60})}/><span>Um único arquivo por sessão de jogo</span></label>}<small>{videoSettings.capture_mode==="clips"?`F8 salva os últimos ${videoSettings.replay_seconds}s; os clipes serão agrupados por sessão.`:videoSettings.segment_seconds===0?"Grava até você sair do jogo ou trocar de aplicativo.":`Divide o vídeo a cada ${videoSettings.segment_seconds}s.`}</small></div>
-        <div className="analysis-profile"><label><span>Varredura da IA</span><select value={videoSettings.analysis_profile} onChange={e=>setAnalysisProfile(e.target.value as VideoSettings["analysis_profile"])}><option value="fast">Rápida · 10s</option><option value="balanced">Equilibrada · 5s</option><option value="detailed">Detalhada · 2s</option><option value="custom">Personalizada</option></select></label><label><span>Intervalo (s)</span><input type="number" min=".5" max="30" step=".5" disabled={videoSettings.analysis_profile!=="custom"} value={videoSettings.scan_interval_seconds} onChange={e=>setVideoSettings({...videoSettings,scan_interval_seconds:+e.target.value})}/></label><label><span>Máximo de keyframes</span><input type="number" min="8" max="160" disabled={videoSettings.analysis_profile!=="custom"} value={videoSettings.max_keyframes} onChange={e=>setVideoSettings({...videoSettings,max_keyframes:+e.target.value})}/></label><p>Detecta mudanças visuais e mantém frames periódicos para acompanhar progresso sem enviar o vídeo inteiro ao modelo.</p></div></div></details>}
+        {view==="videos"&&videoSettings&&<details className="video-prefs"><summary><b aria-hidden="true">⚙</b><span>{ia?"Preferências de gravação e análise":"Preferências de gravação"}</span><em>{(videoSettings.capture_mode==="clips"?`clipes F8 · ${videoSettings.replay_seconds}s`:"gravação contínua")+(ia?" · varredura "+({fast:"rápida",balanced:"equilibrada",detailed:"detalhada",custom:"personalizada"}[videoSettings.analysis_profile])+" · "+(videoSettings.delete_after_description?"exclui após descrição":"retenção segura"):"")}</em><i aria-hidden="true">›</i></summary><div className="video-prefs-body"><div className="video-retention"><label className="check"><input type="checkbox" checked={videoSettings.delete_after_description} onChange={e=>setVideoSettings({...videoSettings,delete_after_description:e.target.checked})}/><span>Excluir segmento original depois de uma descrição bem-sucedida, exceto clips preservados</span></label><small>Desativado é o modo seguro recomendado durante os testes.</small></div>
+        <div className="game-capture-behavior"><label><span>Modo do gravador</span><select disabled={busy} value={videoSettings.capture_mode} onChange={e=>void saveCaptureMode(e.target.value as VideoSettings["capture_mode"])}><option value="continuous">Gravação contínua</option><option value="clips">Clipes pelo F8</option></select></label>{videoSettings.capture_mode==="continuous"&&<label className="check"><input type="checkbox" checked={videoSettings.segment_seconds===0} onChange={e=>setVideoSettings({...videoSettings,segment_seconds:e.target.checked?0:60})}/><span>Um único arquivo por sessão de jogo</span></label>}<small>{videoSettings.capture_mode==="clips"?`F8 salva os últimos ${videoSettings.replay_seconds}s; dois toques dentro desse tempo viram um clipe só, e os clipes são agrupados por sessão.`:videoSettings.segment_seconds===0?"Grava até você sair do jogo ou trocar de aplicativo.":`Divide o vídeo a cada ${videoSettings.segment_seconds}s.`}</small></div>
+        {ia&&<div className="analysis-profile"><label><span>Varredura da IA</span><select value={videoSettings.analysis_profile} onChange={e=>setAnalysisProfile(e.target.value as VideoSettings["analysis_profile"])}><option value="fast">Rápida · 10s</option><option value="balanced">Equilibrada · 5s</option><option value="detailed">Detalhada · 2s</option><option value="custom">Personalizada</option></select></label><label><span>Intervalo (s)</span><input type="number" min=".5" max="30" step=".5" disabled={videoSettings.analysis_profile!=="custom"} value={videoSettings.scan_interval_seconds} onChange={e=>setVideoSettings({...videoSettings,scan_interval_seconds:+e.target.value})}/></label><label><span>Máximo de keyframes</span><input type="number" min="8" max="160" disabled={videoSettings.analysis_profile!=="custom"} value={videoSettings.max_keyframes} onChange={e=>setVideoSettings({...videoSettings,max_keyframes:+e.target.value})}/></label><p>Detecta mudanças visuais e mantém frames periódicos para acompanhar progresso sem enviar o vídeo inteiro ao modelo.</p></div>}</div></details>}
         {view==="videos"&&!joinMode&&<div className="video-sort-bar"><span>Ordenar pela data de gravação</span><select value={videoSort} onChange={event=>setVideoSort(event.target.value as "newest"|"oldest")}><option value="newest">Mais recentes primeiro</option><option value="oldest">Mais antigos primeiro</option></select></div>}
-        {error && <div className="error-banner"><strong>Backend indisponível</strong><span>{error}</span><button onClick={refresh}>Tentar novamente</button></div>}
+        {error && <div className="error-banner" role="alert"><strong>Não foi possível concluir a operação</strong><span>{error}</span><button onClick={()=>{setError("");void refreshCurrentView()}}>Atualizar dados</button><button aria-label="Fechar aviso" onClick={()=>setError("")}>×</button></div>}
+        {isDayView&&memoryLoadedDay!==selectedDay&&<div className="result" role="status">{error?"Os dados deste dia não foram carregados. Use Atualizar dados para tentar novamente.":"Carregando o dia selecionado…"}</div>}
         {view === "busca" && <><div className="search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Buscar em tudo que você viu e ouviu…" /></div>
           <div className="memory-toolbar"><div className="segmented">{[["all","Tudo"],["screen","Telas"],["audio","Áudio"]].map(([key,label])=><button key={key} className={kind===key?"active":""} onClick={()=>setKind(key as typeof kind)}>{label}</button>)}</div><span>{items.length} resultados</span></div>
           <div className="memory-feed">{items.map(item=><CaptureCard item={item} onOpen={(url,name,text,model,itemKind,capture)=>{setShowLightboxVoices(false);setVoiceProfiles(null);setLightbox({url,name,text,model,kind:itemKind,capture})}} onDelete={deleteMemoryItem} disabled={busy} key={item.id}/>)}</div>{!items.length&&<EmptyView view="busca"/>}</>}
-        {view === "resumo" && <><div className="summary-actions"><button className="primary" disabled={busy||!memoryDays.length} onClick={forceSummary}>{summary?"Regerar resumo":"Gerar resumo agora"}</button><button className="danger" disabled={busy||pipeline?.running||queueRunning} onClick={deleteUnkeptRawMedia}>Limpar prints e áudios processados</button>{testResult&&<span>{testResult}</span>}</div><SummaryView summary={summary} onOpenMedia={openSummaryMedia}/></>}
-        {view === "atividades" && <div className="activities-view"><div className="activity-day-bar"><p>Todos os prints com mudança relevante são analisados por aplicativo e continuidade temporal.</p></div><ActivitiesView items={activities} running={hourlyRunning} onGenerate={generateHours} onOpen={frame=>setLightbox({url:frame.url||null,name:frame.title,text:frame.text,model:"",kind:"screen"})}/></div>}
-        {view === "videos" && <div className="video-view"><input ref={videoUploadRef} type="file" accept="video/mp4,video/x-matroska,video/webm,video/quicktime,video/x-msvideo,.m4v" multiple onChange={event=>importVideos(event.target.files)} hidden/><input ref={folderUploadRef} type="file" multiple hidden onChange={event=>importVideoFolder(event.target.files)}/>{testResult&&<div className="result video-result">{testResult}</div>}<div className={`video-grid ${joinMode?"joining":""}`}>{videoLibraryItems.map(entry=>entry.kind==="video"?<VideoCard key={entry.item.path} file={entry.item} busy={busy} selecting={joinMode} selected={selectedVideoPaths.includes(entry.item.path)} onToggle={()=>setSelectedVideoPaths(current=>current.includes(entry.item.path)?current.filter(path=>path!==entry.item.path):[...current,entry.item.path])} onContext={()=>entry.item.id&&openContextFor(`video:${entry.item.id}`)} onDate={()=>editVideoDate(entry.item)} onOpen={()=>setOpenVideoPath(entry.item.path)} onAnalyze={()=>analyzeVideo(entry.item)} onPreserve={()=>preserveVideo(entry.item)} onDelete={()=>deleteVideo(entry.item)} onVideoRef={element=>{videoRefs.current[entry.item.path]=element}} onSeek={seconds=>seekVideo(entry.item,seconds)}/>:<SessionCard key={`session-${entry.item.id}`} session={entry.item} busy={busy} selecting={joinMode} selected={selectedSessionIds.includes(entry.item.id)} onToggle={()=>setSelectedSessionIds(current=>current.includes(entry.item.id)?current.filter(id=>id!==entry.item.id):[...current,entry.item.id])} onOpen={item=>setOpenSessionId(item.id)} onAnalyze={analyzeSession} onDelete={deleteSession} onContext={item=>openContextFor(`session:${item.id}`)}/>)}</div>{!videoLibraryItems.length&&<EmptyView view="videos"/>}</div>}
-        {view === "timeline" && <div className="hourly-view"><div className="hourly-actions"><span>{hourlyRunning?"Qwen está resumindo as horas…":`${timelineHours.length} horas com atividade`}</span><button className="primary" disabled={busy||hourlyRunning||!timelineHours.length} onClick={generateHours}>{hours.length?"Atualizar resumos":"Gerar resumos horários"}</button></div>{timelineHours.length?<div className="hour-grid">{timelineHours.map(({source,summary})=><button key={source.hour} onClick={()=>openHour(source.hour,summary)}><time>{source.hour.slice(11)}:00</time><div><h3>{summary?.title||"Resumo ainda não gerado"}</h3><p>{summary?.narrative||`${source.count} registros disponíveis para esta hora.`}</p><span>{summary?.tags.map(tag=>`#${tag}`).join("  ")||"Clique para ver os detalhes"}</span></div><b>›</b></button>)}</div>:<EmptyView view="timeline"/>}</div>}
-        {view === "jogos" && (summary?.data.games?.length ? <div className="games-grid">{summary.data.games.map((game,i)=><article key={i}><div className="game-cover">{game.title.split(" ").map(x=>x[0]).join("").slice(0,2)}</div><h2>{game.title}</h2><p>{game.minutes} minutos detectados</p><small>{game.event}</small></article>)}</div>:<EmptyView view="jogos"/>)}
+        {view === "resumo" && memoryLoadedDay===selectedDay && <><div className="summary-actions"><button className="primary" disabled={busy||queueRunning||!memoryDays.length} onClick={forceSummary}>{queueRunning?"Processamento em andamento…":summary?"Regerar resumo":"Gerar resumo agora"}</button><button className="danger" disabled={busy||pipeline?.running||queueRunning} onClick={deleteUnkeptRawMedia}>Limpar prints e áudios processados</button>{testResult&&<span>{testResult}</span>}</div>{queueRunning&&<button className="ghost" onClick={openQueuePanel}>Ver processamento</button>}<SummaryView summary={summary} onOpenMedia={openSummaryMedia}/></>}
+        {view === "atividades" && memoryLoadedDay===selectedDay && <div className="activities-view"><div className="activity-day-bar"><p>Todos os prints com mudança relevante são analisados por aplicativo e continuidade temporal.</p></div><ActivitiesView key={selectedDay} items={activities} running={hourlyRunning||busy} onGenerate={generateHours} onShowQueue={openQueuePanel} onOpen={frame=>setLightbox({url:frame.url||null,name:frame.title,text:frame.text,model:"",kind:"screen"})}/></div>}
+        {view === "videos" && <div className="video-view"><input ref={videoUploadRef} type="file" accept="video/mp4,video/x-matroska,video/webm,video/quicktime,video/x-msvideo,.m4v" multiple onChange={event=>importVideos(event.target.files)} hidden/><input ref={folderUploadRef} type="file" multiple hidden onChange={event=>importVideoFolder(event.target.files)}/>{testResult&&<div className="result video-result">{testResult}</div>}<div className={`video-grid ${joinMode?"joining":""}`}>{videoLibraryItems.map(entry=>entry.kind==="video"?<VideoCard key={entry.item.path} file={entry.item} selecting={joinMode} selected={selectedVideoPaths.includes(entry.item.path)} onToggle={()=>setSelectedVideoPaths(current=>current.includes(entry.item.path)?current.filter(path=>path!==entry.item.path):[...current,entry.item.path])} onOpen={()=>setOpenVideoPath(entry.item.path)} onMenu={openVideoMenu} onShare={()=>openShare(entry.item)} onVideoRef={element=>{videoRefs.current[entry.item.path]=element}} onSeek={seconds=>seekVideo(entry.item,seconds)}/>:<SessionCard key={`session-${entry.item.id}`} session={entry.item} selecting={joinMode} selected={selectedSessionIds.includes(entry.item.id)} onToggle={()=>setSelectedSessionIds(current=>current.includes(entry.item.id)?current.filter(id=>id!==entry.item.id):[...current,entry.item.id])} onOpen={item=>setOpenSessionId(item.id)} onMenu={openSessionMenu}/>)}</div>{!videoLibraryItems.length&&<EmptyView view="videos"/>}</div>}
+        {view === "timeline" && memoryLoadedDay===selectedDay && <div className="hourly-view"><div className="hourly-actions"><span>{hourlyRunning?"Qwen está resumindo as horas…":`${timelineHours.length} horas com atividade`}</span><button className="primary" disabled={busy||hourlyRunning||!timelineHours.length} onClick={generateHours}>{hours.length?"Atualizar resumos":"Gerar resumos horários"}</button></div>{timelineHours.length?<div className="hour-grid">{timelineHours.map(({source,summary})=><button key={source.hour} onClick={()=>openHour(source.hour,summary)}><time>{source.hour.slice(11)}:00</time><div><h3>{summary?.title||"Resumo ainda não gerado"}</h3><p>{summary?.narrative||`${source.count} registros disponíveis para esta hora.`}</p><span>{summary?.tags.map(tag=>`#${tag}`).join("  ")||"Clique para ver os detalhes"}</span></div><b>›</b></button>)}</div>:<EmptyView view="timeline"/>}</div>}
+        {view === "jogos" && memoryLoadedDay===selectedDay && (summary?.data.games?.length ? <div className="games-grid">{summary.data.games.map((game,i)=><article key={i}><div className="game-cover">{game.title.split(" ").map(x=>x[0]).join("").slice(0,2)}</div><h2>{game.title}</h2><p>{game.minutes} minutos detectados</p><small>{game.event}</small></article>)}</div>:<EmptyView view="jogos"/>)}
         {view==="captura"&&<div className="captura-view">
           <div className="sensor-tiles">
             <button className="tile" onClick={()=>openFiles("audio")}><header><i className={`dot ${status?.audio.active?"ok":""}`}/>Áudio</header><b>{status?.files.audio.count||0}</b><small>{bytes(status?.files.audio.bytes)} · {status?.audio.active?"captura ativa":"inativo"}</small></button>
@@ -1174,6 +1571,7 @@ function App() {
             <button className={capturaTab==="fila"?"active":""} onClick={()=>setCapturaTab("fila")}>Fila{queueCount>0&&<span>{queueCount}</span>}</button>
             <button className={capturaTab==="arquivos"?"active":""} onClick={()=>{setCapturaTab("arquivos");if(!rawFiles.length)void switchFiles(fileKind)}}>Arquivos brutos</button>
             <button className={capturaTab==="diagnostico"?"active":""} onClick={()=>setCapturaTab("diagnostico")}>Diagnóstico</button>
+            <button className={capturaTab==="tags"?"active":""} onClick={()=>setCapturaTab("tags")}>Tags</button>
           </nav>
           {capturaTab==="fila"&&<><div className="queue-head">
             <div className="queue-summary">
@@ -1198,7 +1596,7 @@ function App() {
             </div>
           </div>
       <p className="help">A execução é sequencial: vídeos e sessões primeiro, depois todos os áudios e, por fim, as telas. {videoSettings?.thinking_enabled?"O raciocínio interno do Qwen está ativado; as etapas verificáveis e o resultado final aparecem aqui.":"A fila mostra transcrição, capítulos, pesquisas, síntese e possíveis erros."}</p>
-      <div className="queue-list">{queueJobs.map(job=>job.kind==="video"?<article className={`${job.status||"processing"} video-job`} key={job.id}><b>▶</b><div><strong>{job.title||"Análise de vídeo"}</strong><span>{job.stage}</span><div className="job-progress"><i style={{width:`${job.progress||0}%`}}/><em>{job.progress||0}%</em></div><AIInspector job={job}/>{!!job.trace?.length&&<details className="job-trace"><summary>Acompanhar evidências e decisões</summary>{job.trace.map((event,index)=><section key={`${event.time}-${index}`}><time>{event.chapter?`Capítulo ${event.chapter}`:"Síntese"}</time>{event.title&&<strong>{event.title}</strong>}<p>{event.detail}</p>{!!event.evidence?.length&&<ul>{event.evidence.map((item,i)=><li key={i}>{item}</li>)}</ul>}{event.interpretation&&<small>Interpretação: {event.interpretation}</small>}</section>)}</details>}{job.error&&<small>{job.error}</small>}</div><em>Áudio + vídeo</em>{job.status!=="error"&&<button className="queue-remove" disabled={busy} onClick={()=>cancelVideoJob(job)}>Cancelar</button>}</article>:job.kind==="screen_sequence"?<article className={`${job.status||"processing"} video-job`} key={job.id}><b>▣</b><div><strong>{job.title}</strong><span>{job.stage}</span><div className="job-progress"><i style={{width:`${job.progress||0}%`}}/><em>{job.progress||0}%</em></div>{job.error&&<small>{job.error}</small>}</div><em>Vários frames</em>{job.status!=="error"&&<button className="queue-remove" disabled={busy} onClick={()=>cancelScreenSequenceJob(job)}>Cancelar</button>}</article>:<article className={`${job.status||"processing"} summary-job`} key={job.id}><b>{job.status==="error"?"!":"✦"}</b><div><strong>{job.kind==="hourly"?"Timeline por hora":"Resumo do dia"}</strong><span>{job.stage}</span></div><em>Qwen</em></article>)}{queue.map(item=><article className={item.status} key={item.id}><b>{item.status==="processing"?"●":`#${item.position}`}</b>{item.kind==="screen"?<button className="queue-preview" onClick={()=>setLightbox({url:item.url,name:item.name,text:"Ainda não processada",model:""})}><img src={item.url} loading="lazy"/></button>:<AudioPlayer src={item.url}/>}<div><strong>{item.name}</strong><span>{item.stage}</span>{item.error&&<small>{item.error}</small>}</div><em>{item.kind==="screen"?"Tela":"Áudio"}</em><button className="queue-remove" disabled={busy} onClick={()=>removeQueueItem(item)}>Remover da fila</button></article>)}</div>
+      <div className="queue-list">{queueJobs.map(job=>job.kind==="video"?<article className={`${job.status||"processing"} video-job`} key={job.id}><b>▶</b><div><strong>{job.title||"Análise de vídeo"}</strong><span>{job.stage}</span><div className="job-progress"><i style={{width:`${job.progress||0}%`}}/><em>{job.progress||0}%</em></div><AIInspector job={job}/>{!!job.trace?.length&&<details className="job-trace"><summary>Acompanhar evidências e decisões</summary>{job.trace.map((event,index)=><section key={`${event.time}-${index}`}><time>{event.chapter?`Capítulo ${event.chapter}`:"Síntese"}</time>{event.title&&<strong>{event.title}</strong>}<p>{event.detail}</p>{!!event.evidence?.length&&<ul>{event.evidence.map((item,i)=><li key={i}>{item}</li>)}</ul>}{event.interpretation&&<small>Interpretação: {event.interpretation}</small>}</section>)}</details>}{job.error&&<small>{job.error}</small>}</div><em>Áudio + vídeo</em>{job.status!=="error"&&<button className="queue-remove" disabled={busy} onClick={()=>cancelVideoJob(job)}>Cancelar</button>}</article>:job.kind==="screen_sequence"?<article className={`${job.status||"processing"} video-job`} key={job.id}><b>▣</b><div><strong>{job.title}</strong><span>{job.stage}</span><div className="job-progress"><i style={{width:`${job.progress||0}%`}}/><em>{job.progress||0}%</em></div>{job.error&&<small>{job.error}</small>}</div><em>Vários frames</em>{job.status!=="error"&&<button className="queue-remove" disabled={busy} onClick={()=>cancelScreenSequenceJob(job)}>Cancelar</button>}</article>:<article className={`${job.status||"processing"} summary-job`} key={job.id}><b>{job.status==="error"?"!":"✦"}</b><div><strong>{job.title || (job.kind==="hourly"?"Timeline por hora":"Resumo do dia")}</strong><span>{job.stage}</span>{job.detail&&<small>{job.detail}</small>}{job.updated_at&&<small>Última atualização: {new Date(job.updated_at).toLocaleString("pt-BR")}</small>}{job.progress!==undefined&&<div className="job-progress"><i style={{width:`${job.progress}%`}}/><em>{job.progress}% dos dias</em></div>}{!!job.days?.length&&<details className="job-trace"><summary>Ver dias do lote ({job.days.length})</summary>{job.days.map(day=><section key={day.day}><strong>{new Date(`${day.day}T12:00:00`).toLocaleDateString("pt-BR")} · {day.status==="done"?"Concluído":day.status==="error"?"Falhou":day.status==="processing"?"Em andamento":"Aguardando"}</strong><p>{day.stage}</p>{day.error&&<small>{day.error}</small>}</section>)}</details>}</div><em>Qwen</em></article>)}{queue.map(item=><article className={item.status} key={item.id}><b>{item.status==="processing"?"●":`#${item.position}`}</b>{item.kind==="screen"?<button className="queue-preview" onClick={()=>setLightbox({url:item.url,name:item.name,text:"Ainda não processada",model:""})}><img src={item.url} loading="lazy"/></button>:<AudioPlayer src={item.url}/>}<div><strong>{item.name}</strong><span>{item.stage}</span>{item.error&&<small>{item.error}</small>}</div><em>{item.kind==="screen"?"Tela":"Áudio"}</em><button className="queue-remove" disabled={busy} onClick={()=>removeQueueItem(item)}>Remover da fila</button></article>)}</div>
       {!queue.length&&!queueJobs.length&&<div className="result">A fila está vazia.</div>}</>}
           {capturaTab==="arquivos"&&<><div className="file-toolbar"><div className="segmented"><button className={fileKind==="screen"?"active":""} onClick={()=>switchFiles("screen")}>Telas</button><button className={fileKind==="audio"?"active":""} onClick={()=>switchFiles("audio")}>Áudio</button></div><span>{rawFiles.length} de {fileTotal} arquivos</span>{fileKind==="screen"&&<><button className="secondary" title={selectedScreenPaths.length>30?"A análise aceita no máximo 30 frames":""} disabled={busy||selectedScreenPaths.length<2||selectedScreenPaths.length>30} onClick={testScreenSequence}>Analisar sequência · {selectedScreenPaths.length}</button>{selectedScreenPaths.length>0&&<button className="danger" disabled={busy||activeScreenSequenceJob!==null} onClick={deleteSelectedScreens}>Excluir selecionados · {selectedScreenPaths.length}</button>}{selectedScreenPaths.length>0&&<button className="ghost" disabled={busy} onClick={()=>{setSelectedScreenPaths([]);screenSelectionAnchor.current=null;setScreenSequenceResult(null)}}>Limpar seleção</button>}</>}<button className="danger clear-unprocessed" disabled={busy} onClick={deleteAllUnprocessedFiles}>Limpar não processados</button></div>
       {busy && <div className="result">Carregando arquivos…</div>}
@@ -1207,6 +1605,7 @@ function App() {
       {screenSequenceResult&&<section className="sequence-result"><span className="eyebrow">Teste com {screenSequenceResult.frame_count} frames · {screenSequenceResult.model}</span><h3>{screenSequenceResult.title}</h3><div>{screenSequenceResult.narrative.split(/\n+/).filter(Boolean).map((paragraph,index)=><p key={index}>{paragraph}</p>)}</div>{screenSequenceResult.events.length>0&&<details open><summary>Linha de acontecimentos</summary><ol>{screenSequenceResult.events.map((event,index)=><li key={index}>{event}</li>)}</ol></details>}<div className="tags">{screenSequenceResult.tags.map(tag=><span key={tag}>{tag}</span>)}</div></section>}
       {testResult && <div className="result">{testResult}</div>}
       {rawFiles.length < fileTotal && <button className="secondary load-more" disabled={busy} onClick={loadMoreFiles}>Carregar mais 100</button>}</>}
+          {capturaTab==="tags"&&<TagsView/>}
           {capturaTab==="diagnostico"&&<><div className="test-grid"><button className="test-card" disabled={busy} onClick={testAudio}><b>▮▮</b><span><strong>Testar áudio</strong><small>Grava 5 segundos e mede o volume</small></span></button>
       <button className="test-card" disabled={busy} onClick={testScreen}><b>▣</b><span><strong>Testar telas</strong><small>Valida privacidade e os dois monitores</small></span></button></div>
       {testResult && <div className="result">{testResult}</div>}
@@ -1223,12 +1622,15 @@ function App() {
       <button className={mobileNavOpen?"active":""} aria-expanded={mobileNavOpen} onClick={()=>setMobileNavOpen(open=>!open)}><b>☰</b><span>Menu</span></button>
     </nav>
 
+    {cardMenu&&<ContextMenu x={cardMenu.x} y={cardMenu.y} title={cardMenu.title} items={cardMenu.items} onClose={()=>setCardMenu(null)}/>}
+    {shareTarget&&<ShareClipModal target={shareTarget} onError={setError} onClose={()=>setShareTarget(null)}/>}
+    {editingOpen&&<EditingFolderModal settings={videoSettings} onSettings={setVideoSettings} onError={setError} onClose={()=>setEditingOpen(false)}/>}
     {contextModalOpen&&<ContextPickerModal sessions={videoSessions} files={videoFiles} target={contextTarget} draft={contextDraft} busy={busy} onTarget={selectContextTarget} onDraft={setContextDraft} onSave={saveManualContext} onClose={()=>{setContextModalOpen(false);setContextTarget("");setContextDraft("")}}/>}
-    {openVideoPath&&videoFiles.find(file=>file.path===openVideoPath)&&<VideoViewer file={videoFiles.find(file=>file.path===openVideoPath)!} preroll={videoSettings?.marker_preroll_seconds||8} hotkey={videoSettings?.marker_hotkey||"F8"} onRefresh={refreshVideos} onClose={()=>setOpenVideoPath(null)}/>} 
-    {openSessionId!==null&&videoSessions.find(session=>session.id===openSessionId)&&<SessionViewer session={videoSessions.find(session=>session.id===openSessionId)!} preroll={videoSettings?.marker_preroll_seconds||8} hotkey={videoSettings?.marker_hotkey||"F8"} onRefresh={refreshVideos} onEditDate={editSessionClipDate} onClose={()=>setOpenSessionId(null)}/>} 
+    {openVideoPath&&videoFiles.find(file=>file.path===openVideoPath)&&<VideoViewer file={videoFiles.find(file=>file.path===openVideoPath)!} preroll={videoSettings?.marker_preroll_seconds||8} hotkey={videoSettings?.marker_hotkey||"F8"} ia={ia} onRefresh={refreshVideos} onShare={()=>openShare(videoFiles.find(file=>file.path===openVideoPath)!)} onClose={()=>setOpenVideoPath(null)}/>}
+    {openSessionId!==null&&videoSessions.find(session=>session.id===openSessionId)&&<SessionViewer session={videoSessions.find(session=>session.id===openSessionId)!} preroll={videoSettings?.marker_preroll_seconds||8} hotkey={videoSettings?.marker_hotkey||"F8"} busy={busy} ia={ia} onRefresh={refreshVideos} onEditDate={editSessionClipDate} onShare={clip=>openShare(clip)} onDeleteClip={clip=>void deleteVideo(clip)} onRemoveClip={clip=>detachSessionClip(videoSessions.find(session=>session.id===openSessionId)!,clip)} onClose={()=>setOpenSessionId(null)}/>}
 
     {panel === "settings" && settings && <Modal title="Configurações" className="settings-modal" onClose={() => setPanel(null)}>
-      <nav className="settings-tabs">{([['capture','Captura'],['storage','Armazenamento'],['ai','Inteligência artificial'],['video','Vídeo seletivo']] as const).map(([key,label])=><button key={key} className={settingsTab===key?"active":""} onClick={()=>setSettingsTab(key)}>{label}</button>)}</nav>
+      <nav className="settings-tabs">{([['capture','Captura'],['storage','Armazenamento'],['ai','Inteligência artificial'],['video','Vídeo seletivo'],['prompts','Prompts']] as const).filter(([key])=>abasDeAjustesDisponiveis(mode).includes(key)).map(([key,label])=><button key={key} className={settingsTab===key?"active":""} onClick={()=>setSettingsTab(key)}>{label}</button>)}</nav>
       <div className="settings-tab-content">
       {settingsTab==="storage"&&storage&&<section className="storage-settings settings-tab-card"><div className="storage-heading"><div><span className="eyebrow">Armazenamento</span><h3>Armazenamento de mídia</h3><p>Prints, áudios, vídeos e clips novos serão gravados dentro desta pasta.</p></div><span>{bytes(storage.disk.free)} livres</span></div>
         <label><span>Pasta-raiz</span><input list="storage-candidates" value={storageRoot} onChange={e=>setStorageRoot(e.target.value)} placeholder="/mnt/meu-hd/lume"/><datalist id="storage-candidates">{storage.candidates.map(candidate=><option key={candidate.root} value={candidate.root}>{bytes(candidate.disk.free)} livres de {bytes(candidate.disk.total)}</option>)}</datalist></label>
@@ -1236,14 +1638,15 @@ function App() {
         <small>Os arquivos existentes permanecem na pasta atual. A pasta escolhida precisa estar montada e permitir gravação.</small>
       </section>}
       {settingsTab==="storage"&&cleanupSettings&&<section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Retenção segura</span><h3>Limpeza de prints e áudios processados</h3><p>Apaga o arquivo bruto somente depois que atividades, timeline e resumo do dia terminarem. Transcrições, descrições e índice permanecem; vídeos e sessões nunca são alterados.</p></div></div><label className="switch-row"><input type="checkbox" checked={cleanupSettings.enabled} onChange={event=>setCleanupSettings({enabled:event.target.checked})}/><span>{cleanupSettings.enabled?"Limpeza automática ativada":"Limpeza automática desativada"}</span></label><button className="secondary" type="button" disabled={busy||pipeline?.running||queueRunning} onClick={deleteUnkeptRawMedia}>Executar limpeza segura agora</button><small>Capturas marcadas como Manter e dias ainda não consolidados são sempre preservados.</small></section>}
+      {settingsTab==="prompts"&&(promptItems?<PromptsTab items={promptItems} drafts={promptDrafts} busy={busy} onDraft={(key,value)=>setPromptDrafts(current=>({...current,[key]:value}))} onReset={resetPrompt}/>:<div className="result">Carregando prompts…</div>)}
       {settingsTab==="capture"&&<><section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Captura de tela</span><h3>Quando salvar uma captura?</h3></div></div><div className="form-grid"><label><span>Modo</span><select value={settings.capture_mode} onChange={e => setSettings({...settings, capture_mode: e.target.value as "interval"|"change"})}><option value="interval">Em intervalo fixo</option><option value="change">Quando a tela mudar</option></select></label>{settings.capture_mode==="interval"?<label><span>Intervalo entre capturas (s)</span><input type="number" min="1" value={settings.interval_seconds} onChange={e => setSettings({...settings, interval_seconds: +e.target.value})}/></label>:<><label><span>Verificar mudanças a cada (s)</span><input type="number" min="1" value={settings.change_poll_seconds} onChange={e => setSettings({...settings, change_poll_seconds: +e.target.value})}/></label><label><span>Mudança mínima para capturar (%)</span><input type="number" min="0.1" step="0.1" value={settings.change_threshold_percent} onChange={e => setSettings({...settings, change_threshold_percent: +e.target.value})}/></label><label><span>Capturar mesmo sem mudança após (s)</span><input type="number" min="1" value={settings.change_max_interval_seconds} onChange={e => setSettings({...settings, change_max_interval_seconds: +e.target.value})}/></label></>}</div></section>
       <details className="settings-group advanced-settings"><summary>Opções avançadas de tela e privacidade</summary><div className="form-grid"><label><span>Resolução máxima</span><input value={settings.max_geometry} onChange={e => setSettings({...settings, max_geometry: e.target.value})}/></label></div><label className="check"><input type="checkbox" checked={settings.split_monitors} onChange={e => setSettings({...settings, split_monitors: e.target.checked})}/><span>Salvar cada monitor separadamente</span></label><label className="check"><input type="checkbox" checked={settings.active_monitor_only} onChange={e => setSettings({...settings, active_monitor_only: e.target.checked})}/><span>Capturar somente o monitor da janela ativa</span></label><label className="check"><input type="checkbox" checked={settings.privacy_fail_closed} onChange={e => setSettings({...settings, privacy_fail_closed: e.target.checked})}/><span>Bloquear captura se a janela ativa não puder ser identificada</span></label></details>
       {schedule&&<section className="settings-group schedule-settings"><div><span className="eyebrow">Automação diária</span><h3>Processamento automático</h3><p>Processa áudio, telas, timeline e resumo.</p></div><label className="switch-row"><input type="checkbox" checked={schedule.enabled} onChange={e=>setSchedule({...schedule,enabled:e.target.checked})}/><span>{schedule.enabled?"Ativada":"Desativada"}</span></label>{schedule.enabled&&<div className="schedule-time"><label><span>Executar às</span><input type="time" value={schedule.time} onChange={e=>setSchedule({...schedule,time:e.target.value})}/></label>{schedule.next_run&&<small>Próxima execução: {schedule.next_run}</small>}</div>}</section>}
       {settings.capture_mode==="change"&&<section className="settings-group change-test"><div className="settings-group-title"><div><span className="eyebrow">Teste prático</span><h3>Esta mudança seria capturada?</h3><p>Guarde a tela atual, faça uma mudança e compare usando o mesmo cálculo da captura real.</p></div></div><div className="change-test-actions"><button className="secondary" disabled={busy} onClick={startScreenChangeTest}>{screenChangeTest?.token?"Recomeçar teste":"Guardar referência"}</button><button className="primary" disabled={busy||!screenChangeTest?.token} onClick={compareScreenChangeTest}>Comparar agora</button></div>{screenChangeTest&&<div className={`change-test-result ${screenChangeTest.would_capture===true?"capture":screenChangeTest.would_capture===false?"skip":"waiting"}`}>{screenChangeTest.change_percent!==undefined?<><strong>{screenChangeTest.change_percent.toFixed(2)}% de mudança</strong><span>Limite atual: {settings.change_threshold_percent}% · {screenChangeTest.would_capture?"Capturaria":"Não capturaria"}</span><i><b style={{width:Math.min(100,screenChangeTest.change_percent/Math.max(settings.change_threshold_percent,0.1)*100)+"%"}}/></i></>:<span>{screenChangeTest.message}</span>}</div>}</section>}</>}
-      {(settingsTab==="ai"||settingsTab==="video")&&videoSettings&&<VideoSettingsTab tab={settingsTab} settings={videoSettings} patterns={videoPatterns} models={ollamaModels} ollamaOnline={ollamaOnline} busy={busy} advanced={videoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>} 
-      {settingsTab==="video"&&videoSettings&&<AppCaptureRules settings={videoSettings} patterns={videoPatterns} advanced={videoAdvanced} onAdvanced={setVideoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>} 
+      {(settingsTab==="ai"||settingsTab==="video")&&videoSettings&&<VideoSettingsTab tab={settingsTab} settings={videoSettings} patterns={videoPatterns} models={ollamaModels} ollamaOnline={ollamaOnline} busy={busy} ia={ia} advanced={videoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>}
+      {settingsTab==="video"&&videoSettings&&<AppCaptureRules settings={videoSettings} patterns={videoPatterns} advanced={videoAdvanced} onAdvanced={setVideoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>}
       </div>
-      <footer><button className="ghost" disabled={savingSettings} onClick={() => setPanel(null)}>Cancelar</button><button className="primary" disabled={savingSettings||!schedule||!storage||!videoSettings||!cleanupSettings||!storageRoot.trim()} onClick={saveAllSettings}>{savingSettings?"Salvando…":"Salvar configurações"}</button></footer>
+      <footer>{settingsError&&<span className="settings-error" role="alert">{settingsError}</span>}<button className="ghost" disabled={savingSettings} onClick={() => setPanel(null)}>Cancelar</button><button className="primary" disabled={savingSettings||!schedule||!storage||!videoSettings||!cleanupSettings||!storageRoot.trim()} onClick={saveAllSettings}>{savingSettings?"Salvando…":"Salvar configurações"}</button></footer>
     </Modal>}
 
     {panel === "privacy" && <Modal title="Janelas sensíveis" onClose={() => setPanel(null)}>
@@ -1252,12 +1655,12 @@ function App() {
       <footer><button className="ghost" onClick={() => setPanel(null)}>Cancelar</button><button className="primary" disabled={busy} onClick={savePrivacy}>Salvar lista</button></footer>
     </Modal>}
 
-    
-    
-    
+
+
+
     {selectedHour&&<Modal title={`${selectedHour.key.slice(11)}:00 — detalhes da hora`} onClose={()=>setSelectedHour(null)}>{selectedHour.summary&&<div className="hour-detail-summary"><h3>{selectedHour.summary.title}</h3><p>{selectedHour.summary.narrative}</p><small>Resumido por {selectedHour.summary.model}</small></div>}<div className="hour-detail-list">{selectedHour.items.map(item=><CaptureCard key={item.id} item={item} onOpen={(url,name,text,model,itemKind,capture)=>{setShowLightboxVoices(false);setVoiceProfiles(null);setLightbox({url,name,text,model,kind:itemKind,capture})}} onDelete={deleteMemoryItem} disabled={busy}/>)}</div>{!selectedHour.items.length&&<div className="result">Nenhum registro detalhado encontrado.</div>}</Modal>}
 
-    {palette&&<div className="palette-overlay" onClick={()=>setPalette(false)}>
+    {palette&&ia&&<div className="palette-overlay" onClick={()=>setPalette(false)}>
       <div className="palette" onClick={event=>event.stopPropagation()}>
         <input autoFocus value={paletteQuery} placeholder="Buscar memórias ou executar uma ação…" onChange={event=>setPaletteQuery(event.target.value)} onKeyDown={event=>{if(event.key==="Enter"&&paletteQuery.trim()){setQuery(paletteQuery);setView("busca");setPalette(false)}}}/>
         {!!paletteItems.length&&<div className="palette-section"><span className="palette-label">Memórias</span>

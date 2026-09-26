@@ -1,0 +1,18 @@
+[Unit]
+Description=Lume - atalho de gravacao (toque e segurada)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=@LUME_ROOT@
+ExecStart=@LUME_PYTHON@ -m app.capture.hotkeyd
+# Sem o grupo `input` o daemon sai avisando em vez de insistir: o toque
+# continua chegando pelo atalho do KDE, e uma nova tentativa a cada 30s deixa
+# o aviso legível no journal em vez de virar um laço de reinícios.
+Restart=on-failure
+RestartSec=30
+Nice=5
+
+[Install]
+WantedBy=default.target

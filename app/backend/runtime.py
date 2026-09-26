@@ -17,6 +17,10 @@ from typing import Iterator
 IS_WINDOWS = os.name == "nt"
 IS_LINUX = sys.platform.startswith("linux")
 
+# The video loop refreshes its activity file every two seconds. Allow slow
+# iterations, but never treat an abandoned file as a live recording.
+VIDEO_ACTIVITY_FRESH_SECONDS = 15.0
+
 
 def runtime_dir() -> Path:
     """Diretório para arquivos efêmeros (locks, estado volátil).

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Fotografa o estado do áudio no instante em que a HUD mostra algo errado.
+#
+# Rode ENQUANTO o problema está acontecendo:
+#     ~/bin/lume-audio-diag
+#
+# Grava 15 s dos três buses, mostra quem está ligado em quem e quais apps
+# tocam. É o bastante para dizer se o áudio está errado ou se a HUD é que está.
+set -uo pipefail
+SECONDS_TO_SAMPLE="${1:-15}"
+out="$HOME/lume-diagnostico"
+mkdir -p "$out"
+
+echo "== Apps tocando agora =="
+pactl list sink-inputs 2>/dev/null | awk '
+  /^Sink Input #/ {id=$3}
+  /application\.process\.binary/ {gsub(/.*= "|"$/,""); bin=$0}
+  /node\.name = / {gsub(/.*= "|"$/,""); printf "  %-10s %-28s %s\n", id, $0, bin; bin=""}'
+
+echo
+echo "== Quem alimenta cada bus (só isto define o que entra na faixa) =="
+for b in MicBus DiscordBus RecordBus; do
+  echo "  $b:"
+  pw-link -l 2>/dev/null | awk -v pat="^$b:playback" '
+    $0 ~ pat {f=1; next} /^[^ ]/ {f=0} f && /\|<-/ {print "     " $0}'
+done
+
+echo
+echo "== Amostrando ${SECONDS_TO_SAMPLE}s dos três buses =="
+for d in MicBus DiscordBus RecordBus; do
+  timeout "$SECONDS_TO_SAMPLE" parec --device=$d.monitor --format=s16le --rate=16000 \
+    --channels=1 --raw 2>/dev/null | ffmpeg -hide_banner -loglevel error \
+    -f s16le -ar 16000 -ac 1 -i - -y "$out/$d.wav" &
+done
+wait
+
+python3 - "$out" <<'PY'
+import sys, wave, pathlib, array, math
+out = pathlib.Path(sys.argv[1])
+sig = {}
+for k in ("MicBus", "DiscordBus", "RecordBus"):
+    with wave.open(str(out/f"{k}.wav")) as w:
+        a = array.array("h"); a.frombytes(w.readframes(w.getnframes()))
+        sig[k] = a
+n = min(len(v) for v in sig.values())
+secs = n // 16000
+print(f"\n  atividade por segundo ('#' = som acima de -50 dBFS)")
+print("       " + "".join(str(i % 10) for i in range(secs)))
+for k, v in sig.items():
+    row = ""
+    for i in range(secs):
+        seg = v[i*16000:(i+1)*16000]
+        rms = math.sqrt(sum(x*x for x in seg)/len(seg)) if seg else 0
+        row += "#" if rms > 32768 * 10**(-50/20) else "."
+    peak = max((abs(x) for x in v[:n]), default=0)
+    db = 20*math.log10(peak/32768) if peak else -99
+    print(f"  {k:>10} {row}   pico {db:6.1f} dBFS")
+print(f"\n  WAVs para ouvir: {out}/*.wav")
+PY

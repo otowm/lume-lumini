@@ -1,0 +1,16 @@
+rem Copie para `lume-local.cmd` (que o git ignora) e ajuste para esta maquina.
+rem Sem este arquivo o Lume responde so em 127.0.0.1 e usa o requirements completo.
+
+rem Banco num volume compartilhado com outra instalacao:
+rem set "CAPTURA_DIA_DB_PATH=F:\lume\lume.sqlite3"
+
+rem So o gravador, sem as dependencias da analise:
+rem set "LUME_REQUIREMENTS=requirements-lumini.txt"
+rem set "LUME_IMPORT_CHECK=import fastapi, uvicorn, websockets"
+
+rem Abrir a interface para outro PC. As tres linhas andam juntas: o backend
+rem confere o IP de quem chega e o cabecalho Host, e sem elas o acesso de fora
+rem leva 403 mesmo com o bind aberto.
+rem set "LUME_BIND_HOST=0.0.0.0"
+rem set "LUME_REMOTE_NETWORKS=192.168.0.0/16"
+rem set "LUME_REMOTE_HOSTS=192.168.0.20"

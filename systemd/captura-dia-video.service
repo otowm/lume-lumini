@@ -5,6 +5,10 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+# O laço usa o Python do projeto para registrar o tempo de jogo em
+# `game_activity_sessions`; o script vive em ~/bin, longe do checkout.
+Environment=LUME_ROOT=@LUME_ROOT@
+Environment=LUME_PYTHON=@LUME_PYTHON@
 ExecStart=%h/bin/captura-video-loop.sh
 Restart=on-failure
 RestartSec=5
