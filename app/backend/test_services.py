@@ -801,6 +801,29 @@ class LinuxCaptureModeTests(unittest.TestCase):
             ["bash", str(self.SCRIPT)], env=env, stdout=subprocess.DEVNULL, text=True,
             stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL)
 
+    def test_lumini_records_without_background_capture_units(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._fixture(directory,
+                "VIDEO_ENABLED=true\nVIDEO_CAPTURE_MODE=clips\nPAUSE_OTHER_CAPTURES=true\n",
+                "[clips] osu!\n")
+            systemctl = directory / "stubs" / "systemctl"
+            systemctl.write_text("#!/usr/bin/env bash\n"
+                "case \"$2\" in\n"
+                "  is-active) exit 4 ;;\n"
+                "  stop) echo 'Unit captura-dia-audio.service not loaded.' >&2; exit 5 ;;\n"
+                "esac\nexit 0\n")
+            systemctl.chmod(0o755)
+            loop = self._run_loop(directory, env, capture_stderr=True)
+            try:
+                log = directory / "gsr.log"
+                self._wait_for(lambda: log.exists() or loop.poll() is not None)
+                started = log.exists()
+            finally:
+                if loop.poll() is None: loop.terminate()
+                error = loop.communicate(timeout=15)[1]
+            self.assertTrue(started, f"Lumini não chegou ao gravador: {error}")
+
     def test_audio_buses_are_ensured_before_the_recorder_starts(self):
         """O gravador de jogo não pode depender da captura de áudio estar de pé.
 

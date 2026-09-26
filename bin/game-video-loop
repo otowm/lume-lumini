@@ -268,10 +268,22 @@ resume_background_captures() {
 pause_background_captures() {
   [[ "$PAUSE_OTHER_CAPTURES" == true && "$captures_paused" == false ]] || return 0
   local restore_audio=0 restore_screen=0
-  systemctl --user is-active --quiet captura-dia-audio.service && restore_audio=1
-  systemctl --user is-active --quiet captura-dia-tela.service && restore_screen=1
+  local units=()
+  if systemctl --user is-active --quiet captura-dia-audio.service 2>/dev/null; then
+    restore_audio=1
+    units+=(captura-dia-audio.service)
+  fi
+  if systemctl --user is-active --quiet captura-dia-tela.service 2>/dev/null; then
+    restore_screen=1
+    units+=(captura-dia-tela.service)
+  fi
+  # No Lumini estas units não existem. Parar uma unit ausente devolve 5 e,
+  # sob set -e, derrubava o gravador antes mesmo de abrir o replay buffer.
+  ((${#units[@]})) || return 0
   printf '%s %s\n' "$restore_audio" "$restore_screen" > "$pause_state"
-  systemctl --user stop captura-dia-audio.service captura-dia-tela.service
+  if ! systemctl --user stop "${units[@]}"; then
+    log "não consegui pausar todas as capturas do dia; a gravação do jogo continuará"
+  fi
   captures_paused=true
 }
 
