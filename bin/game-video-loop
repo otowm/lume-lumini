@@ -6,7 +6,7 @@ config_file="$config_dir/video.conf"
 apps_file="$config_dir/video-apps.txt"
 storage_file="$config_dir/storage.conf"
 VIDEO_ENABLED=false VIDEO_FPS=30 VIDEO_GEOMETRY=1920x1080 VIDEO_SEGMENT_SECONDS=60
-VIDEO_CODEC=h264 VIDEO_QUALITY=high
+VIDEO_CODEC=h264 VIDEO_QUALITY=high VIDEO_ENCODER=auto
 # `clips` mantém o gpu-screen-recorder em replay: nada vai para o disco até o
 # atalho pedir, e o que se salva são os últimos VIDEO_REPLAY_SECONDS segundos.
 VIDEO_CAPTURE_MODE=continuous VIDEO_REPLAY_SECONDS=60
@@ -410,6 +410,32 @@ window_monitor() {
     ((cx>=sx && cx<sx+sw && cy>=sy && cy<sy+sh)) && { printf '%s\n' "$name"; return 0; }
   done < <(screen_layout)
   return 1
+}
+
+# --- Quem codifica ----------------------------------------------------------
+#
+# O VCE das Radeon Polaris (RX 460–590, 540/550) trava com o gpu-screen-recorder:
+# "ring vce0 timeout", reset da GPU, VRAM perdida — para quem está jogando, o PC
+# inteiro cai. Nessas placas o `auto` codifica pela CPU. O gsr só oferece H.264
+# no encoder de CPU, por isso o codec é forçado junto.
+polaris_gpu_present() {
+  local device id
+  for device in "${LUME_DRM_ROOT:-/sys/class/drm}"/card[0-9]*/device; do
+    [[ "$(cat "$device/vendor" 2>/dev/null)" == 0x1002 ]] || continue
+    id=$(( $(cat "$device/device" 2>/dev/null || echo 0) ))
+    # Polaris 10/11/20/21/30 em 0x67C0–0x67FF; Polaris 12 (RX 540/550) em 0x6980–0x699F.
+    if (( (id >= 0x67C0 && id <= 0x67FF) || (id >= 0x6980 && id <= 0x699F) )); then
+      return 0
+    fi
+  done
+  return 1
+}
+
+recorder_encoder() {
+  case "$VIDEO_ENCODER" in
+    gpu|cpu) echo "$VIDEO_ENCODER" ;;
+    *) if polaris_gpu_present; then echo cpu; else echo gpu; fi ;;
+  esac
 }
 
 active_monitor() {
@@ -909,8 +935,10 @@ while true; do
   monitor="$(active_monitor || true)"; [[ -n "$monitor" ]] || { sleep 2; continue; }
   session_mode="$matched_mode"
   stamp="$(date +%F_%H-%M-%S)"
+  encoder="$(recorder_encoder)" codec="$VIDEO_CODEC"
+  [[ "$encoder" == cpu ]] && codec=h264
   command=(gpu-screen-recorder -w "$monitor" -f "$matched_fps" -s "$matched_geometry" -c mp4 \
-           -k "$VIDEO_CODEC" -q "$VIDEO_QUALITY" -fm cfr -cursor yes)
+           -k "$codec" -encoder "$encoder" -q "$VIDEO_QUALITY" -fm cfr -cursor yes)
   if [[ "$session_mode" == clips ]]; then
     # Nada vai para o disco até o atalho pedir: o gsr mantém em RAM os últimos
     # VIDEO_REPLAY_SECONDS. Sem `final`/`partial`, o `cleanup` sabe que não há
@@ -947,6 +975,7 @@ while true; do
     timeout 15 "$audio_bus_script" ensure >/dev/null 2>&1 \
       || log "não consegui garantir os buses de áudio; o gravador pode recusar as fontes"
   fi
+  log "gravando $monitor em $codec pela $([[ "$encoder" == cpu ]] && echo CPU || echo GPU)"
   "${command[@]}" & rec_pid=$!
   session_window="$info"
   session_window_id="$window_info_id"

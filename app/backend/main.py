@@ -61,7 +61,7 @@ ALLOWED_CONFIG = {
     "SPLIT_MONITORS",
     "ACTIVE_MONITOR_ONLY",
     "PRIVACY_FAIL_CLOSED",
-    "VIDEO_ENABLED","VIDEO_FPS","VIDEO_GEOMETRY","VIDEO_SEGMENT_SECONDS","VIDEO_CAPTURE_MODE","VIDEO_REPLAY_SECONDS","VIDEO_CODEC","VIDEO_QUALITY","VIDEO_AUDIO",
+    "VIDEO_ENABLED","VIDEO_FPS","VIDEO_GEOMETRY","VIDEO_SEGMENT_SECONDS","VIDEO_CAPTURE_MODE","VIDEO_REPLAY_SECONDS","VIDEO_CODEC","VIDEO_ENCODER","VIDEO_QUALITY","VIDEO_AUDIO",
     "VIDEO_SAMPLE_FRAMES","VIDEO_SAMPLE_GEOMETRY","VIDEO_RETENTION_MINUTES","DELETE_AFTER_DESCRIPTION","PAUSE_OTHER_CAPTURES",
     "VIDEO_ANALYSIS_PROFILE","VIDEO_SCAN_INTERVAL_SECONDS","VIDEO_MAX_KEYFRAMES","VIDEO_FOCUS_GRACE_SECONDS",
     "VIDEO_WEB_SEARCH_ENABLED","SEARXNG_URL","VIDEO_WEB_SEARCH_SAFETY_LIMIT","AI_THINKING_ENABLED",
@@ -468,6 +468,10 @@ def voice_identity_payloads(rows) -> list[dict]:
 class VideoSettings(BaseModel):
     enabled: bool
     codec: Literal["h264", "hevc"] = "hevc"
+    # `auto` deixa o game-video-loop escolher: o VCE das Radeon Polaris (RX
+    # 460–590) trava a GPU inteira com o gpu-screen-recorder, então lá o vídeo
+    # é codificado pela CPU. Só vale no Linux; no Windows quem codifica é o OBS.
+    encoder: Literal["auto", "gpu", "cpu"] = "auto"
     capture_mode: Literal["continuous", "clips"] = "continuous"
     replay_seconds: int = Field(default=60, ge=10, le=300)
     fps: int = Field(ge=1,le=60)
@@ -754,7 +758,7 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_key_code":config.get("VIDEO_MARKER_KEY_CODE",""),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","encoder":config.get("VIDEO_ENCODER","auto") if config.get("VIDEO_ENCODER","auto") in {"auto","gpu","cpu"} else "auto","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_key_code":config.get("VIDEO_MARKER_KEY_CODE",""),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
 
 
 @app.get("/api/ollama/models")
@@ -799,6 +803,7 @@ VIDEO_FPS={settings.fps}
 VIDEO_GEOMETRY={settings.geometry}
 VIDEO_SEGMENT_SECONDS={settings.segment_seconds}
 VIDEO_CODEC={settings.codec}
+VIDEO_ENCODER={settings.encoder}
 VIDEO_QUALITY=high
 VIDEO_AUDIO='device:MicBus.monitor|device:DiscordBus.monitor|device:RecordBus.monitor,device:MicBus.monitor,device:DiscordBus.monitor,device:RecordBus.monitor'
 VIDEO_SAMPLE_FRAMES={settings.sample_frames}

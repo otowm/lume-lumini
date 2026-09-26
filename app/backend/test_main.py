@@ -2323,6 +2323,9 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
                 set_video_settings(VideoSettings(**before), BackgroundTasks())
                 return get_video_settings()
 
+    def test_cpu_encoder_survives_a_save(self):
+        self.assertEqual(self._round_trip("VIDEO_ENCODER=cpu\n")["encoder"], "cpu")
+
     def test_hud_preferences_survive_a_save(self):
         after = self._round_trip(
             "VIDEO_ENABLED=true\nVIDEO_FPS=60\nVIDEO_GEOMETRY=1920x1080\n"

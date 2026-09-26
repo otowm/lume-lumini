@@ -857,6 +857,43 @@ class LinuxCaptureModeTests(unittest.TestCase):
 
         self.assertIn("ensure", calls)
 
+    def _recorder_argv(self, config: str, device_id: str) -> str:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            env = self._fixture(
+                directory, "VIDEO_ENABLED=true\nVIDEO_CODEC=hevc\nPAUSE_OTHER_CAPTURES=false\n" + config,
+                "osu!\n")
+            card = directory / "drm" / "card1" / "device"
+            card.mkdir(parents=True)
+            (card / "vendor").write_text("0x1002\n")
+            (card / "device").write_text(device_id + "\n")
+            env["LUME_DRM_ROOT"] = str(directory / "drm")
+            loop = self._run_loop(directory, env)
+            try:
+                argv = self._wait_for(lambda: (directory / "gsr.log").read_text(encoding="utf-8")
+                                      if (directory / "gsr.log").is_file() else "")
+            finally:
+                loop.terminate()
+                loop.wait(timeout=15)
+        self.assertIsNotNone(argv, "o gravador não foi iniciado")
+        return argv
+
+    def test_polaris_records_on_the_cpu_by_default(self):
+        """O VCE de uma RX 550 derrubou a GPU inteira ("ring vce0 timeout").
+
+        Em Polaris o ``auto`` codifica pela CPU, e o gsr só aceita H.264 ali.
+        """
+        argv = self._recorder_argv("", "0x699f")
+        self.assertIn("-k h264 -encoder cpu", argv)
+
+    def test_other_gpus_keep_the_hardware_encoder(self):
+        argv = self._recorder_argv("", "0x744c")
+        self.assertIn("-k hevc -encoder gpu", argv)
+
+    def test_explicit_encoder_overrides_detection(self):
+        argv = self._recorder_argv("VIDEO_ENCODER=gpu\n", "0x699f")
+        self.assertIn("-k hevc -encoder gpu", argv)
+
     def test_a_recorder_that_fails_to_start_is_not_retried_every_two_seconds(self):
         """Um gravador que morre ao subir não pode virar um laço invisível.
 
