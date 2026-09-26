@@ -158,6 +158,15 @@ done
 sed -i -e 's|^After=captura-dia.target$|After=captura-dia-video.service|' \
        -e '/^Wants=captura-dia.target$/d' "$unit_dir/lume.service"
 
+# Só instala versões preparadas pelo botão do app, antes de iniciar a captura.
+sed -e "s|@LUME_ROOT@|$root|g" -e "s|@LUME_PYTHON@|$python_bin|g" \
+  "$root/systemd/lumini-update.service" > "$unit_dir/lumini-update.service"
+for unit in captura-dia-video captura-dia-hud captura-dia-hotkey lume; do
+  install -d "$unit_dir/$unit.service.d"
+  printf '[Unit]\nWants=lumini-update.service\nAfter=lumini-update.service\n' \
+    > "$unit_dir/$unit.service.d/lumini-update.conf"
+done
+
 enderecos=""
 if [[ -n "$rede" ]]; then
   # Substituir a linha que já existe, e não acrescentar no fim do arquivo: ali

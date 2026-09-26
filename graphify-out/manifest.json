@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "app/backend/main.py": {
-    "mtime": 1790445889.1182477,
-    "ast_hash": "35defc6e88dc2961a77b762e75da75ee",
+    "mtime": 1790446867.9523616,
+    "ast_hash": "ffa1610b2d38858791aaf673aab5ee98",
     "semantic_hash": ""
   },
   "app/backend/main_paths.py": {
@@ -30,8 +30,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1790445944.601312,
-    "ast_hash": "741c2f516ae4effbfd408c20d63b024c",
+    "mtime": 1790446867.9541388,
+    "ast_hash": "586d247baf71a2c2a9118671140b1dce",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
@@ -50,8 +50,8 @@
     "semantic_hash": "e2a58c05296314cf10f371f9f740ee5b"
   },
   "bin/game-video-loop": {
-    "mtime": 1790390600.757659,
-    "ast_hash": "02e71013ce38ef44c0ac3b78657a1fc3",
+    "mtime": 1790446812.7991147,
+    "ast_hash": "f0f43029eb6a7a846ee3cfd1354ccd9b",
     "semantic_hash": ""
   },
   "bin/grava-audio.sh": {
@@ -70,8 +70,8 @@
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1790445944.5994656,
-    "ast_hash": "3d9e99636ceb0cdbed0ab1575639d84b",
+    "mtime": 1790446867.955772,
+    "ast_hash": "caa35eb18ea9ebc43a898fbaadabc3d1",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1790445889.0409956,
-    "ast_hash": "c0d8e545acca3bdd40e626554ca2e0b2",
+    "mtime": 1790446786.1416388,
+    "ast_hash": "b3e4471439e02bf56042b37cf389d5f9",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -285,8 +285,8 @@
     "semantic_hash": ""
   },
   "app/backend/windows_startup.py": {
-    "mtime": 1790443068.9781942,
-    "ast_hash": "2103fbc41cc5902c38d116b283dee5f1",
+    "mtime": 1790446928.9546065,
+    "ast_hash": "1ed34c1bb60ad41fdb938b7f1b7aa187",
     "semantic_hash": ""
   },
   "install-windows-startup.ps1": {
@@ -405,13 +405,13 @@
     "semantic_hash": ""
   },
   "instalar-lumini.sh": {
-    "mtime": 1790443069.0883286,
-    "ast_hash": "e07fc274383d65dd2fe9310aedc75a4c",
+    "mtime": 1790446867.9565828,
+    "ast_hash": "f64100efd070878dbed0a65eeea187aa",
     "semantic_hash": ""
   },
   "LUMINI.md": {
-    "mtime": 1790446080.5063815,
-    "ast_hash": "9d1bafda5b509b8a42230a979f09b12e",
+    "mtime": 1790446929.1322396,
+    "ast_hash": "b7d6571d96978e401549366543bd34ab",
     "semantic_hash": ""
   },
   "requirements-ia.txt": {
@@ -440,8 +440,23 @@
     "semantic_hash": ""
   },
   "frontend/tests/settings.mjs": {
-    "mtime": 1790446080.3159244,
-    "ast_hash": "6a06a4c8b047100e4e2e6892b753bf13",
+    "mtime": 1790446929.1325483,
+    "ast_hash": "75ce34677998656d32d6b716001a1c99",
+    "semantic_hash": ""
+  },
+  "app/backend/test_updater.py": {
+    "mtime": 1790447074.4602354,
+    "ast_hash": "f1775e2709226edfd4cd956bbd1fc86a",
+    "semantic_hash": ""
+  },
+  "app/backend/updater.py": {
+    "mtime": 1790447074.347976,
+    "ast_hash": "5704f758b9a14bab0bb8a5253108385c",
+    "semantic_hash": ""
+  },
+  "frontend/src/UpdateNotice.tsx": {
+    "mtime": 1790446655.2519522,
+    "ast_hash": "aee7c8016388ee0b6a9f662187a6eef7",
     "semantic_hash": ""
   }
 }

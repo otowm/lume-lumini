@@ -12,12 +12,19 @@ try {
     page.on("pageerror", error => console.error(error.message));
     page.setDefaultTimeout(5000);
     const writes = [];
+    let updates = {current:'a'.repeat(40),latest:'b'.repeat(40),title:'Correção de gravação',available:true,can_prepare:true,pending:'',download_url:'https://github.com/otowm/lume-lumini/archive/refs/heads/main.zip'};
+    let prepareCalls = 0;
     const screen = {capture_mode:'interval',interval_seconds:30,change_poll_seconds:5,change_threshold_percent:5,change_max_interval_seconds:60,max_geometry:'1920x1080',split_monitors:false,active_monitor_only:true,privacy_fail_closed:true};
     let video = {enabled:true,codec:'hevc',capture_mode:'continuous',replay_seconds:60,fps:60,geometry:'1920x1080',segment_seconds:60,sample_frames:8,sample_geometry:'960x540',retention_minutes:60,delete_after_description:false,pause_other_captures:true,focus_grace_seconds:20,analysis_profile:'detailed',scan_interval_seconds:2,max_keyframes:80,patterns:[],pattern_modes:{},pattern_fps:{},pattern_geometry:{},pattern_sources:{},marker_hotkey:'F8',hotkey_hold_seconds:0.6,marker_preroll_seconds:8,hud_enabled:true,hud_placement:'second',hud_corner:'top-right',hud_hotkey:'Ctrl+Shift+F8',hud_sound:true,resolve_fps:0,resolve_start_timecode:'01:00:00:00'};
     let storage = {root:'/tmp/lumini-test',disk:{free:100000,total:200000},candidates:[],restart_required:false};
     await page.addInitScript(mode=>{localStorage.setItem('lume-mode',mode);sessionStorage.setItem('lume-active-view','videos')},mode);
     await page.route('**/api/**', async route => {
       const request = route.request(), path = new URL(request.url()).pathname;
+      if(path.startsWith('/api/updates')) {
+        if(path.endsWith('/prepare')) {prepareCalls++;updates={...updates,pending:updates.latest}}
+        if(path.endsWith('/cancel')) updates={...updates,pending:''};
+        await route.fulfill({json:updates});return;
+      }
       const put = request.method()==='PUT';
       if(put)writes.push({path,body:request.postDataJSON()});
       if(mode==='lumini' && /\/(schedule|prompts|ollama|pipeline|captures|days|summary|timeline|activities)(\/|$)/.test(path)) {
@@ -61,6 +68,16 @@ try {
     await save.click();
     await page.waitForFunction(()=>!document.querySelector('.settings-modal'));
     assert.equal(storage.root,'/tmp/another-folder');
+    if(mode==='lumini') {
+      assert.equal(prepareCalls,0,'Checar versões nunca deve preparar uma atualização sozinho');
+      await page.getByRole('button',{name:'Atualização disponível',exact:true}).click();
+      await page.getByRole('button',{name:'Preparar atualização',exact:true}).click();
+      await page.getByText('Reinicie o computador para instalar a versão preparada antes de ligar o gravador.').waitFor();
+      assert.equal(prepareCalls,1);
+      await page.getByRole('button',{name:'Cancelar atualização',exact:true}).click();
+      await page.getByRole('button',{name:'Preparar atualização',exact:true}).waitFor();
+      assert.equal(updates.pending,'');
+    }
     console.log(`${mode}: edição de vídeo, reabertura, validação e armazenamento OK`);
     await page.close();
   }

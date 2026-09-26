@@ -1082,3 +1082,7 @@ button.tile:hover{border-color:rgba(141,124,245,.45);background:linear-gradient(
 .palette-item.see-all{color:var(--accent3)}
 .topbar>div:first-child{flex:none}
 .topbar h1{white-space:nowrap}
+
+.update-notice { padding: 8px 12px; font-size: 12px; }
+.update-notice p { line-height: 1.45; overflow-wrap: anywhere; }
+.update-notice button { white-space: normal; margin: 4px 0; }

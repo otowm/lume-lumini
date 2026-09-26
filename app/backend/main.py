@@ -1424,6 +1424,38 @@ def health() -> dict[str, str]:
             "time": datetime.now().astimezone().isoformat()}
 
 
+@app.get("/api/updates")
+def update_status(force: bool = False) -> dict:
+    from . import updater
+    return updater.check(force)
+
+
+class UpdateRequest(BaseModel):
+    version: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+@app.post("/api/updates/prepare")
+def prepare_update(settings: UpdateRequest) -> dict:
+    from . import updater
+    if not mode.e_lumini():
+        raise HTTPException(status_code=409, detail="A atualização pelo app está disponível no Lumini.")
+    if selective_video_status().get("recording"):
+        raise HTTPException(status_code=409, detail="Saia do jogo e espere a gravação terminar antes de atualizar.")
+    try:
+        return updater.prepare(settings.version)
+    except (updater.UpdateError, OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/updates/cancel")
+def cancel_update() -> dict:
+    from . import updater
+    try:
+        return updater.cancel()
+    except updater.UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/status")
 def status() -> dict:
     idle = get_manager().idle_state()

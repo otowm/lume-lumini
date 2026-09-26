@@ -1,0 +1,10 @@
+[Unit]
+Description=Lumini - instalar atualização solicitada antes de gravar
+Before=lume.service captura-dia-video.service captura-dia-hud.service captura-dia-hotkey.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@LUME_ROOT@
+ExecStart=@LUME_PYTHON@ -m app.backend.updater --apply
+RemainAfterExit=yes
+TimeoutStartSec=240

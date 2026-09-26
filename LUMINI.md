@@ -161,6 +161,37 @@ máquina, exceto quando **você** clica em "Gerar link".
 
 ---
 
+## Atualizações
+
+O Lumini consulta novas versões ao abrir a interface e a cada seis horas.
+Quando houver uma, **Atualização disponível** aparece na barra lateral.
+Nada é instalado sem você clicar em **Preparar atualização**.
+
+O botão baixa a versão escolhida. Depois, reinicie o computador: a instalação
+acontece antes de ligar o gravador. Também é possível cancelar o pedido pela
+interface. Durante uma gravação, saia do jogo antes de preparar a atualização.
+
+As preferências e os clipes ficam preservados. Se houver alterações locais no
+código, o app avisa e não as sobrescreve. Sem internet, continua funcionando e
+tenta verificar de novo mais tarde.
+
+A instalação pelo botão exige um clone Git na branch `main`. Quem baixou ZIP
+recebe um botão **Baixar nova versão**. Versões que mudam os serviços ou as
+dependências Python pedem para rodar o instalador novamente.
+
+Para habilitar esse recurso em uma instalação Linux antiga, faça uma última
+atualização manual, dentro da pasta do projeto, e reinicie o computador:
+
+```bash
+git pull
+./instalar-lumini.sh
+```
+
+No Windows, atualize os arquivos e rode `instalar-lumini.ps1` novamente. O
+atalho de inicialização aplica as versões preparadas no próximo login.
+
+---
+
 ## Não gravou. E agora?
 
 **A HUD não aparece e nada é salvo.** Confira se o jogo casa com a lista:

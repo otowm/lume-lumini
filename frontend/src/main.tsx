@@ -11,6 +11,7 @@ import { DayPicker } from "./DayPicker";
 import { ActivitiesView } from "./ActivitiesView";
 import { TagsView } from "./TagsView";
 import { HotkeyInput } from "./HotkeyInput";
+import { UpdateNotice } from "./UpdateNotice";
 
 type View = "busca" | "resumo" | "atividades" | "jogos" | "videos" | "timeline" | "captura";
 type Panel = "settings" | "privacy" | null;
@@ -1532,6 +1533,7 @@ function App() {
         {automaticCapturePause?<p className="video-pause-note">{automaticPauseNote}</p>:<div className="capture-meta"><span>{bytes(status?.storage.bytes)}</span><span>{status?.capturing ? captureLabel : "em pausa"}</span></div>}
         <button className="secondary block" disabled={busy || !status || automaticCapturePause} onClick={toggleCapture}>{automaticCapturePause?"Retomada automática":status?.capturing?"Pausar captura":"Retomar captura"}</button>
       </div>}
+      {!ia&&<UpdateNotice recording={Boolean(status?.video.recording)}/>}
       <div className="privacy-links">{ia&&<button onClick={openDiagnostics}>Diagnóstico</button>}{ia&&<button onClick={openPrivacy}>Privacidade</button>}<button onClick={openSettings}>Ajustes</button></div>
     </aside>
 

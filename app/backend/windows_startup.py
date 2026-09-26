@@ -45,6 +45,21 @@ def main() -> None:
     port = int(os.environ.get("LUME_PORT", "8876"))
     if _backend_is_running(probe_host, port):
         return
+    if e_lumini():
+        # Outro processo aplica antes de subir captura/HUD; ao voltar, importa
+        # a versão nova em um processo novo, sem misturar módulos antigos.
+        from . import updater
+        before = updater.read_state().get("pending")
+        if before:
+            import subprocess
+            try:
+                subprocess.run([sys.executable, "-m", "app.backend.updater", "--apply"],
+                               cwd=Path(__file__).resolve().parents[2], timeout=240)
+            except (OSError, subprocess.TimeoutExpired):
+                # Uma falha de atualização não impede a captura de subir.
+                pass
+            if not updater.read_state().get("pending"):
+                os.execv(sys.executable, [sys.executable, "-m", "app.backend.windows_startup"])
     # A aplicação valida também o IP de origem e o cabeçalho Host. Escutar em
     # todas as interfaces não concede acesso ao Wi-Fi/LAN comum.
     if e_lumini():
