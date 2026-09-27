@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, uploadVideo, type ActivitySession, type Capture, type CleanupSettings, type DaySummary, type EditingEntry, type EditingFolder, type HourSummary, type OllamaModel, type PipelineQueue, type PromptSetting, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type AppMode, type LightVersion, type ShareUpload, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
+import { api, uploadVideo, type ActivitySession, type Capture, type CleanupSettings, type DaySummary, type EditingEntry, type EditingFolder, type GameIcon, type HourSummary, type OllamaModel, type PipelineQueue, type PromptSetting, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type AppMode, type LightVersion, type ShareUpload, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
 import "./styles.css";
 import "./markers.css";
 import "./selection.css";
@@ -121,10 +121,54 @@ function sessionGameName(session: VideoSession) {
   return [...counts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],"pt-BR"))[0][0];
 }
 
+// Ícones buscados pelo backend (SteamGridDB ou loja da Steam). As capas da
+// grade chegam juntas num único pedido em vez de um por jogo.
+const gameIconRequests=new Map<string,Promise<GameIcon|null>>();
+let gameIconBatch:{name:string;resolve:(icon:GameIcon|null)=>void}[]=[];
+function loadGameIcon(name:string){
+  let found=gameIconRequests.get(name);
+  if(!found){
+    found=new Promise<GameIcon|null>(resolve=>{
+      if(!gameIconBatch.length)setTimeout(()=>{
+        const batch=gameIconBatch;gameIconBatch=[];
+        api.gameIcons(batch.map(item=>item.name))
+          .then(icons=>batch.forEach(item=>item.resolve(icons[item.name]||null)))
+          .catch(()=>{batch.forEach(item=>{gameIconRequests.delete(item.name);item.resolve(null)})});
+      },0);
+      gameIconBatch.push({name,resolve});
+    });
+    gameIconRequests.set(name,found);
+  }
+  return found;
+}
+
 function GameCover({game}:{game:string}) {
   const [failed,setFailed]=useState(false);
+  const [icon,setIcon]=useState<GameIcon|null>(null);
+  useEffect(()=>{
+    if(gameCovers[game])return;
+    let alive=true;
+    loadGameIcon(game).then(found=>{if(alive)setIcon(found)});
+    return ()=>{alive=false};
+  },[game]);
   const initials=game.split(/\s+/).map(part=>part[0]).join("").slice(0,2).toUpperCase();
-  return <span className="game-option-cover" aria-hidden="true">{!failed&&gameCovers[game]?<img src={gameCovers[game]} alt="" onError={()=>setFailed(true)}/>:<b>{initials}</b>}</span>;
+  const source=gameCovers[game]||icon?.url;
+  return <span className={`game-option-cover${!gameCovers[game]&&icon?.kind==="cover"?" cover":""}`} aria-hidden="true">{!failed&&source?<img src={source} alt="" onError={()=>setFailed(true)}/>:<b>{initials}</b>}</span>;
+}
+
+function SteamGridDbSettings(){
+  const [configured,setConfigured]=useState<boolean|null>(null);
+  const [key,setKey]=useState("");
+  const [saving,setSaving]=useState(false);
+  const [message,setMessage]=useState("");
+  useEffect(()=>{api.steamGridDb().then(result=>setConfigured(result.configured)).catch(()=>setConfigured(false))},[]);
+  const save=async(value:string)=>{
+    setSaving(true);setMessage("");
+    try{const result=await api.saveSteamGridDb(value.trim());setConfigured(result.configured);setKey("");gameIconRequests.clear();setMessage(result.configured?"Chave salva. Os ícones que faltavam serão buscados de novo.":"Chave removida.")}
+    catch(error){setMessage(error instanceof Error?error.message:"Não foi possível salvar a chave.")}
+    finally{setSaving(false)}
+  };
+  return <section className="marker-settings"><h3>Ícones dos jogos</h3><p>O Lume busca o ícone de cada jogo da biblioteca e guarda uma cópia no computador. Com uma chave do SteamGridDB, qualquer jogo ganha ícone, inclusive os que não estão na Steam; sem ela, só os jogos da Steam. A chave é gratuita e fica em <a href="https://www.steamgriddb.com/profile/preferences/api" target="_blank" rel="noreferrer">steamgriddb.com › Preferências › API</a>.</p><div className="form-grid"><label><span>Chave do SteamGridDB{configured?" · configurada":""}</span><input type="password" autoComplete="off" value={key} placeholder={configured?"••••••••  (cole outra para trocar)":"Cole a chave aqui"} onChange={event=>setKey(event.target.value)}/></label></div><div className="change-test-actions"><button className="secondary" disabled={saving||!key.trim()} onClick={()=>save(key)}>{saving?"Verificando…":"Salvar chave"}</button>{configured&&<button className="ghost" disabled={saving} onClick={()=>save("")}>Remover chave</button>}</div>{message&&<p>{message}</p>}</section>;
 }
 
 function analysisAverage(milliseconds: number) {
@@ -1647,6 +1691,7 @@ function App() {
       {schedule&&<section className="settings-group schedule-settings"><div><span className="eyebrow">Automação diária</span><h3>Processamento automático</h3><p>Processa áudio, telas, timeline e resumo.</p></div><label className="switch-row"><input type="checkbox" checked={schedule.enabled} onChange={e=>setSchedule({...schedule,enabled:e.target.checked})}/><span>{schedule.enabled?"Ativada":"Desativada"}</span></label>{schedule.enabled&&<div className="schedule-time"><label><span>Executar às</span><input type="time" value={schedule.time} onChange={e=>setSchedule({...schedule,time:e.target.value})}/></label>{schedule.next_run&&<small>Próxima execução: {schedule.next_run}</small>}</div>}</section>}
       {settings.capture_mode==="change"&&<section className="settings-group change-test"><div className="settings-group-title"><div><span className="eyebrow">Teste prático</span><h3>Esta mudança seria capturada?</h3><p>Guarde a tela atual, faça uma mudança e compare usando o mesmo cálculo da captura real.</p></div></div><div className="change-test-actions"><button className="secondary" disabled={busy} onClick={startScreenChangeTest}>{screenChangeTest?.token?"Recomeçar teste":"Guardar referência"}</button><button className="primary" disabled={busy||!screenChangeTest?.token} onClick={compareScreenChangeTest}>Comparar agora</button></div>{screenChangeTest&&<div className={`change-test-result ${screenChangeTest.would_capture===true?"capture":screenChangeTest.would_capture===false?"skip":"waiting"}`}>{screenChangeTest.change_percent!==undefined?<><strong>{screenChangeTest.change_percent.toFixed(2)}% de mudança</strong><span>Limite atual: {settings.change_threshold_percent}% · {screenChangeTest.would_capture?"Capturaria":"Não capturaria"}</span><i><b style={{width:Math.min(100,screenChangeTest.change_percent/Math.max(settings.change_threshold_percent,0.1)*100)+"%"}}/></i></>:<span>{screenChangeTest.message}</span>}</div>}</section>}</>}
       {(settingsTab==="ai"||settingsTab==="video")&&videoSettings&&<VideoSettingsTab tab={settingsTab} settings={videoSettings} patterns={videoPatterns} models={ollamaModels} ollamaOnline={ollamaOnline} busy={busy} ia={ia} advanced={videoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>}
+      {settingsTab==="video"&&<SteamGridDbSettings/>}
       {settingsTab==="video"&&videoSettings&&<AppCaptureRules settings={videoSettings} patterns={videoPatterns} advanced={videoAdvanced} onAdvanced={setVideoAdvanced} onSettings={setVideoSettings} onPatterns={setVideoPatterns}/>}
       </div>
       <footer>{settingsError&&<span className="settings-error" role="alert">{settingsError}</span>}<button className="ghost" disabled={savingSettings} onClick={() => setPanel(null)}>Cancelar</button><button className="primary" disabled={savingSettings||(ia&&!schedule)||!storage||!videoSettings||!cleanupSettings||!storageRoot.trim()} onClick={saveAllSettings}>{savingSettings?"Salvando…":"Salvar configurações"}</button></footer>

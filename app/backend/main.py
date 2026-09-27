@@ -41,7 +41,7 @@ from .audio_intelligence import embedding_for_sample
 from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
 from .runtime import VIDEO_ACTIVITY_FRESH_SECONDS, pipeline_pause_flag, video_activity_flag, video_recording_flag
 from .retention import cleanup_processed_capture_media, cleanup_ready_days, cleanup_settings, save_cleanup_settings
-from . import editing, mode, prompts, sharing, tags as tag_vocabulary
+from . import editing, game_icons, mode, prompts, sharing, tags as tag_vocabulary
 from .services import ActionResult, get_manager
 
 
@@ -1743,7 +1743,8 @@ def test_video_window(payload: VideoWindowTest) -> dict:
     backend = get_backend()
     info = backend.active_window()
     if not info:
-        raise HTTPException(status_code=503, detail="Não foi possível consultar a janela ativa")
+        problem = backend.active_window_problem()
+        raise HTTPException(status_code=503, detail=f"Não foi possível consultar a janela ativa. {problem}".strip())
     # O segundo campo é o executável no Windows e a classe da janela no Linux —
     # nos dois é a identidade estável do app, e é nela que uma regra sem prefixo
     # procura, igual ao gravador real. A separação é pelo último " | " porque o
@@ -2046,6 +2047,39 @@ def video_audio_track(path: str, track: int = Query(ge=0, le=31)) -> FileRespons
         destination, media_type=media_type,
         headers={"Cache-Control": "private, max-age=86400"},
     )
+
+
+class SteamGridDbKey(BaseModel):
+    key: str = Field(default="", pattern=r"^[A-Za-z0-9]{0,128}$")
+
+
+@app.get("/api/settings/steamgriddb")
+def get_steamgriddb_settings() -> dict:
+    # A chave nunca volta para a interface: o Lume pode estar aberto na rede.
+    return {"configured": bool(game_icons.read_key())}
+
+
+@app.put("/api/settings/steamgriddb")
+def set_steamgriddb_settings(settings: SteamGridDbKey) -> dict:
+    if settings.key and game_icons.verify_key(settings.key) is False:
+        raise HTTPException(status_code=422, detail="O SteamGridDB recusou esta chave. Confira se ela foi copiada inteira.")
+    game_icons.save_key(settings.key)
+    return get_steamgriddb_settings()
+
+
+@app.get("/api/game-icons")
+def game_icon_lookup(names: list[str] = Query(default=[], max_length=100)) -> dict:
+    found = game_icons.lookup([name[:120] for name in names])
+    return {name: {"url": f"/api/game-icons/{entry['file']}", "kind": entry["kind"]} if entry else None
+            for name, entry in found.items()}
+
+
+@app.get("/api/game-icons/{file_name}")
+def game_icon_file(file_name: str) -> FileResponse:
+    path = game_icons.cached_file(file_name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Ícone não encontrado")
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=604800"})
 
 
 @app.get("/api/video-thumbnail")

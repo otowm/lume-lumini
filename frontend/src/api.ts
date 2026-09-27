@@ -102,6 +102,7 @@ export type StorageSettings = {
 };
 export type StorageCandidate = {root:string;disk:{total:number;used:number;free:number}};
 export type OllamaModel = {name:string;size:number;modified_at:string;capabilities:string[]};
+export type GameIcon = {url:string;kind:"icon"|"cover"};
 export type VideoSettings = {enabled:boolean;codec:"h264"|"hevc";encoder?:"auto"|"gpu"|"cpu";capture_mode:"continuous"|"clips";replay_seconds:number;fps:number;geometry:string;segment_seconds:number;sample_frames:number;sample_geometry:string;retention_minutes:number;delete_after_description:boolean;pause_other_captures:boolean;focus_grace_seconds:number;analysis_profile:"fast"|"balanced"|"detailed"|"custom";scan_interval_seconds:number;max_keyframes:number;web_search_enabled:boolean;searxng_url:string;web_search_safety_limit:number;thinking_enabled:boolean;vision_model:string;text_model:string;marker_hotkey:string;marker_key_code?:string;hotkey_hold_seconds:number;marker_preroll_seconds:number;hud_enabled:boolean;hud_placement:"game"|"second"|"both";hud_corner:"top-left"|"top-right"|"bottom-left"|"bottom-right";hud_hotkey:string;hud_sound:boolean;resolve_fps:number;resolve_start_timecode:string;patterns:string[];pattern_modes:Record<string,"continuous"|"clips">;pattern_fps:Record<string,number>;pattern_geometry:Record<string,string>;pattern_sources:Record<string,"game"|"window">;service?:{active:boolean}};
 export type VideoMarker = {id:number;video_id:number;offset_seconds:number;title:string;ai_generated:number;created_at:string};
 export type WebSource = {title:string;url:string;snippet:string;query?:string};
@@ -212,6 +213,9 @@ export const api = {
   saveStorage: (root:string) => request<StorageSettings>("/api/settings/storage", {method:"PUT",body:JSON.stringify({root})}),
   videoSettings: () => request<VideoSettings>("/api/settings/video"),
   saveVideoSettings: (settings:VideoSettings) => request<VideoSettings>("/api/settings/video",{method:"PUT",body:JSON.stringify(settings)}),
+  gameIcons: (names:string[]) => request<Record<string,GameIcon|null>>(`/api/game-icons?${names.map(name=>`names=${encodeURIComponent(name)}`).join("&")}`),
+  steamGridDb: () => request<{configured:boolean}>("/api/settings/steamgriddb"),
+  saveSteamGridDb: (key:string) => request<{configured:boolean}>("/api/settings/steamgriddb",{method:"PUT",body:JSON.stringify({key})}),
   ollamaModels: () => request<{online:boolean;models:OllamaModel[];error?:string}>("/api/ollama/models"),
   videos: () => request<{items:VideoFile[];total:number}>("/api/videos"),
   videoAudioTracks: (path:string,prepare=false) => request<VideoAudioTracksResult>(`/api/video-audio-tracks?path=${encodeURIComponent(path)}${prepare?"&prepare=true":""}`),

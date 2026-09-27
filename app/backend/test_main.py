@@ -3281,6 +3281,7 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/files/unprocessed/all", "/api/retention/{kind}/{item_id}",
             "/api/media/raw/unkept", "/api/editing", "/api/editing/video/{video_id}",
             "/api/editing/session/{session_id}", "/api/editing/{name}", "/api/editing/open",
+            "/api/settings/steamgriddb", "/api/game-icons", "/api/game-icons/{file_name}",
         }
         sem_classificacao = []
         for rota in backend_main.app.routes:
