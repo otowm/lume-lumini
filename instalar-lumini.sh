@@ -186,7 +186,7 @@ fi
 
 # `import-environment` porque as units sobem antes de o Plasma exportar a sessão
 # gráfica, e sem WAYLAND_DISPLAY o kdotool não acha janela nenhuma.
-systemctl --user import-environment WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DISPLAY 2>/dev/null || true
+systemctl --user import-environment WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DISPLAY KDE_SESSION_VERSION 2>/dev/null || true
 systemctl --user daemon-reload
 systemctl --user enable --now captura-dia-video.service captura-dia-hud.service \
   captura-dia-hotkey.service lume.service

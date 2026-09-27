@@ -2283,3 +2283,28 @@ class HudEventContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KdotoolSessionVersionTests(unittest.TestCase):
+    """O kdotool 0.3 sai com erro sem ``KDE_SESSION_VERSION=6``.
+
+    As units do systemd podem não ter a variável; o Lumini de um amigo não lia
+    janela nenhuma ("Não foi possível consultar a janela ativa") por isso.
+    """
+
+    def test_active_window_works_without_the_variable_in_the_environment(self):
+        from app.capture.linux import LinuxCaptureBackend
+
+        with tempfile.TemporaryDirectory() as raw:
+            stub = Path(raw) / "kdotool"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                '[[ "$KDE_SESSION_VERSION" == 6 ]] || { echo "Unsupported KDE version." >&2; exit 1; }\n'
+                'case "$1" in getactivewindow) echo "{abc}" ;; getwindowname) echo "Jogo" ;;'
+                ' getwindowclassname) echo "steam_app_1" ;; esac\n')
+            stub.chmod(0o755)
+            environment = {key: value for key, value in os.environ.items() if key != "KDE_SESSION_VERSION"}
+            environment["PATH"] = f"{raw}:{os.environ['PATH']}"
+            with unittest.mock.patch.dict(os.environ, environment, clear=True):
+                backend = LinuxCaptureBackend.__new__(LinuxCaptureBackend)
+                self.assertEqual(backend.active_window(), "Jogo | steam_app_1")

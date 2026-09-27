@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# O kdotool 0.3 recusa rodar sem KDE_SESSION_VERSION=6, e as units do systemd
+# podem subir antes de o Plasma exportar a variável.
+export KDE_SESSION_VERSION="${KDE_SESSION_VERSION:-6}"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia"
 config_file="$config_dir/video.conf"

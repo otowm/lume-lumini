@@ -186,6 +186,10 @@ class CaptureBackend(ABC):
         tratar isso como *fail closed* (não capturar) se a config exigir.
         """
 
+    def active_window_problem(self) -> str:
+        """Por que ``active_window`` falhou, numa frase para a interface."""
+        return ""
+
     @abstractmethod
     def list_monitors(self) -> list[Monitor]:
         """Monitores habilitados, em ordem estável de índice."""

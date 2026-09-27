@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# O kdotool 0.3 recusa rodar sem KDE_SESSION_VERSION=6, e as units do systemd
+# podem subir antes de o Plasma exportar a variável.
+export KDE_SESSION_VERSION="${KDE_SESSION_VERSION:-6}"
 
 # O user manager pode subir antes da sessão gráfica e deixar serviços sem estas
 # variáveis. Reconstrua os valores locais necessários para clientes Wayland/Qt.

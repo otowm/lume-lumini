@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,6 +28,16 @@ DISCORD_SOURCE = os.environ.get("DISCORD_SOURCE", "DiscordBus.monitor")
 AUDIO_SOURCE = os.environ.get("AUDIO_SOURCE", "RecordBus.monitor")
 
 
+def _kdotool_env() -> dict[str, str]:
+    """Ambiente do kdotool com ``KDE_SESSION_VERSION`` garantido.
+
+    O kdotool 0.3 recusa rodar sem ``KDE_SESSION_VERSION=6`` ("Unsupported KDE
+    version"). O terminal herda a variável do Plasma, mas as units do systemd
+    podem subir antes de ela ser importada — e aí nenhuma janela era lida.
+    """
+    return {**os.environ, "KDE_SESSION_VERSION": os.environ.get("KDE_SESSION_VERSION") or "6"}
+
+
 class LinuxCaptureBackend(CaptureBackend):
     name = "linux"
 
@@ -39,11 +50,32 @@ class LinuxCaptureBackend(CaptureBackend):
         klass = self._kdotool("getwindowclassname", wid) or ""
         return f"{title} | {klass}"
 
+    def active_window_problem(self) -> str:
+        # O kdotool só conversa com o KWin: em GNOME, Hyprland ou qualquer outro
+        # compositor ele falha sem dizer por quê.
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
+        if desktop and "kde" not in desktop.lower():
+            return (f"A janela ativa só é lida no KDE Plasma, e esta sessão é {desktop}. "
+                    "O Lumini no Linux depende do kdotool, que só funciona com o KWin.")
+        if shutil.which("kdotool") is None:
+            return "O kdotool não está instalado. Instale com: paru -S kdotool"
+        try:
+            result = subprocess.run(["kdotool", "getactivewindow"], check=False,
+                                    capture_output=True, text=True, timeout=5,
+                                    env=_kdotool_env())
+        except subprocess.TimeoutExpired:
+            return "O kdotool não respondeu em 5 segundos. O KWin está rodando?"
+        detail = (result.stderr.strip().splitlines() or [""])[-1][:300]
+        if result.returncode != 0 or not result.stdout.strip():
+            return f"O kdotool falhou ao consultar o KWin: {detail or 'sem resposta'}"
+        return ""
+
     @staticmethod
     def _kdotool(*args: str) -> str | None:
         try:
             result = subprocess.run(["kdotool", *args], check=False,
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=5,
+                                    env=_kdotool_env())
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return None
         if result.returncode != 0:
