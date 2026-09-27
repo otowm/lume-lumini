@@ -67,6 +67,32 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.local,'rev-parse','HEAD'), self.before)
         self.assertEqual(updater.read_state()['pending'],self.target)
 
+    def test_install_now_requires_a_prepared_version(self):
+        with patch.object(updater, 'can_install_now', return_value=True):
+            with self.assertRaisesRegex(updater.UpdateError, 'Prepare'):
+                updater.install_now()
+
+    def test_install_now_restarts_only_the_units_that_were_running(self):
+        updater.prepare(self.target)
+        calls = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(argv)
+            stdout = 'active\ninactive\nactive\nfailed\n' if 'is-active' in argv else ''
+            return subprocess.CompletedProcess(argv, 0, stdout, '')
+
+        with patch.object(updater, 'can_install_now', return_value=True), \
+             patch.object(updater.subprocess, 'run', fake_run):
+            updater.install_now()
+        launcher = calls[-1]
+        self.assertEqual(launcher[:2], ['systemd-run', '--user'])
+        script = launcher[-1]
+        self.assertIn('systemctl --user restart lumini-update.service', script)
+        self.assertIn('systemctl --user start lume.service captura-dia-hud.service', script)
+        self.assertNotIn('captura-dia-video.service', script)
+        # O código em execução não muda: quem troca a versão é a unit transitória.
+        self.assertEqual(self.run_git(self.local, 'rev-parse', 'HEAD'), self.before)
+
     def test_cancel_leaves_current_version_untouched(self):
         updater.prepare(self.target)
         updater.cancel()

@@ -3265,7 +3265,7 @@ class ModoLuminiTests(unittest.TestCase):
         # Cada rota de gravação conhecida, com o método que a usa. Acrescentar
         # uma rota nova aqui é a forma de dizer "esta não depende de IA".
         gravacao = {
-            "/api/updates", "/api/updates/prepare", "/api/updates/cancel",
+            "/api/updates", "/api/updates/prepare", "/api/updates/cancel", "/api/updates/install",
             "/api/health", "/api/status", "/api/capture/{action}", "/api/settings/screen",
             "/api/settings/sensitive", "/api/settings/storage", "/api/settings/video",
             "/api/settings/cleanup", "/api/test/screen", "/api/test/screen-change/start",

@@ -96,7 +96,8 @@ def check(force: bool = False) -> dict:
     except (OSError, subprocess.SubprocessError, UpdateError):
         current, reason = "", "Não foi possível verificar a instalação local."
     return {**state, "current": current, "available": bool(state.get("latest") and state["latest"] != current),
-            "can_prepare": bool(current and not reason), "reason": reason, "download_url": DOWNLOAD_URL}
+            "can_prepare": bool(current and not reason), "can_install_now": can_install_now(),
+            "reason": reason, "download_url": DOWNLOAD_URL}
 
 
 def prepare(version: str) -> dict:
@@ -136,6 +137,53 @@ def check_compatible(current: str, target: str) -> None:
     changed = git("diff", "--name-only", current, target).splitlines()
     if any(name.startswith(("systemd/", "requirements")) for name in changed):
         raise UpdateError("Esta versão muda serviços ou dependências. Atualize com git pull e rode o instalador uma vez.")
+
+
+RUNTIME_UNITS = ("lume.service", "captura-dia-video.service", "captura-dia-hud.service",
+                 "captura-dia-hotkey.service")
+INSTALL_NOW_UNIT = "lumini-instalar-agora"
+
+
+def can_install_now() -> bool:
+    # No Windows quem aplica é o lançador do login; aqui, o systemd do usuário.
+    return os.name != "nt" and shutil.which("systemd-run") is not None
+
+
+def install_now() -> dict:
+    """Aplica a versão preparada sem reiniciar o computador.
+
+    O backend que atende o pedido é um dos serviços parados no caminho, então
+    o trabalho roda numa unit transitória, fora do cgroup do ``lume.service``:
+    para o gravador, roda o mesmo ``lumini-update.service`` do boot e religa
+    só o que estava ligado — uma captura pausada continua pausada. O
+    ``restart`` é necessário porque a unit de atualização fica ``active``
+    (RemainAfterExit) desde o boot, e um ``start`` não faria nada.
+    """
+    if not can_install_now():
+        raise UpdateError("Neste sistema a atualização é instalada na próxima inicialização.")
+    if not read_state().get("pending"):
+        raise UpdateError("Prepare a atualização antes de instalar.")
+    result = subprocess.run(["systemctl", "--user", "is-active", *RUNTIME_UNITS],
+                            capture_output=True, text=True, timeout=5)
+    running = [unit for unit, state in zip(RUNTIME_UNITS, result.stdout.splitlines())
+               if state in {"active", "activating", "reloading"}]
+    units = " ".join(running)
+    # A pausa inicial deixa a resposta HTTP chegar antes de o backend parar. O
+    # religamento não depende da atualização dar certo: com falha, a versão
+    # antiga volta e o erro fica no estado para a interface mostrar.
+    script = (f"sleep 1; systemctl --user stop {units}; "
+              "systemctl --user restart lumini-update.service; "
+              f"systemctl --user start {units}")
+    started = subprocess.run(
+        ["systemd-run", "--user", "--collect", f"--unit={INSTALL_NOW_UNIT}",
+         "--description=Lumini - instalar atualização agora", "/bin/sh", "-c", script],
+        capture_output=True, text=True, timeout=15)
+    if started.returncode:
+        raise UpdateError("Não foi possível iniciar a instalação. Talvez ela já esteja em andamento.")
+    state = read_state()
+    state.update(message="Instalando a atualização. O Lumini volta em alguns segundos.", error="")
+    write_state(state)
+    return state
 
 
 def runtime_active() -> bool:

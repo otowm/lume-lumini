@@ -1452,6 +1452,19 @@ def prepare_update(settings: UpdateRequest) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/api/updates/install")
+def install_update_now() -> dict:
+    from . import updater
+    if not mode.e_lumini():
+        raise HTTPException(status_code=409, detail="A atualização pelo app está disponível no Lumini.")
+    if selective_video_status().get("recording"):
+        raise HTTPException(status_code=409, detail="Saia do jogo e espere a gravação terminar antes de atualizar.")
+    try:
+        return updater.install_now()
+    except (updater.UpdateError, OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/updates/cancel")
 def cancel_update() -> dict:
     from . import updater
