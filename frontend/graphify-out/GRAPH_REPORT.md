@@ -1,16 +1,16 @@
 # Graph Report - frontend  (2026-08-29)
 
 ## Corpus Check
-- 5 files · ~8,306 words
+- 5 files · ~9,186 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 135 nodes · 185 edges · 9 communities
+- 149 nodes · 202 edges · 8 communities
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `da259cb6`
+- Built from commit: `e8a602ea`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -21,8 +21,7 @@
 - package.json
 - devDependencies
 - videoTime
-- lib
-- uploadVideo
+- App
 
 ## God Nodes (most connected - your core abstractions)
 1. `compilerOptions` - 16 edges
@@ -43,15 +42,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (9 total, 0 thin omitted)
+## Communities (8 total, 0 thin omitted)
 
 ### Community 0 - "main.tsx"
-Cohesion: 0.07
-Nodes (12): CAPTION_LABELS, CAPTION_ORDER, CapturaTab, dayViews, EditableVideoSpeaker, gameCovers, icons, labels (+4 more)
+Cohesion: 0.05
+Nodes (16): CAPTION_LABELS, CAPTION_ORDER, CapturaTab, ContextMenuAction, dayViews, EditableVideoSpeaker, gameCovers, icons (+8 more)
 
 ### Community 1 - "api.ts"
 Cohesion: 0.05
-Nodes (35): ActivityFrame, ActivitySession, AnalysisTrace, api, AudioEvent, Capture, CleanupSettings, DaySummary (+27 more)
+Nodes (40): ActivityFrame, ActivitySession, AnalysisTrace, api, AudioEvent, Capture, CleanupSettings, DaySummary (+32 more)
 
 ### Community 2 - "compilerOptions"
 Cohesion: 0.09
@@ -69,29 +68,25 @@ Nodes (9): devDependencies, @types/react, @types/react-dom, typescript, vite, @t
 Cohesion: 0.20
 Nodes (12): AudioAnalysis(), ChapterReader(), chapterStart(), CustomVideoPlayer(), playerTime(), sampleIsOverlapped(), SyncedAudioPlayer(), videoTime() (+4 more)
 
-### Community 6 - "lib"
-Cohesion: 0.67
-Nodes (3): SessionCard(), sessionDuration(), SessionViewer()
-
-### Community 7 - "uploadVideo"
-Cohesion: 0.33
-Nodes (7): uploadVideo(), analysisAverage(), App(), canonicalGameName(), groupCaptures(), queueEta(), sessionGameName()
+### Community 7 - "App"
+Cohesion: 0.22
+Nodes (10): uploadVideo(), analysisAverage(), App(), canonicalGameName(), groupCaptures(), queueEta(), SessionCard(), sessionDuration() (+2 more)
 
 ## Knowledge Gaps
-- **51 isolated node(s):** `name`, `private`, `version`, `type`, `dev` (+46 more)
+- **57 isolated node(s):** `name`, `private`, `version`, `type`, `dev` (+52 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `devDependencies` connect `devDependencies` to `package.json`?**
-  _High betweenness centrality (0.015) - this node is a cross-community bridge._
+  _High betweenness centrality (0.013) - this node is a cross-community bridge._
 - **What connects `name`, `private`, `version` to the rest of the system?**
-  _51 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _57 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `main.tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.06896551724137931 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.05263157894736842 - nodes in this community are weakly interconnected._
 - **Should `api.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.05405405405405406 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.047619047619047616 - nodes in this community are weakly interconnected._
 - **Should `compilerOptions` be split into smaller, more focused modules?**
   _Cohesion score 0.08695652173913043 - nodes in this community are weakly interconnected._
 - **Should `package.json` be split into smaller, more focused modules?**

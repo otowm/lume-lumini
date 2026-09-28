@@ -58,6 +58,10 @@ long_stage="$STORAGE_ROOT/.gravacoes-longas"
 # pode receber outro atalho o clipe espera aqui, fora do buffer que o pipeline
 # observa — publicado já mesclado quando ela fecha.
 pending_dir="$STORAGE_ROOT/.clipe-pendente"
+# Onde a faixa do microfone é refeita antes de o vídeo ser publicado. No mesmo
+# disco do buffer, para a troca final ser um `mv` atômico.
+mic_work="$STORAGE_ROOT/.microfone"
+audio_config="$config_dir/audio.conf"
 mkdir -p "$output_dir"
 pause_state="${XDG_RUNTIME_DIR:-/tmp}/captura-dia-video-paused"
 recording_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-video-recording"
@@ -369,6 +373,64 @@ is_selected_app() {
   return 1
 }
 
+# Filtro ffmpeg do microfone: supressão de ruído e volume mínimo (portão), os
+# mesmos que a interface calibra em audio.conf. O `agate` fala em amplitude
+# linear, não dBFS, então o limite em dB é convertido aqui.
+video_mic_filter() {
+  local MIC_DENOISE_ENABLED=true MIC_GATE_THRESHOLD_DB=-45 gate filter=''
+  if [[ -r "$audio_config" ]]; then source "$audio_config" || true; fi
+  [[ "$MIC_GATE_THRESHOLD_DB" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || MIC_GATE_THRESHOLD_DB=-45
+  [[ "$MIC_DENOISE_ENABLED" == true ]] && filter=afftdn
+  gate="$(awk -v db="$MIC_GATE_THRESHOLD_DB" 'BEGIN{printf "%.6f", 10 ^ (db / 20)}')"
+  printf '%s\n' "${filter:+$filter,}agate=threshold=${gate}:attack=5:release=250"
+}
+
+# Limpa a faixa do microfone de um vídeo pronto e refaz a mixagem com ela.
+#
+# O gpu-screen-recorder não aplica filtros, e um filtro ao vivo no PipeWire não
+# serve: o `noisegate` embutido fica sempre fechado (a porta Level não declara
+# faixa e o padrão "medir sozinho" é forçado a 0). Refazer só o áudio depois é
+# rápido — menos de um segundo por minuto de vídeo —, sem latência e com o
+# mesmo limite em dB que o medidor da interface mostra.
+#
+# Faixas: 0 mixagem, 1 microfone, 2 Discord, 3 sistema. A mixagem do gsr é a
+# soma simples das três, por isso `normalize=0`: com a normalização do amix ela
+# sairia um terço mais baixa que a original. Discord e sistema são copiados.
+# Qualquer outro layout (VIDEO_AUDIO personalizado) fica como está.
+clean_mic_track() {
+  local file="$1" filter codec tmp tracks
+  [[ -s "$file" ]] || return 0
+  # `|| true`: sob `set -e -o pipefail`, um arquivo que o ffprobe não lê
+  # derrubaria o laço inteiro — e com ele a publicação do próprio vídeo.
+  tracks="$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$file" 2>/dev/null | wc -l || true)"
+  [[ "$tracks" == 4 ]] || return 0
+  codec="$(ffprobe -v error -select_streams a:1 -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null || true)"
+  case "$codec" in
+    opus) codec=libopus ;;
+    aac) codec=aac ;;
+    *) log "microfone de $(basename "$file") em $codec; sem limpeza"; return 0 ;;
+  esac
+  filter="$(video_mic_filter)"
+  mkdir -p "$mic_work"
+  tmp="$mic_work/$(basename "$file")"
+  if ffmpeg -hide_banner -loglevel error -nostdin -y -i "$file" \
+       -filter_complex "[0:a:1]${filter},asplit[m1][m2];[m1][0:a:2][0:a:3]amix=inputs=3:normalize=0[mix]" \
+       -map 0:v -map '[mix]' -map '[m2]' -map 0:a:2 -map 0:a:3 \
+       -c:v copy -c:a "$codec" -b:a 128k -c:a:2 copy -c:a:3 copy \
+       -map_metadata 0 "$tmp" >/dev/null 2>&1; then
+    mv -f "$tmp" "$file"
+  else
+    rm -f "$tmp"
+    log "não consegui limpar o microfone de $(basename "$file"); segue sem filtro"
+  fi
+}
+
+# `game-video-loop --clean-mic <arquivo>`: a mesma limpeza da publicação, para
+# testes e para reprocessar um vídeo à mão.
+if [[ "${1:-}" == "--clean-mic" ]]; then
+  clean_mic_track "${2:?arquivo}"; exit 0
+fi
+
 # `captura-video-loop.sh --match ["<título> | <classe>"]` responde se a janela
 # seria gravada e por qual regra, sem mexer em serviço nenhum. Sem argumento
 # consulta a janela em foco. Fica antes de qualquer efeito colateral para poder
@@ -529,6 +591,7 @@ finish_segment() {
   wait "$pid" 2>/dev/null || true
   rm -f "$recording_flag" "$activity_flag"
   if [[ -s "$partial" ]]; then
+    clean_mic_track "$partial"
     mv "$partial" "$final"
     printf '%s\n' "$info" > "$final.window"
     printf '%s\n%s\n' "$session_id" "$info" > "$final.session"
@@ -590,6 +653,7 @@ collect_clips() {
       ((epoch += 1))
       target="$output_dir/$(date -d "@$epoch" +%F_%H-%M-%S)_${session_monitor}.mp4"
     done
+    clean_mic_track "$file"
     mv "$file" "$target"
     printf '%s\n' "$session_window" > "$target.window"
     printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
@@ -679,6 +743,7 @@ buffer_target() {
 
 adopt_video() {
   local file="$1" target="$2"
+  clean_mic_track "$file"
   mv "$file" "$target"
   printf '%s\n' "$session_window" > "$target.window"
   printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
@@ -688,13 +753,15 @@ adopt_video() {
 # Um arquivo só, como pedido: o clipe de pré-roll emendado na gravação que veio
 # depois. Os dois saem do mesmo gpu-screen-recorder, com o mesmo codec e o mesmo
 # número de faixas, então a cópia de streams basta — recodificar uma partida
-# inteira para juntar dois pedaços seria absurdo.
+# inteira para juntar dois pedaços seria absurdo. O `-map 0` não é opcional:
+# sem ele o ffmpeg escolhe uma faixa de áudio só, e a emenda perderia as faixas
+# isoladas de microfone, Discord e sistema.
 concat_videos() {
   local out="$1"; shift
   local list file status
   list="$(mktemp)"
   for file in "$@"; do printf "file '%s'\n" "$file" >> "$list"; done
-  ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$list" -c copy "$out" \
+  ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$list" -map 0 -c copy "$out" \
     >/dev/null 2>&1; status=$?
   rm -f "$list"
   return $status
@@ -743,6 +810,7 @@ rescue_stale_pending_clip() {
   rm -f "$pending_dir/inicio.mp4" "$pending_dir/uniao.mp4"
   [[ -f "$file" ]] || return 0
   target="$(buffer_target "$(stat -c %Y "$file" 2>/dev/null || date +%s)")"
+  clean_mic_track "$file"
   mv "$file" "$target"
   log "clipe pendente de uma execução anterior publicado em $(basename "$target")"
 }
@@ -770,7 +838,7 @@ merge_pending_clip() {
     # O clipe novo contém o pendente inteiro: não há começo a preservar.
     mv -f "$incoming" "$pending_clip_file"
   elif ffmpeg -hide_banner -loglevel error -y -i "$pending_clip_file" -t "$head" \
-         -c copy "$head_file" >/dev/null 2>&1 \
+         -map 0 -c copy "$head_file" >/dev/null 2>&1 \
        && concat_videos "$union" "$head_file" "$incoming"; then
     mv -f "$union" "$pending_clip_file"
     rm -f "$head_file" "$incoming"
@@ -832,6 +900,7 @@ stop_long_recording() {
     preroll="$(media_duration "$long_clip_file")"; preroll="${preroll:-0}"
     if concat_videos "$target" "$long_clip_file" "$recording_file"; then
       rm -f "$long_clip_file" "$recording_file"
+      clean_mic_track "$target"
       printf '%s\n' "$session_window" > "$target.window"
       printf '%s\n%s\n' "$session_id" "$session_window" > "$target.session"
       echo "$target"

@@ -1,3 +1,8 @@
+export type AudioSettings = {
+  mic_denoise_enabled: boolean;
+  mic_gate_threshold_db: number;
+};
+
 export type ScreenSettings = {
   capture_mode: "interval" | "change";
   interval_seconds: number;
@@ -197,6 +202,8 @@ export const api = {
   sensitive: () => request<{ patterns: string[] }>("/api/settings/sensitive"),
   saveSensitive: (patterns: string[]) => request("/api/settings/sensitive", { method: "PUT", body: JSON.stringify({ patterns }) }),
   saveSettings: (settings: ScreenSettings) => request("/api/settings/screen", { method: "PUT", body: JSON.stringify(settings) }),
+  audioSettings: () => request<AudioSettings>("/api/settings/audio"),
+  saveAudioSettings: (settings: AudioSettings) => request<{ok:boolean;settings:AudioSettings;restart_pending:boolean}>("/api/settings/audio", { method: "PUT", body: JSON.stringify(settings) }),
   schedule: () => request<ScheduleSettings>("/api/settings/schedule"),
   saveSchedule: (settings:{time:string;enabled:boolean}) => request<ScheduleSettings>("/api/settings/schedule", {method:"PUT",body:JSON.stringify(settings)}),
   cleanupSettings: () => request<CleanupSettings>("/api/settings/cleanup"),
@@ -213,6 +220,7 @@ export const api = {
   saveStorage: (root:string) => request<StorageSettings>("/api/settings/storage", {method:"PUT",body:JSON.stringify({root})}),
   videoSettings: () => request<VideoSettings>("/api/settings/video"),
   saveVideoSettings: (settings:VideoSettings) => request<VideoSettings>("/api/settings/video",{method:"PUT",body:JSON.stringify(settings)}),
+  retryGameIcons: () => request<{ok:boolean;retrying:number}>("/api/game-icons/retry",{method:"POST"}),
   gameIcons: (names:string[]) => request<Record<string,GameIcon|null>>(`/api/game-icons?${names.map(name=>`names=${encodeURIComponent(name)}`).join("&")}`),
   steamGridDb: () => request<{configured:boolean}>("/api/settings/steamgriddb"),
   saveSteamGridDb: (key:string) => request<{configured:boolean}>("/api/settings/steamgriddb",{method:"PUT",body:JSON.stringify({key})}),
@@ -253,10 +261,11 @@ export const api = {
   forgetSharedLink: (id:number) => request<{ok:boolean;id:number;unpublished:boolean}>(`/api/share/links/${id}`,{method:"DELETE"}),
   preserveVideo: (path:string) => request<{ok:boolean;path:string}>("/api/videos/preserve",{method:"POST",body:JSON.stringify({path})}),
   testAudio: () => request<{ format: Record<string, string>; mean_db: string; max_db: string; silent: boolean }>("/api/test/audio?seconds=5", { method: "POST" }),
+  micLevel: () => request<{ok:boolean;peak_db:number|null;silent:boolean}>("/api/settings/audio/mic-level?ms=300"),
   testScreen: () => request<{ captured: boolean; privacy_skip: boolean; message?: string; paths?: string[] }>("/api/test/screen?save=true", { method: "POST" }),
   startScreenChangeTest: (threshold_percent:number) => request<{ok:boolean;token:string;frames:number;threshold_percent:number}>("/api/test/screen-change/start", {method:"POST",body:JSON.stringify({threshold_percent})}),
   compareScreenChangeTest: (token:string,threshold_percent:number) => request<{ok:boolean;change_percent:number;threshold_percent:number;would_capture:boolean;monitors:{index:number;change_percent:number}[]}>("/api/test/screen-change/compare", {method:"POST",body:JSON.stringify({token,threshold_percent})}),
-  testVideoWindow: (patterns:string[]) => request<{ok:boolean;window_id:string;title:string;window_class:string;executable:string;info:string;matched:boolean;matched_pattern:string}>("/api/test/video-window", {method:"POST",body:JSON.stringify({patterns})}),
+  testVideoWindow: (patterns:string[]) => request<{ok:boolean;window_id:string;title:string;window_class:string;executable:string;monitor_resolution?:string|null;info:string;matched:boolean;matched_pattern:string}>("/api/test/video-window", {method:"POST",body:JSON.stringify({patterns})}),
   search: (query: string, kind: "all"|"screen"|"audio" = "all") => request<{items: Capture[]}>(`/api/search?q=${encodeURIComponent(query)}&kind=${kind}&limit=200`),
   captures: (kind: "all"|"screen"|"audio" = "all", day?:string) => request<{items: Capture[]}>(`/api/captures?kind=${kind}&limit=${day?500:200}${day?`&day=${day}`:""}`),
   days: () => request<{items:{day:string;count:number}[]}>("/api/days"),

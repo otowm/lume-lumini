@@ -16,7 +16,8 @@ from pathlib import Path
 
 _ANSI = re.compile(r"\033\[[0-9;]*m")
 
-from .base import AudioConfig, CaptureBackend, Monitor, ScreenConfig
+from .base import AudioConfig, CaptureBackend, Monitor, ScreenConfig, read_shell_config
+from ..backend.main_paths import AUDIO_CONFIG
 from ..backend.runtime import video_activity_flag
 
 HOME = Path.home()
@@ -26,6 +27,27 @@ AUDIO_BUS = Path(os.environ.get("CAPTURA_DIA_AUDIO_BUS", HOME / "bin/audio-bus.s
 MIC_SOURCE = os.environ.get("MIC_SOURCE", "MicBus.monitor")
 DISCORD_SOURCE = os.environ.get("DISCORD_SOURCE", "DiscordBus.monitor")
 AUDIO_SOURCE = os.environ.get("AUDIO_SOURCE", "RecordBus.monitor")
+
+
+def _mic_filter() -> str:
+    """Filtro ffmpeg do canal do microfone: supressão de ruído + portão de
+    volume mínimo, lidos de ``audio.conf`` (mesmo contrato do grava-audio.sh).
+
+    O ``agate`` trabalha em amplitude linear (0-1), não dBFS; convertemos aqui
+    para que o arquivo de configuração e a interface só falem em dB.
+    """
+    config = read_shell_config(AUDIO_CONFIG)
+    denoise = config.get("MIC_DENOISE_ENABLED", "true").strip().lower() == "true"
+    try:
+        threshold_db = float(config.get("MIC_GATE_THRESHOLD_DB", "-45"))
+    except ValueError:
+        threshold_db = -45.0
+    gate_linear = 10 ** (threshold_db / 20)
+    filt = "pan=mono|c0=c0"
+    if denoise:
+        filt += ",afftdn"
+    filt += f",agate=threshold={gate_linear:.6f}:attack=5:release=250"
+    return filt
 
 
 def _kdotool_env() -> dict[str, str]:
@@ -105,6 +127,13 @@ class LinuxCaptureBackend(CaptureBackend):
                     x, y, width, height = map(int, match.groups())
                     monitors.append(Monitor(index=len(monitors), name=current_name,
                                             x=x, y=y, width=width, height=height))
+            elif line.startswith("Scale:") and monitors and monitors[-1].name == current_name:
+                # Vem depois do Geometry, que no KWin é lógico: com escala de
+                # 125% um monitor 1600x900 aparece como 1280x720.
+                try:
+                    monitors[-1].scale = float(line.split()[1])
+                except (IndexError, ValueError):
+                    pass
         return monitors
 
     def active_monitor(self) -> Monitor | None:
@@ -187,7 +216,7 @@ class LinuxCaptureBackend(CaptureBackend):
         # único canal de FC. Sem ele o ffmpeg desempata sozinho e devolve os
         # canais rotacionados — mic em c2, Discord em c0, sistema em c1.
         filters = (
-            "[0:a]pan=mono|c0=c0[mic];[1:a]pan=mono|c0=c0[dis];"
+            f"[0:a]{_mic_filter()}[mic];[1:a]pan=mono|c0=c0[dis];"
             "[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];"
             "[mic][dis][sys]join=inputs=3:channel_layout=3.0"
             ":map=0.0-FL|1.0-FR|2.0-FC[out]"
@@ -199,6 +228,16 @@ class LinuxCaptureBackend(CaptureBackend):
             "-f", "pulse", "-thread_queue_size", "1024", "-i", system, *limit,
             "-filter_complex", filters, "-map", "[out]",
             "-ar", str(cfg.sample_rate), "-c:a", "pcm_s16le", *segment,
+        ]
+
+    def mic_level_argv(self, seconds: float) -> list[str]:
+        # ``-loglevel info`` é obrigatório: o volumedetect escreve o
+        # ``max_volume`` em nível info, e com ``warning`` a leitura sairia
+        # sempre vazia — o medidor mostraria silêncio mesmo com você falando.
+        return [
+            "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin",
+            "-f", "pulse", "-thread_queue_size", "1024", "-i", MIC_SOURCE,
+            "-t", str(seconds), "-af", "volumedetect", "-f", "null", "-",
         ]
 
     def audio_diagnostics(self) -> dict[str, object]:

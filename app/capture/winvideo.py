@@ -213,6 +213,12 @@ def media_duration(video: Path) -> float:
         return 0.0
 
 
+# Cópia de todos os streams. Sem ``-map 0`` o ffmpeg fica com uma faixa de
+# áudio só, e recortar ou emendar um clipe perderia as faixas isoladas de
+# microfone, Discord e sistema que o OBS gravou.
+KEEP_ALL_STREAMS = ("-map", "0", "-c", "copy")
+
+
 def cut_head(source: Path, destination: Path, seconds: float) -> bool:
     """Guarda só os primeiros ``seconds`` do arquivo, copiando os streams.
 
@@ -224,7 +230,7 @@ def cut_head(source: Path, destination: Path, seconds: float) -> bool:
     try:
         result = subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", str(source), "-t", f"{seconds:.3f}", "-c", "copy", str(destination)],
+             "-i", str(source), "-t", f"{seconds:.3f}", *KEEP_ALL_STREAMS, str(destination)],
             check=False, capture_output=True, timeout=600,
             creationflags=_HIDDEN_PROCESS)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -247,7 +253,7 @@ def concat_videos(destination: Path, *parts: Path) -> bool:
         result = subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-f", "concat", "-safe", "0", "-i", str(listing),
-             "-c", "copy", str(destination)],
+             *KEEP_ALL_STREAMS, str(destination)],
             check=False, capture_output=True, timeout=600,
             creationflags=_HIDDEN_PROCESS)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -860,6 +866,14 @@ class VideoLoop:
     #: Medido em ~2 s nesta máquina; a folga evita começar o arquivo no escuro.
     HOOK_WARMUP_SECONDS = 4.0
 
+    def _apply_mic_filters(self) -> None:
+        # Falhar aqui não pode impedir a gravação: sem o filtro, o microfone
+        # sai cru, como antes — melhor que perder a partida.
+        try:
+            obs.apply_mic_filters()
+        except (obs.ObsError, OSError) as exc:
+            log(f"[aviso] filtros do microfone não aplicados: {exc}")
+
     def _start_recording(self, window: str) -> bool:
         title, window_class, executable = foreground_details()
         fps = self.active_fps or self.settings.fps
@@ -881,6 +895,7 @@ class VideoLoop:
             if leftover:
                 log(f"[aviso] havia uma gravação em aberto; encerrada em {leftover.name}")
             obs.stop_replay_buffer_if_active()
+            self._apply_mic_filters()
             capture_source = "tela cheia"
             if executable:
                 capture_source = obs.target_window(
@@ -916,6 +931,7 @@ class VideoLoop:
                 obs.launch()
             obs.stop_recording_if_active()
             obs.stop_replay_buffer_if_active()
+            self._apply_mic_filters()
             capture_source = "tela cheia"
             if executable:
                 capture_source = obs.target_window(

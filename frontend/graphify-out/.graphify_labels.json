@@ -5,7 +5,6 @@
   "3": "package.json",
   "4": "devDependencies",
   "5": "videoTime",
-  "6": "lib",
-  "7": "uploadVideo",
+  "7": "App",
   "8": "vite.config.ts"
 }

@@ -536,6 +536,231 @@ class VideoReplayClipTests(unittest.TestCase):
             self.assertIn("Track4Name=Sistema", basic)
 
 
+class ClipAudioTrackTests(unittest.TestCase):
+    """Recortar e emendar clipes não pode perder as faixas de áudio isoladas.
+
+    O gravador entrega a mixagem mais microfone, Discord e sistema separados;
+    sem ``-map 0`` o ffmpeg copiava uma faixa só, e a gravação longa e o clipe
+    estendido chegavam à biblioteca sem as faixas por fonte.
+    """
+
+    @staticmethod
+    def _audio_tracks(path: Path) -> int:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+             "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True)
+        return len(result.stdout.split())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_cut_and_concat_keep_every_audio_track(self):
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "clipe.mkv"
+            inputs = ["-f", "lavfi", "-i", "testsrc=d=2:s=160x120"]
+            for frequency in (300, 500, 700, 900):
+                inputs += ["-f", "lavfi", "-i", f"sine=f={frequency}:d=2"]
+            maps = [arg for index in range(5) for arg in ("-map", str(index))]
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *inputs, *maps,
+                            "-c:v", "libx264", "-c:a", "aac", str(source)], check=True)
+            self.assertEqual(self._audio_tracks(source), 4)
+
+            head = Path(directory) / "comeco.mkv"
+            self.assertTrue(winvideo.cut_head(source, head, 1.0))
+            self.assertEqual(self._audio_tracks(head), 4, "o recorte perdeu faixas")
+            joined = Path(directory) / "emendado.mkv"
+            self.assertTrue(winvideo.concat_videos(joined, head, source))
+            self.assertEqual(self._audio_tracks(joined), 4, "a emenda perdeu faixas")
+
+    def test_linux_loop_copies_every_stream_when_cutting_or_joining(self):
+        script = (Path(__file__).resolve().parents[2] / "bin" / "game-video-loop").read_text(encoding="utf-8")
+        copies = [line for line in script.splitlines() if "-c copy" in line]
+        self.assertEqual(len(copies), 2, "mudou o número de cópias de stream; revise este teste")
+        for line in copies:
+            self.assertIn("-map 0", line, line.strip())
+
+
+class MonitorResolutionTests(unittest.TestCase):
+    """A resolução sugerida para um jogo novo é a física, não a lógica."""
+
+    def test_scaled_monitor_reports_physical_pixels(self):
+        # KDE a 125%: o monitor 1600x900 aparece como 1280x720 no Geometry.
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1280, 720, scale=1.25).resolution, "1600x900")
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1366, 768).resolution, "1366x768")
+        # Codificadores exigem dimensões pares.
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1093, 615, scale=1.5).resolution, "1640x922")
+
+    def test_linux_reads_the_scale_of_each_output(self):
+        from app.capture import linux
+
+        output = (
+            "Output: 1 DP-1 abc\n\tenabled\n\tconnected\n\tGeometry: 0,0 1280x720\n\tScale: 1.25\n"
+            "Output: 2 HDMI-A-1 def\n\tenabled\n\tconnected\n\tGeometry: 1280,0 1920x1080\n\tScale: 1\n"
+        )
+        with unittest.mock.patch.object(linux.subprocess, "run",
+                                        return_value=SimpleNamespace(stdout=output, returncode=0)):
+            monitors = linux.LinuxCaptureBackend().list_monitors()
+        self.assertEqual([m.resolution for m in monitors], ["1600x900", "1920x1080"])
+        # A posição lógica continua intacta: é nela que as janelas se localizam.
+        self.assertEqual(monitors[1].geometry, "1920x1080+1280+0")
+
+    def test_windows_structs_match_the_win32_sizes(self):
+        """Com ``dmSize`` errado o EnumDisplaySettingsW recusa a chamada.
+
+        No Windows ``WCHAR`` tem 2 bytes; aqui simulamos isso para conferir o
+        layout contra os tamanhos documentados (DEVMODEW 220, MONITORINFOEXW 104).
+        """
+        import ctypes
+        from ctypes import wintypes
+        from app.capture import windows
+
+        with unittest.mock.patch.object(wintypes, "WCHAR", ctypes.c_uint16):
+            self.assertEqual(ctypes.sizeof(windows._devmode_w()), 220)
+            self.assertEqual(ctypes.sizeof(windows._monitor_info_ex()), 104)
+
+
+class VideoMicCleanupTests(unittest.TestCase):
+    """O microfone dos vídeos recebe a supressão e o volume mínimo da interface.
+
+    No Linux o gravador não filtra nada ao vivo, então a faixa do microfone é
+    refeita quando o vídeo é publicado (``game-video-loop --clean-mic``).
+    """
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "game-video-loop"
+
+    def _video(self, path: Path, levels_db: list[int], mic_source: str = "") -> None:
+        inputs = ["-f", "lavfi", "-i", "testsrc=d=2:s=160x120"]
+        for index, level in enumerate(levels_db):
+            source = mic_source if index == 1 and mic_source else f"sine=f={300 + 200 * index}:d=2,volume={level}dB"
+            inputs += ["-f", "lavfi", "-i", source]
+        maps = [arg for index in range(len(levels_db) + 1) for arg in ("-map", str(index))]
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *inputs, *maps, "-ac", "2",
+                        "-c:v", "libx264", "-c:a", "libopus", str(path)], check=True)
+
+    def _clean(self, home: Path, video: Path, audio_conf: str) -> None:
+        config = home / "config" / "captura-dia"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "audio.conf").write_text(audio_conf, encoding="utf-8")
+        (config / "storage.conf").write_text(f"STORAGE_ROOT={home / 'midia'}\n", encoding="utf-8")
+        subprocess.run([str(self.SCRIPT), "--clean-mic", str(video)], check=True, timeout=60,
+                       env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config")})
+
+    @staticmethod
+    def _mean_db(path: Path, track: int) -> float:
+        result = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path), "-map", f"0:a:{track}",
+                                 "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+        import re
+        return float(re.search(r"mean_volume: (-?[\d.]+|-inf) dB", result.stderr).group(1).replace("-inf", "-120"))
+
+    @staticmethod
+    def _packets(path: Path, track: int) -> str:
+        return subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-map", f"0:a:{track}",
+                               "-c", "copy", "-f", "md5", "-"], capture_output=True, text=True, check=True).stdout
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_quiet_mic_is_gated_and_the_mix_is_rebuilt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            # Mixagem, microfone baixo, Discord, sistema. O `sine` do lavfi já
+            # sai 18 dB abaixo do máximo: o microfone fica perto de -68 dB,
+            # bem abaixo do limite de -30.
+            self._video(video, [-10, -50, -20, -25])
+            expected_mix = self._mean_db(video, 2), self._mean_db(video, 3)
+            discord = self._packets(video, 2)
+            self._clean(home, video, "MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n")
+
+            self.assertEqual(ClipAudioTrackTests._audio_tracks(video), 4)
+            self.assertLess(self._mean_db(video, 1), -70, "o portão não fechou o microfone baixo")
+            self.assertEqual(self._packets(video, 2), discord, "o Discord foi recodificado")
+            # A mixagem nova é a soma de Discord e sistema (o mic está mudo), no
+            # mesmo nível — sem a normalização do amix, que a baixaria.
+            import math
+            summed = 10 * math.log10(sum(10 ** (level / 10) for level in expected_mix))
+            self.assertAlmostEqual(self._mean_db(video, 0), summed, delta=1.5)
+            self.assertFalse((home / "midia" / ".microfone" / "clipe.mp4").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_voice_above_the_threshold_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            # Um tom contínuo é justamente o que a supressão de ruído remove,
+            # então aqui só o portão é testado.
+            self._video(video, [-10, 0, -20, -25])
+            before = self._mean_db(video, 1)
+            self._clean(home, video, "MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n")
+            self.assertAlmostEqual(self._mean_db(video, 1), before, delta=1.5)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_denoise_setting_reaches_the_filter(self):
+        """Ligada, a supressão atenua um chiado constante que o portão deixaria passar."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            levels = {}
+            for denoise in ("false", "true"):
+                video = home / f"clipe-{denoise}.mp4"
+                self._video(video, [-10, 0, -20, -25], mic_source="anoisesrc=d=2:c=white:a=0.005")
+                self._clean(home, video, f"MIC_DENOISE_ENABLED={denoise}\nMIC_GATE_THRESHOLD_DB=-60\n")
+                levels[denoise] = self._mean_db(video, 1)
+            self.assertLess(levels["true"], levels["false"] - 3)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_other_track_layouts_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            self._video(video, [-10, -50])
+            original = video.read_bytes()
+            self._clean(home, video, "MIC_GATE_THRESHOLD_DB=-30\n")
+            self.assertEqual(video.read_bytes(), original)
+
+    def test_every_publish_path_cleans_the_mic(self):
+        """Vídeo que chega ao buffer sem passar pela limpeza sai com o mic cru."""
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        for step in ('clean_mic_track "$partial"\n    mv "$partial" "$final"',
+                     'clean_mic_track "$file"\n    mv "$file" "$target"',
+                     'clean_mic_track "$file"\n  mv "$file" "$target"',
+                     'rm -f "$long_clip_file" "$recording_file"\n      clean_mic_track "$target"'):
+            self.assertIn(step, script)
+
+
+class ObsMicFilterTests(unittest.TestCase):
+    """No Windows, o OBS filtra o microfone com os filtros nativos dele."""
+
+    def test_creates_denoise_before_the_gate(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([], True, -40)
+        created = [data["filterKind"] for kind, data in requests if kind == "CreateSourceFilter"]
+        self.assertEqual(created, ["noise_suppress_filter_v2", "noise_gate_filter"])
+        gate = next(data for kind, data in requests if data.get("filterKind") == "noise_gate_filter")
+        self.assertEqual(gate["filterSettings"]["open_threshold"], -40)
+        self.assertEqual(gate["filterSettings"]["close_threshold"], -46)
+        indexes = {data["filterName"]: data["filterIndex"] for kind, data in requests if kind == "SetSourceFilterIndex"}
+        self.assertEqual(indexes, {obs.MIC_DENOISE_FILTER: 0, obs.MIC_GATE_FILTER: 1})
+
+    def test_reapplying_updates_instead_of_stacking(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([obs.MIC_DENOISE_FILTER, obs.MIC_GATE_FILTER], True, -30)
+        self.assertNotIn("CreateSourceFilter", [kind for kind, _ in requests])
+
+    def test_turning_denoise_off_removes_it(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([obs.MIC_DENOISE_FILTER, obs.MIC_GATE_FILTER], False, -30)
+        self.assertIn(("RemoveSourceFilter", {"sourceName": obs.MIC_INPUT, "filterName": obs.MIC_DENOISE_FILTER}),
+                      requests)
+        index = next(data for kind, data in requests if kind == "SetSourceFilterIndex")
+        self.assertEqual(index["filterIndex"], 0)
+
+    def test_settings_fall_back_to_defaults(self):
+        from app.capture import obs
+
+        self.assertEqual(obs.mic_filter_settings({}), (True, -45.0))
+        self.assertEqual(obs.mic_filter_settings({"MIC_DENOISE_ENABLED": "false",
+                                                  "MIC_GATE_THRESHOLD_DB": "lixo"}), (False, -45.0))
+        self.assertEqual(obs.mic_filter_settings({"MIC_GATE_THRESHOLD_DB": "-5"}), (True, -10.0))
+
+
 class ObsWindowSpecTests(unittest.TestCase):
     """O identificador de janela do OBS é ``título:classe:executável``.
 
@@ -1799,6 +2024,64 @@ class LinuxAudioTrackTests(unittest.TestCase):
             AudioConfig(outdir=Path(tempfile.gettempdir()), channels=1, duration_seconds=5))
         self.assertEqual(argv.count("pulse"), 1)
         self.assertNotIn("-filter_complex", argv)
+
+    def test_mic_channel_gets_denoise_and_gate_by_default(self):
+        """Sem audio.conf, o microfone ainda ganha o tratamento padrão."""
+        from app.capture import linux
+
+        with unittest.mock.patch.object(linux, "AUDIO_CONFIG", Path(tempfile.gettempdir()) / "no-such-audio.conf"):
+            argv = linux.LinuxCaptureBackend().audio_record_argv(
+                AudioConfig(outdir=Path(tempfile.gettempdir()), channels=3, duration_seconds=5))
+        filter_complex = argv[argv.index("-filter_complex") + 1]
+        self.assertIn("[0:a]pan=mono|c0=c0,afftdn,agate=threshold=", filter_complex)
+
+    def test_mic_level_argv_measures_the_raw_signal_without_filters(self):
+        """A calibração precisa do sinal cru: filtrado, o silêncio de fundo
+        sempre apareceria mudo e o portão nunca teria o que mostrar."""
+        from app.capture.linux import LinuxCaptureBackend
+
+        argv = LinuxCaptureBackend().mic_level_argv(0.3)
+        self.assertIn("MicBus.monitor", argv)
+        self.assertIn("volumedetect", argv)
+        # volumedetect só imprime max_volume em nível info.
+        self.assertEqual(argv[argv.index("-loglevel") + 1], "info")
+        self.assertNotIn("agate", " ".join(argv))
+        self.assertNotIn("afftdn", " ".join(argv))
+
+    def test_windows_backend_measures_the_default_mic_through_dshow(self):
+        """O dshow corta nomes longos: casa pelo prefixo do nome do WASAPI."""
+        from app.capture import wasapi
+
+        backend = WindowsCaptureBackend()
+        with unittest.mock.patch.object(wasapi, "default_endpoint_name",
+                                        return_value="Microfone (HyperX Cloud II Wireless)"), \
+             unittest.mock.patch.object(backend, "_list_audio_devices",
+                                        return_value=["Mixagem estéreo (Realtek)", "Microfone (HyperX Cloud II Wirel"]):
+            argv = backend.mic_level_argv(0.3)
+        self.assertIn("audio=Microfone (HyperX Cloud II Wirel", argv)
+        self.assertEqual(argv[argv.index("-loglevel") + 1], "info")
+
+    def test_windows_backend_without_a_known_mic_reports_unsupported(self):
+        from app.capture import wasapi
+
+        backend = WindowsCaptureBackend()
+        with unittest.mock.patch.object(wasapi, "default_endpoint_name", return_value="Microfone USB"), \
+             unittest.mock.patch.object(backend, "_list_audio_devices", return_value=["Outro dispositivo"]):
+            self.assertIsNone(backend.mic_level_argv(0.3))
+
+    def test_audio_conf_can_disable_denoise_and_tune_the_gate(self):
+        from app.capture import linux
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "audio.conf"
+            config.write_text("MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n", encoding="utf-8")
+            with unittest.mock.patch.object(linux, "AUDIO_CONFIG", config):
+                argv = linux.LinuxCaptureBackend().audio_record_argv(
+                    AudioConfig(outdir=Path(tempfile.gettempdir()), channels=3, duration_seconds=5))
+        filter_complex = argv[argv.index("-filter_complex") + 1]
+        self.assertNotIn("afftdn", filter_complex)
+        # -30 dB em amplitude linear: 10 ** (-30/20) ~= 0.0316.
+        self.assertIn("agate=threshold=0.031623", filter_complex)
 
 
 class HudStateTests(unittest.TestCase):

@@ -156,6 +156,41 @@ class WindowsCaptureBackend(CaptureBackend):
             return None
         return None
 
+    def active_monitor_resolution(self) -> str | None:
+        # O processo da API não é DPI-aware, então os retângulos de
+        # EnumDisplayMonitors chegam divididos pela escala do Windows. O modo
+        # de vídeo atual do monitor (EnumDisplaySettings) não passa por essa
+        # virtualização: é a resolução que o OBS vai de fato capturar.
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+            user32.MonitorFromWindow.restype = wintypes.HMONITOR
+            user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+            # Com argtypes declarados o handle viaja inteiro; sem eles o
+            # ctypes o converteria para int de 32 bits.
+            user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
+            user32.EnumDisplaySettingsW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+            monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+            info = _monitor_info_ex()()
+            info.cbSize = ctypes.sizeof(info)
+            if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                return None
+            mode = _devmode_w()()
+            mode.dmSize = ctypes.sizeof(mode)
+            if not user32.EnumDisplaySettingsW(info.szDevice, 0xFFFFFFFF, ctypes.byref(mode)):  # ENUM_CURRENT_SETTINGS
+                return None
+            width, height = int(mode.dmPelsWidth), int(mode.dmPelsHeight)
+        except Exception:
+            return super().active_monitor_resolution()
+        if width <= 0 or height <= 0:
+            return None
+        return f"{width // 2 * 2}x{height // 2 * 2}"
+
     # --- Telas via gdigrab ----------------------------------------------
     def grab_frame(self, dest_dir: Path, stamp: str, cfg: ScreenConfig, window_text: str) -> list[Path]:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +288,28 @@ class WindowsCaptureBackend(CaptureBackend):
                 return dev
         return None
 
+    def mic_level_argv(self, seconds: float) -> list[str] | None:
+        # O microfone padrão pelo DirectShow, cru: é antes do volume da fonte
+        # que o portão do OBS age, então é esse o sinal que se calibra. O
+        # WASAPI dá o nome amigável; o dshow às vezes o corta, daí o prefixo.
+        try:
+            from . import wasapi
+            name = wasapi.default_endpoint_name(wasapi.E_CAPTURE)
+        except Exception:
+            return None
+        if not name:
+            return None
+        devices = self._list_audio_devices()
+        device = next((d for d in devices if d == name), None) or next(
+            (d for d in devices if name.startswith(d) or d.startswith(name)), None)
+        if not device:
+            return None
+        return [
+            self._ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin",
+            "-f", "dshow", "-i", f"audio={device}",
+            "-t", str(seconds), "-af", "volumedetect", "-f", "null", "-",
+        ]
+
     def audio_record_argv(self, cfg: AudioConfig) -> list[str]:
         """argv do gravador WASAPI (ver :mod:`app.capture.winrecord`).
 
@@ -308,3 +365,50 @@ class WindowsCaptureBackend(CaptureBackend):
             "system_capture_ok": speakers is not None and error is None,
             "hint": hint,
         }
+
+
+# Tipos de largura fixa em vez de ``wintypes.DWORD``/``RECT``: no Windows são
+# idênticos, e assim o layout também confere nos testes que rodam no Linux,
+# onde ``c_ulong``/``c_long`` têm 8 bytes. Só o ``WCHAR`` fica do ``wintypes``,
+# porque o ``szDevice`` precisa ser lido como texto.
+def _monitor_info_ex():
+    """MONITORINFOEXW: o ``szDevice`` é o nome que o EnumDisplaySettings pede."""
+    import ctypes
+    from ctypes import wintypes
+
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_int32), ("top", ctypes.c_int32),
+                    ("right", ctypes.c_int32), ("bottom", ctypes.c_int32)]
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint32), ("rcMonitor", RECT),
+                    ("rcWork", RECT), ("dwFlags", ctypes.c_uint32),
+                    ("szDevice", wintypes.WCHAR * 32)]
+    return MONITORINFOEXW
+
+
+def _devmode_w():
+    """DEVMODEW com a união de impressora/monitor como 16 bytes opacos.
+
+    Só ``dmPelsWidth``/``dmPelsHeight`` interessam, mas o ``dmSize`` precisa
+    bater com o tamanho real (220 bytes) ou o Windows recusa a chamada.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    word, dword, short = ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int16
+
+    class DEVMODEW(ctypes.Structure):
+        _fields_ = [("dmDeviceName", wintypes.WCHAR * 32), ("dmSpecVersion", word),
+                    ("dmDriverVersion", word), ("dmSize", word),
+                    ("dmDriverExtra", word), ("dmFields", dword),
+                    ("dmUnion", ctypes.c_byte * 16), ("dmColor", short),
+                    ("dmDuplex", short), ("dmYResolution", short),
+                    ("dmTTOption", short), ("dmCollate", short),
+                    ("dmFormName", wintypes.WCHAR * 32), ("dmLogPixels", word),
+                    *((name, dword) for name in (
+                        "dmBitsPerPel", "dmPelsWidth", "dmPelsHeight", "dmDisplayFlags",
+                        "dmDisplayFrequency", "dmICMMethod", "dmICMIntent", "dmMediaType",
+                        "dmDitherType", "dmReserved1", "dmReserved2", "dmPanningWidth",
+                        "dmPanningHeight"))]
+    return DEVMODEW

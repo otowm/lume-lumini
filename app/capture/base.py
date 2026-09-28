@@ -43,10 +43,23 @@ class Monitor:
     y: int
     width: int
     height: int
+    #: Escala do compositor. ``width``/``height`` são lógicos (é neles que as
+    #: janelas se posicionam); o monitor de verdade tem ``width * scale``.
+    scale: float = 1.0
 
     @property
     def geometry(self) -> str:
         return f"{self.width}x{self.height}+{self.x}+{self.y}"
+
+    @property
+    def resolution(self) -> str:
+        """Resolução física, em pixels reais — a que o gravador de vídeo vê.
+
+        Arredondada para par porque os codificadores H.264/HEVC exigem.
+        """
+        width = round(self.width * self.scale) // 2 * 2
+        height = round(self.height * self.scale) // 2 * 2
+        return f"{width}x{height}"
 
 
 @dataclass
@@ -198,6 +211,15 @@ class CaptureBackend(ABC):
     def active_monitor(self) -> Monitor | None:
         """Monitor que contém a janela em foco, se determinável."""
 
+    def active_monitor_resolution(self) -> str | None:
+        """Resolução física do monitor da janela em foco, como ``1600x900``.
+
+        É o que um app recém-adicionado deve gravar: um padrão fixo de
+        1920x1080 num monitor 1600x900 obrigava a trocar à mão todo jogo novo.
+        """
+        monitor = self.active_monitor()
+        return monitor.resolution if monitor else None
+
     # --- Tela ------------------------------------------------------------
     @abstractmethod
     def grab_frame(self, dest_dir: Path, stamp: str, cfg: ScreenConfig, window_text: str) -> list[Path]:
@@ -225,6 +247,14 @@ class CaptureBackend(ABC):
         Windows, mic, Discord e demais sons ocupam três canais temporários que
         são convertidos para mono depois do processamento bem-sucedido.
         """
+
+    def mic_level_argv(self, seconds: float) -> list[str] | None:
+        """argv que mede o pico do microfone cru (sem denoise/portão), por
+        ``seconds``, para calibrar o volume mínimo na interface.
+
+        ``None`` quando o backend ainda não sabe medir isso ao vivo.
+        """
+        return None
 
     @abstractmethod
     def audio_diagnostics(self) -> dict[str, object]:

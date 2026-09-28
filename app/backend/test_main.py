@@ -2265,10 +2265,10 @@ class VideoWindowTestEndpointTests(unittest.TestCase):
     encontrar.
     """
 
-    def _test(self, window: str, patterns: list[str], backend_name: str = "linux") -> dict:
+    def _test(self, window: str, patterns: list[str], backend_name: str = "linux", **extra) -> dict:
         from app.backend.main import VideoWindowTest, test_video_window
 
-        backend = SimpleNamespace(name=backend_name, active_window=lambda: window)
+        backend = SimpleNamespace(name=backend_name, active_window=lambda: window, **extra)
         with patch.object(backend_main, "get_backend", return_value=backend):
             return test_video_window(VideoWindowTest(patterns=patterns))
 
@@ -2289,6 +2289,20 @@ class VideoWindowTestEndpointTests(unittest.TestCase):
                                    ["exe:^steam_app_[0-9]+$"])["matched"])
         self.assertFalse(self._test("Counter-Strike 2 | cs2.exe",
                                     ["class:cs2"], backend_name="windows")["matched"])
+
+
+    def test_reports_the_game_monitor_resolution(self):
+        """Adicionar um jogo usa a resolução do monitor dele, não 1920x1080 fixo."""
+        result = self._test("Jogo | jogo.exe", [], backend_name="windows",
+                            active_monitor_resolution=lambda: "1600x900")
+        self.assertEqual(result["monitor_resolution"], "1600x900")
+
+    def test_monitor_resolution_failure_does_not_break_the_window_test(self):
+        def broken():
+            raise OSError("sem monitor")
+        result = self._test("Jogo | jogo.exe", [], active_monitor_resolution=broken)
+        self.assertIsNone(result["monitor_resolution"])
+        self.assertEqual(result["executable"], "jogo.exe")
 
 
 class VideoSettingsRoundTripTests(unittest.TestCase):
@@ -3252,6 +3266,7 @@ class ModoLuminiTests(unittest.TestCase):
                         "/api/share/upload", "/api/video-sessions", "/api/videos/12/markers",
                         "/api/videos/12/trim", "/api/videos/12/captured-at",
                         "/api/videos/preserve", "/api/settings/video", "/api/settings/storage",
+                        "/api/settings/audio",
                         "/api/editing", "/api/status", "/api/health", "/api/files"):
             self.assertFalse(backend_main.rota_de_ia(caminho), caminho)
 
@@ -3267,6 +3282,7 @@ class ModoLuminiTests(unittest.TestCase):
         gravacao = {
             "/api/updates", "/api/updates/prepare", "/api/updates/cancel", "/api/updates/install",
             "/api/health", "/api/status", "/api/capture/{action}", "/api/settings/screen",
+            "/api/settings/audio", "/api/settings/audio/mic-level",
             "/api/settings/sensitive", "/api/settings/storage", "/api/settings/video",
             "/api/settings/cleanup", "/api/test/screen", "/api/test/screen-change/start",
             "/api/test/screen-change/compare", "/api/test/video-window", "/api/test/audio",
@@ -3281,7 +3297,7 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/files/unprocessed/all", "/api/retention/{kind}/{item_id}",
             "/api/media/raw/unkept", "/api/editing", "/api/editing/video/{video_id}",
             "/api/editing/session/{session_id}", "/api/editing/{name}", "/api/editing/open",
-            "/api/settings/steamgriddb", "/api/game-icons", "/api/game-icons/{file_name}",
+            "/api/settings/steamgriddb", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
         }
         sem_classificacao = []
         for rota in backend_main.app.routes:

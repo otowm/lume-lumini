@@ -1,0 +1,483 @@
+{
+  "communities": {
+    "0": [
+      "app_backend_database_initialize",
+      "app_backend_pipeline",
+      "app_backend_pipeline_adaptive_web_research",
+      "app_backend_pipeline_analyze_video_chapter",
+      "app_backend_pipeline_describe_long_video",
+      "app_backend_pipeline_describe_screen",
+      "app_backend_pipeline_describe_video",
+      "app_backend_pipeline_discover",
+      "app_backend_pipeline_extract_adaptive_keyframes",
+      "app_backend_pipeline_format_video_time",
+      "app_backend_pipeline_generate_hourly_summaries",
+      "app_backend_pipeline_generate_summary",
+      "app_backend_pipeline_main",
+      "app_backend_pipeline_monitor_key",
+      "app_backend_pipeline_ollama_chat",
+      "app_backend_pipeline_ollama_json",
+      "app_backend_pipeline_parse_json_response",
+      "app_backend_pipeline_private_context_terms",
+      "app_backend_pipeline_process_pending",
+      "app_backend_pipeline_process_specific",
+      "app_backend_pipeline_process_video_session",
+      "app_backend_pipeline_process_video_specific",
+      "app_backend_pipeline_publish_ai_live",
+      "app_backend_pipeline_py_path",
+      "app_backend_pipeline_review_short_video_analysis",
+      "app_backend_pipeline_run_pipeline",
+      "app_backend_pipeline_safe_research_query",
+      "app_backend_pipeline_searxng_search",
+      "app_backend_pipeline_sha256",
+      "app_backend_pipeline_short_video_analysis_prompt",
+      "app_backend_pipeline_string_list",
+      "app_backend_pipeline_timestamp_from_name",
+      "app_backend_pipeline_transcribe",
+      "app_backend_pipeline_transcribe_video_audio",
+      "app_backend_pipeline_update_video_progress",
+      "app_backend_pipeline_video_config",
+      "app_backend_pipeline_visually_changed",
+      "app_backend_test_main",
+      "app_backend_test_main_configtests",
+      "app_backend_test_main_configtests_test_atomic_write",
+      "app_backend_test_main_configtests_test_friend_name_is_private_for_web_research",
+      "app_backend_test_main_configtests_test_identity_search_is_always_blocked",
+      "app_backend_test_main_configtests_test_monitor_key",
+      "app_backend_test_main_configtests_test_parse_only_known_keys",
+      "app_backend_test_main_configtests_test_review_preserves_fact_sources_and_checks_post_plant",
+      "app_backend_test_main_configtests_test_short_video_prompt_separates_context_from_visual_evidence",
+      "datetime"
+    ],
+    "1": [
+      "frontend_src_api",
+      "frontend_src_api_analysistrace",
+      "frontend_src_api_api",
+      "frontend_src_api_capture",
+      "frontend_src_api_daysummary",
+      "frontend_src_api_hoursummary",
+      "frontend_src_api_queueitem",
+      "frontend_src_api_queuejob",
+      "frontend_src_api_rawfile",
+      "frontend_src_api_request",
+      "frontend_src_api_schedulesettings",
+      "frontend_src_api_screensettings",
+      "frontend_src_api_status",
+      "frontend_src_api_storagecandidate",
+      "frontend_src_api_storagesettings",
+      "frontend_src_api_uploadvideo",
+      "frontend_src_api_videochapter",
+      "frontend_src_api_videofile",
+      "frontend_src_api_videosession",
+      "frontend_src_api_videosessionclip",
+      "frontend_src_api_videosettings",
+      "frontend_src_api_videotranscriptsegment",
+      "frontend_src_api_websource",
+      "frontend_src_main",
+      "frontend_src_main_aiinspector",
+      "frontend_src_main_app",
+      "frontend_src_main_audioplayer",
+      "frontend_src_main_bytes",
+      "frontend_src_main_capturecard",
+      "frontend_src_main_chapterstart",
+      "frontend_src_main_customvideoplayer",
+      "frontend_src_main_emptyview",
+      "frontend_src_main_groupcaptures",
+      "frontend_src_main_icons",
+      "frontend_src_main_labels",
+      "frontend_src_main_modal",
+      "frontend_src_main_panel",
+      "frontend_src_main_sessioncard",
+      "frontend_src_main_sessionviewer",
+      "frontend_src_main_summaryview",
+      "frontend_src_main_videoconfigmodal",
+      "frontend_src_main_videotime",
+      "frontend_src_main_videoviewer",
+      "frontend_src_main_view"
+    ],
+    "2": [
+      "frontend_package",
+      "frontend_package_dependencies",
+      "frontend_package_dependencies_react",
+      "frontend_package_dependencies_react_dom",
+      "frontend_package_devdependencies",
+      "frontend_package_devdependencies_types_react",
+      "frontend_package_devdependencies_types_react_dom",
+      "frontend_package_devdependencies_typescript",
+      "frontend_package_devdependencies_vite",
+      "frontend_package_name",
+      "frontend_package_private",
+      "frontend_package_scripts",
+      "frontend_package_scripts_build",
+      "frontend_package_scripts_dev",
+      "frontend_package_scripts_typecheck",
+      "frontend_package_type",
+      "frontend_package_version",
+      "react",
+      "react_dom",
+      "types_react",
+      "types_react_dom",
+      "typescript",
+      "vite"
+    ],
+    "3": [
+      "frontend_tsconfig",
+      "frontend_tsconfig_compileroptions",
+      "frontend_tsconfig_compileroptions_allowjs",
+      "frontend_tsconfig_compileroptions_allowsyntheticdefaultimports",
+      "frontend_tsconfig_compileroptions_esmoduleinterop",
+      "frontend_tsconfig_compileroptions_forceconsistentcasinginfilenames",
+      "frontend_tsconfig_compileroptions_isolatedmodules",
+      "frontend_tsconfig_compileroptions_jsx",
+      "frontend_tsconfig_compileroptions_lib",
+      "frontend_tsconfig_compileroptions_module",
+      "frontend_tsconfig_compileroptions_moduleresolution",
+      "frontend_tsconfig_compileroptions_noemit",
+      "frontend_tsconfig_compileroptions_resolvejsonmodule",
+      "frontend_tsconfig_compileroptions_skiplibcheck",
+      "frontend_tsconfig_compileroptions_strict",
+      "frontend_tsconfig_compileroptions_target",
+      "frontend_tsconfig_compileroptions_usedefineforclassfields",
+      "frontend_tsconfig_include",
+      "frontend_tsconfig_references",
+      "ref_dom",
+      "ref_dom_iterable",
+      "ref_es2022",
+      "ref_src"
+    ],
+    "4": [
+      "app_backend_main",
+      "app_backend_main_atomic_write",
+      "app_backend_main_create_video_session",
+      "app_backend_main_directory_stats",
+      "app_backend_main_get_screen_settings",
+      "app_backend_main_get_sensitive_windows",
+      "app_backend_main_get_video_settings",
+      "app_backend_main_health",
+      "app_backend_main_parse_shell_config",
+      "app_backend_main_pipeline_run",
+      "app_backend_main_pipelinerequest",
+      "app_backend_main_schedulesettings",
+      "app_backend_main_screensettings",
+      "app_backend_main_sensitivewindows",
+      "app_backend_main_set_video_settings",
+      "app_backend_main_status",
+      "app_backend_main_storagesettings",
+      "app_backend_main_update_screen_settings",
+      "app_backend_main_update_sensitive_windows",
+      "app_backend_main_videosessioncreate",
+      "app_backend_main_videosettings",
+      "basemodel"
+    ],
+    "5": [
+      "app_backend_main_audio_file",
+      "app_backend_main_delete_capture",
+      "app_backend_main_delete_capture_file",
+      "app_backend_main_delete_file",
+      "app_backend_main_delete_video_session",
+      "app_backend_main_list_video_sessions",
+      "app_backend_main_pipeline_queue",
+      "app_backend_main_process_file",
+      "app_backend_main_process_video_session_job",
+      "app_backend_main_processfilerequest",
+      "app_backend_main_py_path",
+      "app_backend_main_safe_audio_path",
+      "app_backend_main_safe_screen_path",
+      "app_backend_main_screenshot",
+      "app_backend_main_video_file",
+      "fileresponse"
+    ],
+    "6": [
+      "app_backend_database_connect",
+      "app_backend_database_row_dict",
+      "app_backend_main_cancel_entire_queue",
+      "app_backend_main_cancel_pipeline",
+      "app_backend_main_cancel_queue_item",
+      "app_backend_main_cancel_video_analysis",
+      "app_backend_main_cancel_video_session",
+      "app_backend_main_capture_payload",
+      "app_backend_main_captures",
+      "app_backend_main_contextupdate",
+      "app_backend_main_hourly_timeline",
+      "app_backend_main_summary",
+      "app_backend_main_update_video_context",
+      "app_backend_main_update_video_session_context",
+      "row"
+    ],
+    "7": [
+      "app_backend_main_get_storage_settings",
+      "app_backend_main_set_storage_settings",
+      "app_backend_main_storage_candidates",
+      "app_backend_main_storage_payload"
+    ],
+    "8": [
+      "bin_capture_frame",
+      "bin_capture_frame__entry",
+      "bin_capture_frame_active_screen_geometry",
+      "bin_capture_frame_active_window",
+      "bin_capture_frame_capture_grim_one",
+      "bin_capture_frame_capture_spectacle",
+      "bin_capture_frame_finish_image",
+      "bin_capture_frame_new_temp",
+      "bin_capture_frame_screen_geometries",
+      "bin_capture_frame_usage"
+    ],
+    "9": [
+      "app_backend_main_capture_action",
+      "app_backend_main_generate_hourly_now",
+      "app_backend_main_generate_summary_now",
+      "app_backend_main_get_schedule",
+      "app_backend_main_list_files",
+      "app_backend_main_list_videos",
+      "app_backend_main_pipeline_status",
+      "app_backend_main_run",
+      "app_backend_main_search",
+      "app_backend_main_set_schedule",
+      "app_backend_main_test_audio",
+      "app_backend_main_test_screen",
+      "app_backend_main_unit_state",
+      "app_backend_main_unload_ollama_models",
+      "completedprocess"
+    ],
+    "10": [
+      "bin_game_video_loop",
+      "bin_game_video_loop__entry",
+      "bin_game_video_loop_active_monitor",
+      "bin_game_video_loop_cleanup",
+      "bin_game_video_loop_finish_segment",
+      "bin_game_video_loop_is_selected_app",
+      "bin_game_video_loop_pause_background_captures",
+      "bin_game_video_loop_resume_background_captures",
+      "bin_game_video_loop_window_info"
+    ],
+    "11": [
+      "bin_audio_bus",
+      "bin_audio_bus_load_loopback",
+      "bin_audio_bus_setup",
+      "bin_audio_bus_sh__entry",
+      "bin_audio_bus_status",
+      "bin_audio_bus_unload_bus",
+      "bin_audio_bus_wait_pipewire"
+    ],
+    "12": [
+      "app_backend_main_delete_video",
+      "app_backend_main_preserve_video",
+      "app_backend_main_process_video",
+      "app_backend_main_safe_video_path",
+      "app_backend_main_videoprocessrequest"
+    ],
+    "13": [
+      "app_backend_database",
+      "app_backend_main_paths",
+      "app_backend_main_paths_configured_storage_root",
+      "app_backend_main_paths_py_path"
+    ],
+    "14": [
+      "app_backend_main_import_video",
+      "app_backend_main_local_origin_only",
+      "request"
+    ],
+    "15": [
+      "bin_capture_loop",
+      "bin_capture_loop__entry",
+      "bin_capture_loop_changed_enough"
+    ],
+    "16": [
+      "app_backend_main_lifespan",
+      "fastapi"
+    ],
+    "17": [
+      "bin_grava_audio",
+      "bin_grava_audio_sh__entry"
+    ],
+    "18": [
+      "install_captura_dia",
+      "install_captura_dia_sh__entry"
+    ],
+    "19": [
+      "install_lume",
+      "install_lume_sh__entry"
+    ],
+    "20": [
+      "install_user",
+      "install_user_sh__entry"
+    ],
+    "21": [
+      "app_backend_init"
+    ],
+    "22": [
+      "frontend_vite_config"
+    ]
+  },
+  "cohesion": {
+    "0": 0.1276595744680851,
+    "1": 0.0708245243128964,
+    "2": 0.08695652173913043,
+    "3": 0.08695652173913043,
+    "4": 0.18181818181818182,
+    "5": 0.175,
+    "6": 0.17142857142857143,
+    "7": 0.8333333333333334,
+    "8": 0.3111111111111111,
+    "9": 0.17142857142857143,
+    "10": 0.3611111111111111,
+    "11": 0.6666666666666666,
+    "12": 0.5,
+    "13": 0.5,
+    "14": 0.6666666666666666,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0
+  },
+  "gods": [
+    {
+      "id": "app_backend_database_connect",
+      "label": "connect()",
+      "degree": 40
+    },
+    {
+      "id": "app_backend_main_run",
+      "label": "run()",
+      "degree": 24
+    },
+    {
+      "id": "frontend_tsconfig_compileroptions",
+      "label": "compilerOptions",
+      "degree": 16
+    },
+    {
+      "id": "app_backend_main_unit_state",
+      "label": "unit_state()",
+      "degree": 14
+    },
+    {
+      "id": "app_backend_pipeline_describe_video",
+      "label": "describe_video()",
+      "degree": 14
+    },
+    {
+      "id": "app_backend_pipeline_ollama_json",
+      "label": "ollama_json()",
+      "degree": 12
+    },
+    {
+      "id": "app_backend_database_initialize",
+      "label": "initialize()",
+      "degree": 11
+    },
+    {
+      "id": "app_backend_main_atomic_write",
+      "label": "atomic_write()",
+      "degree": 9
+    },
+    {
+      "id": "app_backend_pipeline_analyze_video_chapter",
+      "label": "analyze_video_chapter()",
+      "degree": 9
+    },
+    {
+      "id": "app_backend_pipeline_process_video_specific",
+      "label": "process_video_specific()",
+      "degree": 9
+    }
+  ],
+  "surprises": [
+    {
+      "source": "create_video_session()",
+      "target": "connect()",
+      "source_files": [
+        "app/backend/main.py",
+        "app/backend/database.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "delete_capture()",
+      "target": "connect()",
+      "source_files": [
+        "app/backend/main.py",
+        "app/backend/database.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "delete_file()",
+      "target": "connect()",
+      "source_files": [
+        "app/backend/main.py",
+        "app/backend/database.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "delete_video()",
+      "target": "connect()",
+      "source_files": [
+        "app/backend/main.py",
+        "app/backend/database.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities"
+    },
+    {
+      "source": "delete_video_session()",
+      "target": "connect()",
+      "source_files": [
+        "app/backend/main.py",
+        "app/backend/database.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "calls",
+      "why": "bridges separate communities"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `connect()` connect `Community 6` to `Community 0`, `Community 4`, `Community 5`, `Community 9`, `Community 12`, `Community 13`, `Community 14`?",
+      "why": "High betweenness centrality (0.056) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `initialize()` connect `Community 0` to `Community 4`, `Community 6`, `Community 9`, `Community 13`, `Community 16`?",
+      "why": "High betweenness centrality (0.010) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `run()` connect `Community 9` to `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 12`, `Community 14`?",
+      "why": "High betweenness centrality (0.007) - this node is a cross-community bridge."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `grava-audio.sh script`, `name`, `private` to the rest of the system?",
+      "why": "44 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 0` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.1276595744680851 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 1` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.0708245243128964 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 2` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.08695652173913043 - nodes in this community are weakly interconnected."
+    }
+  ]
+}

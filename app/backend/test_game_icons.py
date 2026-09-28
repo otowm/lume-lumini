@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +82,38 @@ class GameIconTests(unittest.TestCase):
         game_icons.save_key("abc123")
         self._lookup("Roblox")
         self.assertTrue(any("steamgriddb" in url for url, _ in self.calls))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg ausente")
+    def test_ico_only_games_get_a_png_icon(self):
+        """O SteamGridDB só tem .ico de vários jogos (Sea of Thieves, How to
+        Fish); recusá-lo os deixava sem ícone por uma semana."""
+        with tempfile.TemporaryDirectory() as directory:
+            ico = Path(directory) / "jogo.ico"
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=red:s=64x64",
+                            "-frames:v", "1", str(ico)], check=True)
+            game_icons.KEY_FILE.write_text("abc123\n")
+            sgdb = game_icons.SGDB_API
+            self.responses.update({
+                f"{sgdb}/search/autocomplete/Sea": json.dumps({"data": [{"id": 7}]}).encode(),
+                f"{sgdb}/icons/game/7": json.dumps({"data": [{"url": "https://cdn/sot.ico"}]}).encode(),
+                "https://cdn/sot.ico": ico.read_bytes(),
+            })
+            icon = self._lookup("Sea of Thieves")["Sea of Thieves"]
+        self.assertIsNotNone(icon)
+        self.assertEqual(icon["kind"], "icon")
+        self.assertTrue(icon["file"].endswith(".png"))
+        self.assertTrue((game_icons.CACHE_DIR / icon["file"]).read_bytes().startswith(b"\x89PNG"))
+
+    def test_retry_forgets_only_the_missing_games(self):
+        self._steam_search((730, "Counter-Strike 2"))
+        self.responses[f"{game_icons.STEAM_ASSETS}/730/"] = JPG
+        self._lookup("Counter-Strike 2", "Roblox")
+        self.assertEqual(game_icons.forget_missing(), 1)
+        self.calls.clear()
+        self._lookup("Counter-Strike 2", "Roblox")
+        searched = [url for url, _ in self.calls if url.startswith(game_icons.STEAM_SEARCH)]
+        self.assertEqual(len(searched), 1, "só o jogo sem ícone deveria ir à rede de novo")
+        self.assertIn("Roblox", searched[0])
 
     def test_only_generated_file_names_are_served(self):
         self.assertIsNone(game_icons.cached_file("../steamgriddb.key"))

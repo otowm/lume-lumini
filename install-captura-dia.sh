@@ -36,6 +36,9 @@ command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 --noincremental >/dev/null 
 if [[ ! -e "$config_dir/tela.conf" ]]; then
   install -m 0644 "$root/config/captura-dia/tela.conf" "$config_dir/tela.conf"
 fi
+if [[ ! -e "$config_dir/audio.conf" ]]; then
+  install -m 0644 "$root/config/captura-dia/audio.conf" "$config_dir/audio.conf"
+fi
 if [[ ! -e "$config_dir/janelas-sensiveis.txt" ]]; then
   old_patterns="${XDG_CONFIG_HOME:-$HOME/.config}/otowm-recall/sensitive-windows.txt"
   if [[ -e "$old_patterns" ]]; then

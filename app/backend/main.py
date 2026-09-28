@@ -38,7 +38,7 @@ from ..capture.base import format_video_app_rule, parse_video_app_rule
 from ..capture.imagediff import compare_images
 from .database import connect, initialize, row_dict
 from .audio_intelligence import embedding_for_sample
-from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
+from .main_paths import AUDIO_CONFIG, AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
 from .runtime import VIDEO_ACTIVITY_FRESH_SECONDS, pipeline_pause_flag, video_activity_flag, video_recording_flag
 from .retention import cleanup_processed_capture_media, cleanup_ready_days, cleanup_settings, save_cleanup_settings
 from . import editing, game_icons, mode, prompts, sharing, tags as tag_vocabulary
@@ -68,6 +68,7 @@ ALLOWED_CONFIG = {
     "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_KEY_CODE","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
     "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND",
     "VIDEO_RESOLVE_FPS","VIDEO_RESOLVE_START_TIMECODE",
+    "MIC_DENOISE_ENABLED","MIC_GATE_THRESHOLD_DB",
 }
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
@@ -249,6 +250,11 @@ class ScreenSettings(BaseModel):
     split_monitors: bool
     active_monitor_only: bool
     privacy_fail_closed: bool
+
+
+class AudioSettings(BaseModel):
+    mic_denoise_enabled: bool
+    mic_gate_threshold_db: float = Field(ge=-60, le=-10)
 
 
 class SensitiveWindows(BaseModel):
@@ -685,6 +691,12 @@ def _apply_video_runtime(enabled: bool, refresh_shortcuts: bool, hud_enabled: bo
 
 def _restart_screen_runtime() -> None:
     _report_runtime_failure("captura de tela", service_action("try-restart", ["captura-dia-tela.service"], timeout=20))
+
+
+def _restart_audio_runtime() -> None:
+    # grava-audio.sh só lê audio.conf ao subir; sem religar o filtro do
+    # microfone continuaria com o valor antigo até a próxima sessão.
+    _report_runtime_failure("captura de áudio", service_action("try-restart", ["captura-dia-audio.service"], timeout=20))
 
 
 def storage_payload(root: Path) -> dict:
@@ -1609,6 +1621,27 @@ PRIVACY_FAIL_CLOSED={'true' if settings.privacy_fail_closed else 'false'}
     return {"ok": True, "settings": settings, "restart_pending": changed}
 
 
+@app.get("/api/settings/audio", response_model=AudioSettings)
+def get_audio_settings() -> AudioSettings:
+    config = parse_shell_config(AUDIO_CONFIG)
+    return AudioSettings(
+        mic_denoise_enabled=config.get("MIC_DENOISE_ENABLED", "true").lower() == "true",
+        mic_gate_threshold_db=float(config.get("MIC_GATE_THRESHOLD_DB", "-45")),
+    )
+
+
+@app.put("/api/settings/audio")
+def update_audio_settings(settings: AudioSettings, background_tasks: BackgroundTasks) -> dict:
+    content = f'''# Gerenciado pela interface Lume.
+MIC_DENOISE_ENABLED={'true' if settings.mic_denoise_enabled else 'false'}
+MIC_GATE_THRESHOLD_DB={settings.mic_gate_threshold_db:g}
+'''
+    changed = atomic_write_if_changed(AUDIO_CONFIG, content)
+    if changed:
+        background_tasks.add_task(_restart_audio_runtime)
+    return {"ok": True, "settings": settings, "restart_pending": changed}
+
+
 @app.get("/api/settings/sensitive", response_model=SensitiveWindows)
 def get_sensitive_windows() -> SensitiveWindows:
     patterns = []
@@ -1770,9 +1803,13 @@ def test_video_window(payload: VideoWindowTest) -> dict:
     window_class = identity if backend.name != "windows" else ""
     fields = {"title": title, "exe": identity, "class": window_class}
     matched_pattern = next((source for source, field, regex in compiled if regex.search(fields[field])), "")
+    try:
+        monitor_resolution = backend.active_monitor_resolution()
+    except Exception:
+        monitor_resolution = None
     return {
         "ok": True, "window_id": "", "title": title, "window_class": identity,
-        "executable": identity,
+        "executable": identity, "monitor_resolution": monitor_resolution,
         "info": info, "matched": bool(matched_pattern), "matched_pattern": matched_pattern,
     }
 
@@ -1807,6 +1844,23 @@ def test_audio(seconds: int = Query(default=5, ge=2, le=15)) -> dict:
             "max_db": maximum.group(1) if maximum else None,
             "silent": not maximum or maximum.group(1) == "-inf",
         }
+
+
+@app.get("/api/settings/audio/mic-level")
+def mic_level(ms: int = Query(default=300, ge=100, le=1500)) -> dict:
+    """Pico do microfone cru (sem denoise/portão) numa janela curta.
+
+    A interface faz polling nisto enquanto o teste de calibração está aberto,
+    para desenhar a barra ao vivo ao lado do controle de volume mínimo.
+    """
+    seconds = ms / 1000
+    argv = get_backend().mic_level_argv(seconds)
+    if argv is None:
+        raise HTTPException(status_code=501, detail="Medição ao vivo do microfone ainda não é suportada neste sistema.")
+    result = run(argv, timeout=seconds + 10)
+    maximum = re.search(r"max_volume:\s*([^\s]+) dB", result.stderr)
+    silent = not maximum or maximum.group(1) == "-inf"
+    return {"ok": True, "peak_db": None if silent else float(maximum.group(1)), "silent": silent}
 
 
 @app.get("/api/screenshot")
@@ -2085,6 +2139,12 @@ def game_icon_lookup(names: list[str] = Query(default=[], max_length=100)) -> di
     found = game_icons.lookup([name[:120] for name in names])
     return {name: {"url": f"/api/game-icons/{entry['file']}", "kind": entry["kind"]} if entry else None
             for name, entry in found.items()}
+
+
+@app.post("/api/game-icons/retry")
+def game_icon_retry() -> dict:
+    """Busca de novo, já, os jogos que ficaram sem ícone."""
+    return {"ok": True, "retrying": game_icons.forget_missing()}
 
 
 @app.get("/api/game-icons/{file_name}")

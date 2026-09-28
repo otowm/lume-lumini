@@ -31,7 +31,7 @@ from pathlib import Path
 
 _HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-from ..backend.main_paths import VIDEO_DIR
+from ..backend.main_paths import AUDIO_CONFIG, VIDEO_DIR
 
 #: Cópia portátil do OBS usada só pelo Lume.
 OBS_HOME = Path(os.environ.get("LUME_OBS_HOME", Path.home() / ".lume-obs"))
@@ -584,6 +584,76 @@ def ensure_scene() -> bool:
     _set_capture_input(WINDOW_INPUT, False)
     _set_capture_input(GAME_INPUT, True)
     return changed
+
+
+#: Nomes dos filtros que o Lume põe no microfone. Fixos para que reaplicar
+#: atualize os mesmos filtros em vez de empilhar cópias.
+MIC_DENOISE_FILTER = "Lume · supressão de ruído"
+MIC_GATE_FILTER = "Lume · volume mínimo"
+#: Folga entre abrir e fechar o portão. Com um limite só, a voz oscilando em
+#: volta dele abriria e fecharia o portão várias vezes por sílaba.
+MIC_GATE_HYSTERESIS_DB = 6.0
+
+
+def mic_filter_settings(config: dict[str, str]) -> tuple[bool, float]:
+    """(supressão ligada, limite em dB) de ``audio.conf``, com os padrões."""
+    denoise = config.get("MIC_DENOISE_ENABLED", "true").strip().lower() == "true"
+    try:
+        threshold = float(config.get("MIC_GATE_THRESHOLD_DB", "-45"))
+    except ValueError:
+        threshold = -45.0
+    return denoise, min(-10.0, max(-60.0, threshold))
+
+
+def mic_filter_requests(existing: list[str], denoise: bool, threshold_db: float) -> list[tuple[str, dict]]:
+    """Pedidos do obs-websocket que deixam o microfone com os filtros de agora.
+
+    Separado de :func:`apply_mic_filters` para dar para testar sem OBS. A
+    ordem importa: a supressão vem antes do portão, senão o chiado de fundo
+    ainda seria medido pelo portão e o manteria aberto.
+    """
+    requests: list[tuple[str, dict]] = []
+    gate = {"open_threshold": threshold_db, "close_threshold": threshold_db - MIC_GATE_HYSTERESIS_DB,
+            "attack_time": 5, "hold_time": 200, "release_time": 250}
+    if denoise:
+        settings = {"method": "rnnoise"}
+        if MIC_DENOISE_FILTER in existing:
+            requests.append(("SetSourceFilterSettings", {"sourceName": MIC_INPUT, "filterName": MIC_DENOISE_FILTER,
+                                                         "filterSettings": settings}))
+        else:
+            requests.append(("CreateSourceFilter", {"sourceName": MIC_INPUT, "filterName": MIC_DENOISE_FILTER,
+                                                    "filterKind": "noise_suppress_filter_v2",
+                                                    "filterSettings": settings}))
+        requests.append(("SetSourceFilterIndex", {"sourceName": MIC_INPUT, "filterName": MIC_DENOISE_FILTER,
+                                                  "filterIndex": 0}))
+    elif MIC_DENOISE_FILTER in existing:
+        requests.append(("RemoveSourceFilter", {"sourceName": MIC_INPUT, "filterName": MIC_DENOISE_FILTER}))
+    if MIC_GATE_FILTER in existing:
+        requests.append(("SetSourceFilterSettings", {"sourceName": MIC_INPUT, "filterName": MIC_GATE_FILTER,
+                                                     "filterSettings": gate}))
+    else:
+        requests.append(("CreateSourceFilter", {"sourceName": MIC_INPUT, "filterName": MIC_GATE_FILTER,
+                                                "filterKind": "noise_gate_filter", "filterSettings": gate}))
+    requests.append(("SetSourceFilterIndex", {"sourceName": MIC_INPUT, "filterName": MIC_GATE_FILTER,
+                                              "filterIndex": 1 if denoise else 0}))
+    return requests
+
+
+def apply_mic_filters() -> None:
+    """Aplica ao microfone do OBS a supressão de ruído e o volume mínimo.
+
+    Os filtros agem antes do volume da fonte (+6 dB), então o limite vale para
+    o sinal cru — o mesmo que o medidor da interface mostra. Barato: pode rodar
+    a cada gravação, e é assim que uma mudança na interface chega sem
+    reiniciar o OBS.
+    """
+    from .base import read_shell_config
+
+    denoise, threshold = mic_filter_settings(read_shell_config(AUDIO_CONFIG))
+    existing = [item.get("filterName", "") for item in
+                call("GetSourceFilterList", {"sourceName": MIC_INPUT}).get("filters", [])]
+    for request_type, data in mic_filter_requests(existing, denoise, threshold):
+        call(request_type, data)
 
 
 def _encode_field(value: str) -> str:
