@@ -22,6 +22,7 @@ envio, e nenhum outro módulo do Lume o chama.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -158,6 +159,9 @@ class SharePlan:
     audio_bitrate: int
     scale: bool
     resample: bool
+    #: O original já cabe no teto e só o áudio muda (volumes salvos): a imagem
+    #: é copiada como está, sem perder qualidade nem gastar CPU recodificando.
+    copy_video: bool = False
 
     @property
     def estimated_bytes(self) -> int:
@@ -228,8 +232,63 @@ def share_plan(limit_mb: int, duration: float, height: int = 1080, fps: float = 
     )
 
 
+# --- volumes salvos ---------------------------------------------------------
+
+def load_audio_mix(raw_path: str | Path) -> dict[int, float]:
+    """Volumes salvos no player, por posição da faixa de áudio (``0:a:N``)."""
+    with connect() as db:
+        row = db.execute("SELECT volumes_json FROM video_audio_mix WHERE source_path=?",
+                         (media_source_key(raw_path),)).fetchone()
+    if row is None:
+        return {}
+    try:
+        raw = json.loads(row["volumes_json"] or "{}")
+        return {int(track): max(0.0, min(2.0, float(volume))) for track, volume in raw.items()}
+    except (ValueError, TypeError, AttributeError):
+        return {}
+
+
+def save_audio_mix(raw_path: str | Path, volumes: dict[int, float]) -> None:
+    key = media_source_key(raw_path)
+    with connect() as db:
+        if volumes:
+            db.execute(
+                """INSERT INTO video_audio_mix(source_path,volumes_json,updated_at)
+                   VALUES(?,?,CURRENT_TIMESTAMP)
+                   ON CONFLICT(source_path) DO UPDATE SET volumes_json=excluded.volumes_json,
+                                                        updated_at=CURRENT_TIMESTAMP""",
+                (key, json.dumps({str(track): volume for track, volume in sorted(volumes.items())})))
+        else:
+            db.execute("DELETE FROM video_audio_mix WHERE source_path=?", (key,))
+
+
+def audio_mix(raw_path: str | Path) -> dict[int, float] | None:
+    """A mixagem a aplicar no envio, ou ``None`` quando nada foi mexido.
+
+    Tudo em 100% é o mesmo que a faixa de mixagem que o arquivo já tem: aí
+    vale o caminho de sempre, e o original que cabe no teto segue intocado.
+    """
+    mix = load_audio_mix(raw_path)
+    if not mix or all(abs(volume - 1.0) < 0.005 for volume in mix.values()):
+        return None
+    return mix
+
+
+def _mix_tag(mix: dict[int, float] | None) -> str:
+    if not mix:
+        return ""
+    identity = json.dumps(sorted((track, round(volume, 3)) for track, volume in mix.items()))
+    return "-m" + hashlib.sha256(identity.encode()).hexdigest()[:10]
+
+
+#: "Leia do banco": a maioria dos chamadores quer a mixagem salva agora; o
+#: trabalho de recodificação fixa a dele ao nascer, para o arquivo bater com o
+#: nome mesmo que alguém salve outros volumes no meio do caminho.
+_CURRENT_MIX: dict = {}
+
+
 def light_video_command(source: Path, destination: Path, plan: SharePlan,
-                        preset: str = "fast") -> list[str]:
+                        preset: str = "fast", mix: dict[int, float] | None = None) -> list[str]:
     """Recodificação que cabe no teto e serve para ser assistida por outra pessoa.
 
     Três escolhas que não são detalhe:
@@ -242,6 +301,9 @@ def light_video_command(source: Path, destination: Path, plan: SharePlan,
       pequeno é corrigido numa segunda tentativa.
     * mp4 com ``yuv420p`` e ``+faststart`` mesmo quando a origem é mkv — é o que
       o Discord e o navegador mostram sem baixar o arquivo inteiro primeiro.
+
+    Com volumes salvos (``mix``), a faixa única deixa de ser a mixagem pronta e
+    passa a ser microfone, Discord e sistema somados nos volumes escolhidos.
     """
     filters = []
     if plan.scale:
@@ -252,15 +314,34 @@ def light_video_command(source: Path, destination: Path, plan: SharePlan,
     command = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
         "-progress", "pipe:1", "-nostats", "-i", str(source),
-        "-map", "0:v:0", "-map", "0:a:0", "-map_metadata", "0", "-sn", "-dn",
     ]
-    if filters:
-        command += ["-vf", ",".join(filters)]
+    if mix:
+        tracks = sorted(mix)
+        branches = "".join(
+            f"[0:a:{track}]aformat=channel_layouts=stereo,volume={mix[track]:.3f}[t{track}];"
+            for track in tracks)
+        inputs = "".join(f"[t{track}]" for track in tracks)
+        # Soma sem normalizar — é o que o player faz ao tocar as faixas juntas —
+        # e um limitador só para os picos que a soma empurrar além do teto.
+        command += ["-filter_complex",
+                    f"{branches}{inputs}amix=inputs={len(tracks)}:normalize=0,"
+                    f"alimiter=limit=0.95:level=0[mix]",
+                    "-map", "0:v:0", "-map", "[mix]"]
+    else:
+        command += ["-map", "0:v:0", "-map", "0:a:0"]
+    command += ["-map_metadata", "0", "-sn", "-dn"]
+    if plan.copy_video:
+        command += ["-c:v", "copy"]
+    else:
+        if filters:
+            command += ["-vf", ",".join(filters)]
+        command += [
+            "-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p",
+            "-b:v", str(plan.video_bitrate),
+            "-maxrate", str(int(plan.video_bitrate * 1.07)),
+            "-bufsize", str(plan.video_bitrate * 2),
+        ]
     command += [
-        "-c:v", "libx264", "-preset", preset, "-pix_fmt", "yuv420p",
-        "-b:v", str(plan.video_bitrate),
-        "-maxrate", str(int(plan.video_bitrate * 1.07)),
-        "-bufsize", str(plan.video_bitrate * 2),
         "-c:a", "aac", "-b:a", str(plan.audio_bitrate), "-ac", "2", "-ar", "48000",
         "-movflags", "+faststart", str(destination),
     ]
@@ -290,26 +371,30 @@ def share_digest(source: Path) -> str:
     return hashlib.sha256(identity).hexdigest()
 
 
-def share_cache_path(source: Path, limit_mb: int) -> Path:
+def share_cache_path(source: Path, limit_mb: int, mix: dict | None = _CURRENT_MIX) -> Path:
     """O teto e a receita ficam **fora** do hash, de propósito.
 
     Assim a limpeza de caches do vídeo acha todas as versões leves dele com um
-    ``glob`` só, sem precisar saber quais tetos já foram pedidos.
+    ``glob`` só, sem precisar saber quais tetos já foram pedidos. A mixagem
+    entra no nome: mudar os volumes nunca serve a versão com os antigos.
     """
-    return SHARE_CACHE_DIR / f"{share_digest(source)}-{int(limit_mb)}mb-v{RECIPE_VERSION}.mp4"
+    if mix is _CURRENT_MIX:
+        mix = audio_mix(source)
+    return SHARE_CACHE_DIR / (f"{share_digest(source)}-{int(limit_mb)}mb{_mix_tag(mix)}"
+                              f"-v{RECIPE_VERSION}.mp4")
 
 
 def share_cache_glob(source: Path) -> str:
     return f"{share_digest(source)}-*.mp4"
 
 
-def share_cached(source: Path, limit_mb: int) -> Path | None:
+def share_cached(source: Path, limit_mb: int, mix: dict | None = _CURRENT_MIX) -> Path | None:
     """Versão leve pronta e mais nova que o original, ou nada.
 
     O corte (``/api/videos/{id}/trim``) reescreve o arquivo no lugar mantendo o
     nome: sem comparar a data de modificação, a pessoa baixaria o trecho antigo.
     """
-    destination = share_cache_path(source, limit_mb)
+    destination = share_cache_path(source, limit_mb, mix)
     try:
         if destination.is_file() and destination.stat().st_mtime_ns >= source.stat().st_mtime_ns:
             return destination
@@ -437,7 +522,7 @@ def video_shape(source: Path) -> VideoShape:
 #: Uma recodificação por vez. libx264 já usa todos os núcleos, e duas em
 #: paralelo só fariam as duas demorarem o dobro — com o jogo rodando ao lado.
 _ENCODE_LOCK = threading.Lock()
-_LIGHT_JOBS: dict[tuple[str, int], "_LightVersionJob"] = {}
+_LIGHT_JOBS: dict[tuple[str, int, str], "_LightVersionJob"] = {}
 _LIGHT_JOBS_LOCK = threading.Lock()
 
 
@@ -449,11 +534,13 @@ class _LightVersionJob:
     seja servida como pronta.
     """
 
-    def __init__(self, source: Path, limit_mb: int, plan: SharePlan) -> None:
+    def __init__(self, source: Path, limit_mb: int, plan: SharePlan,
+                 mix: dict[int, float] | None = None) -> None:
         self.id = secrets.token_urlsafe(12)
         self.source = source
         self.limit_mb = int(limit_mb)
         self.plan = plan
+        self.mix = mix
         self.status = "preparing"
         self.error = ""
         self.progress = 0
@@ -512,7 +599,7 @@ class _LightVersionJob:
 
     def _encode(self, plan: SharePlan, destination: Path) -> bool:
         destination.unlink(missing_ok=True)
-        command = light_video_command(self.source, destination, plan)
+        command = light_video_command(self.source, destination, plan, mix=self.mix)
         process = subprocess.Popen(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=os.environ.copy(), creationflags=HIDDEN_PROCESS,
@@ -541,7 +628,7 @@ class _LightVersionJob:
                 self._process = None
 
     def _run(self) -> None:
-        destination = share_cache_path(self.source, self.limit_mb)
+        destination = share_cache_path(self.source, self.limit_mb, self.mix)
         temporary = destination.with_name(f"{destination.stem}.{self.id}.tmp.mp4")
         acquired = False
         try:
@@ -553,7 +640,7 @@ class _LightVersionJob:
                 self.status = "cancelled"
                 return
             # Alguém pode ter gerado a mesma versão enquanto esperávamos a vez.
-            if share_cached(self.source, self.limit_mb) is not None:
+            if share_cached(self.source, self.limit_mb, self.mix) is not None:
                 self.status = "ready"
                 self.progress = 100
                 return
@@ -565,7 +652,7 @@ class _LightVersionJob:
                     self.error = "O FFmpeg não conseguiu gerar a versão leve"
                 return
             size = temporary.stat().st_size
-            if size > self.plan.limit_bytes:
+            if size > self.plan.limit_bytes and not self.plan.copy_video:
                 # O controle de bitrate erra para cima em cena muito movimentada.
                 # Uma correção só, proporcional ao excesso: insistir mais seria
                 # gastar CPU atrás de um teto que talvez não caiba.
@@ -628,23 +715,32 @@ def light_state(raw_path: str | Path, source: Path, limit_mb: int | None = None,
     limit = normalized_limit(limit_mb)
     limit_bytes = limit * 1024 * 1024
     size = source.stat().st_size
+    mix = audio_mix(source)
     state = {
         "limit_mb": limit, "presets": list(SIZE_PRESETS), "source_bytes": size,
         "name": light_filename(raw_path, source, limit), "status": "absent",
-        "progress": 0, "bytes": 0, "error": "", "plan": None,
+        "progress": 0, "bytes": 0, "error": "", "plan": None, "mixed": mix is not None,
         # ``safe=""`` para a barra da chave ``media:video-buffer/…`` também virar
         # ``%2F``: a URL vai inteira dentro de um parâmetro de consulta.
         "url": (f"/api/video-light?path={urllib.parse.quote(media_source_key(raw_path), safe='')}"
                 f"&limit_mb={limit}"),
     }
-    if size <= limit_bytes:
+    if size <= limit_bytes and mix is None:
         # O original já cabe: recodificar só pioraria a imagem para chegar ao
         # mesmo lugar.
         state["status"] = "fits"
         return state
     try:
         shape = video_shape(source)
-        plan = share_plan(limit, shape.duration, shape.height, shape.fps, shape.bitrate)
+        if size <= limit_bytes:
+            # Cabe, mas com volumes salvos: a imagem vai como está e só o áudio
+            # é refeito. O arquivo só encolhe — sai uma faixa no lugar de quatro.
+            plan = SharePlan(limit_bytes=limit_bytes, duration=max(0.5, shape.duration),
+                             height=shape.height, fps=int(round(shape.fps)),
+                             video_bitrate=int(size * 8 / max(0.5, shape.duration)),
+                             audio_bitrate=160_000, scale=False, resample=False, copy_video=True)
+        else:
+            plan = share_plan(limit, shape.duration, shape.height, shape.fps, shape.bitrate)
     except SharingError as exc:
         state["status"] = "too_big"
         state["error"] = str(exc)
@@ -652,10 +748,10 @@ def light_state(raw_path: str | Path, source: Path, limit_mb: int | None = None,
     state["plan"] = {
         "height": plan.height, "fps": plan.fps, "video_bitrate": plan.video_bitrate,
         "audio_bitrate": plan.audio_bitrate, "duration": round(plan.duration, 3),
-        "estimated_bytes": plan.estimated_bytes,
+        "estimated_bytes": plan.estimated_bytes, "copy_video": plan.copy_video,
     }
-    ready = share_cached(source, limit)
-    key = (str(source), limit)
+    ready = share_cached(source, limit, mix)
+    key = (str(source), limit, _mix_tag(mix))
     started = None
     with _LIGHT_JOBS_LOCK:
         job = _LIGHT_JOBS.get(key)
@@ -666,7 +762,7 @@ def light_state(raw_path: str | Path, source: Path, limit_mb: int | None = None,
             _LIGHT_JOBS.pop(key, None)
             job = None
         if job is None and start and ready is None:
-            job = started = _LightVersionJob(source, limit, plan)
+            job = started = _LightVersionJob(source, limit, plan, mix)
             _LIGHT_JOBS[key] = job
     if started is not None:
         started.start()

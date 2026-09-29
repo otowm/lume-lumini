@@ -10,6 +10,8 @@
 .video-audio-mixer>div strong,.video-audio-mixer>div span{display:block}
 .video-audio-mixer>div strong{font-size:11px}
 .video-audio-mixer>div span{margin-top:2px;color:var(--muted);font-size:8px}
+.video-audio-mixer .mixer-save{margin-top:6px;border:1px solid rgba(82,214,166,.45);border-radius:6px;background:rgba(82,214,166,.12);color:var(--green);padding:4px 8px;font-size:9px;cursor:pointer}
+.video-audio-mixer .mixer-save:disabled{border-color:var(--divider);background:transparent;color:var(--muted);cursor:default}
 .video-audio-mixer label{display:grid;grid-template-columns:auto minmax(65px,1fr) 34px;align-items:center;gap:7px}
 .video-audio-mixer label>span{font-size:9px;color:#cfd1dc}
 .video-audio-mixer input{width:100%;accent-color:var(--green)}

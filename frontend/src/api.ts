@@ -160,12 +160,14 @@ export type VideoAudioTrack = {track:number;stream_index:number;label:string;cod
 export type VideoAudioTracksResult = {items:VideoAudioTrack[];status:"ready"|"preparing"|"manual"|"error";job_id?:string;error?:string;duration:number};
 export type VideoFile = {id?:number;session_id?:number|null;name:string;path:string;thumbnail_url?:string;bytes:number;modified_at:string;captured_at:string;status:string;stage:string;progress:number;trace:AnalysisTrace[];title:string;game:string;game_source?:"window"|"analysis"|"unknown";description:string;context:string;transcript:string;transcript_segments:VideoTranscriptSegment[];speakers:VideoSpeaker[];audio_events:AudioEvent[];chapters:VideoChapter[];markers:VideoMarker[];error:string;preserved:boolean;available:boolean;url:string};
 export type VideoSessionClip = {id:number;name:string;path:string;thumbnail_url?:string;captured_at:string;title:string;game:string;game_source?:"window"|"analysis"|"unknown";description:string;duration_seconds:number;bytes:number;status:string;error:string;preserved:boolean;sort_order:number;available:boolean;url:string;transcript:string;transcript_segments:VideoTranscriptSegment[];speakers:VideoSpeaker[];audio_events:AudioEvent[];chapters:VideoChapter[];markers:VideoMarker[]};
-export type SharePlan = {height:number;fps:number;video_bitrate:number;audio_bitrate:number;duration:number;estimated_bytes:number};
+export type SharePlan = {height:number;fps:number;video_bitrate:number;audio_bitrate:number;duration:number;estimated_bytes:number;copy_video?:boolean};
 export type LightVersion = {
   limit_mb:number;presets:number[];source_bytes:number;name:string;
   /** `fits` = o original já cabe; `absent` = ainda não foi gerada. */
   status:"fits"|"absent"|"preparing"|"ready"|"error"|"too_big";
   progress:number;bytes:number;error:string;plan:SharePlan|null;url:string;job_id?:string;
+  /** Há volumes salvos no player: a faixa única sai com eles. */
+  mixed?:boolean;
 };
 export type ShareHost = {name:string;label:string;max_bytes:number;permanent:boolean;expiry_options:string[]};
 export type SharedLink = {id:number;url:string;host:string;bytes:number;light:boolean;limit_mb:number;expires_at:string|null;expired:boolean;created_at:string};
@@ -245,13 +247,15 @@ export const api = {
   saveSteamGridDb: (key:string) => request<{configured:boolean}>("/api/settings/steamgriddb",{method:"PUT",body:JSON.stringify({key})}),
   ollamaModels: () => request<{online:boolean;models:OllamaModel[];error?:string}>("/api/ollama/models"),
   videos: () => request<{items:VideoFile[];total:number}>("/api/videos"),
+  videoAudioMix: (path:string) => request<{volumes:Record<string,number>}>(`/api/video-audio-mix?path=${encodeURIComponent(path)}`),
+  saveVideoAudioMix: (path:string,volumes:Record<number,number>) => request<{volumes:Record<string,number>}>(`/api/video-audio-mix?path=${encodeURIComponent(path)}`,{method:"PUT",body:JSON.stringify({volumes})}),
   videoAudioTracks: (path:string,prepare=false) => request<VideoAudioTracksResult>(`/api/video-audio-tracks?path=${encodeURIComponent(path)}${prepare?"&prepare=true":""}`),
   cancelVideoAudioTracks: (path:string,jobId:string) => request<{ok:boolean;cancelled:boolean}>(`/api/video-audio-tracks?path=${encodeURIComponent(path)}&job_id=${encodeURIComponent(jobId)}`,{method:"DELETE",keepalive:true}),
   videoSessions: () => request<{items:VideoSession[]}>("/api/video-sessions"),
   createVideoSession: (name:string,source_folder:string) => request<{ok:boolean;id:number;name:string}>("/api/video-sessions",{method:"POST",body:JSON.stringify({name,source_folder})}),
   joinVideoSession: (video_paths:string[],session_ids:number[],name:string) => request<{ok:boolean;id:number;name:string;clips:number;merged_sessions:number}>("/api/video-sessions/join",{method:"POST",body:JSON.stringify({video_paths,session_ids,name})}),
   createVideoMarker: (videoId:number,offset_seconds:number,title="") => request<VideoMarker>(`/api/videos/${videoId}/markers`,{method:"POST",body:JSON.stringify({offset_seconds,title})}),
-  trimVideo: (videoId:number,start_seconds:number,end_seconds:number,as_new_file=false) => request<{ok:boolean;id:number;duration_seconds:number;captured_at:string;analysis_reset:boolean;name?:string;new_file?:boolean}>(`/api/videos/${videoId}/trim`,{method:"POST",body:JSON.stringify({start_seconds,end_seconds,as_new_file})}),
+  trimVideo: (videoId:number,start_seconds:number,end_seconds:number,as_new_file=false) => request<{ok:boolean;id:number;duration_seconds:number;captured_at:string;analysis_reset:boolean;name?:string;new_file?:boolean;session_id?:number|null}>(`/api/videos/${videoId}/trim`,{method:"POST",body:JSON.stringify({start_seconds,end_seconds,as_new_file})}),
   updateVideoMarker: (id:number,title:string) => request<{ok:boolean}>(`/api/video-markers/${id}`,{method:"PUT",body:JSON.stringify({title})}),
   deleteVideoMarker: (id:number) => request<{ok:boolean}>(`/api/video-markers/${id}`,{method:"DELETE"}),
   processVideoSession: (id:number) => request<{ok:boolean;id:number;status:string}>(`/api/video-sessions/${id}/process`,{method:"POST"}),

@@ -166,6 +166,12 @@ CREATE TABLE IF NOT EXISTS video_markers (
   FOREIGN KEY(video_id) REFERENCES video_segments(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_video_markers_video ON video_markers(video_id,offset_seconds);
+-- Volumes por faixa que a pessoa salvou no player; entram na versão leve.
+CREATE TABLE IF NOT EXISTS video_audio_mix (
+  source_path TEXT PRIMARY KEY,
+  volumes_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS shared_links (
   id INTEGER PRIMARY KEY,
   source_path TEXT NOT NULL,
