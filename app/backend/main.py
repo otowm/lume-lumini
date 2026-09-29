@@ -338,6 +338,8 @@ class ShareUploadRequest(BaseModel):
 class VideoTrimRequest(BaseModel):
     start_seconds: float = Field(ge=0, le=86400)
     end_seconds: float = Field(gt=0, le=86400)
+    # Grava o trecho num arquivo novo e deixa o original como está.
+    as_new_file: bool = False
 
 
 class SpeakerLabelUpdate(BaseModel):
@@ -2589,16 +2591,20 @@ def update_video_date(video_id: int, payload: VideoDateUpdate) -> dict:
 
 @app.post("/api/videos/{video_id}/trim")
 def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
-    """Substitui um clipe pelo intervalo escolhido e invalida a análise antiga."""
+    """Substitui um clipe pelo intervalo escolhido e invalida a análise antiga.
+
+    Com ``as_new_file`` o trecho vira um vídeo novo na biblioteca e o original
+    fica intacto — inclusive a análise dele, que continua valendo.
+    """
     initialize()
     with connect() as db:
         row = db.execute(
-            "SELECT source_path,captured_at,status,session_id,preserved FROM video_segments WHERE id=?",
+            "SELECT source_path,captured_at,status,session_id,preserved,app,title FROM video_segments WHERE id=?",
             (video_id,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Vídeo não encontrado")
-    if row["status"] in ("queued", "processing"):
+    if row["status"] in ("queued", "processing") and not payload.as_new_file:
         raise HTTPException(status_code=409, detail="Interrompa ou aguarde a análise antes de cortar")
 
     source = safe_video_path(row["source_path"])
@@ -2611,6 +2617,8 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
         raise HTTPException(status_code=422, detail="O corte precisa ter pelo menos 0,25 segundo")
     if start >= total or (start <= 0.05 and end >= total - 0.05):
         raise HTTPException(status_code=422, detail="Escolha um intervalo menor que o vídeo original")
+    if payload.as_new_file:
+        return _trim_video_to_new_file(video_id, row, source, start, end)
 
     temporary = source.with_name(f".{source.stem}.lume-trim-{secrets.token_hex(5)}{source.suffix}")
     cancel_video_audio_track_job(source)
@@ -2655,6 +2663,52 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
         "ok": True, "id": video_id, "start_seconds": start, "end_seconds": end,
         "duration_seconds": end - start, "captured_at": captured, "analysis_reset": True,
     }
+
+def _trim_video_to_new_file(video_id: int, row, source: Path, start: float, end: float) -> dict:
+    def clock(seconds: float) -> str:
+        total = int(seconds)
+        return f"{total // 60}m{total % 60:02d}s"
+
+    target = source.with_name(f"{source.stem}_corte_{clock(start)}-{clock(end)}{source.suffix}")
+    counter = 2
+    while target.exists():
+        target = source.with_name(f"{source.stem}_corte_{clock(start)}-{clock(end)}_{counter}{source.suffix}")
+        counter += 1
+    temporary = target.with_name(f".{target.stem}.lume-trim-{secrets.token_hex(5)}{target.suffix}")
+    try:
+        result = run(trim_video_command(source, temporary, start, end - start), timeout=3600)
+        if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail=result.stderr.strip() or "O FFmpeg não conseguiu salvar o corte")
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+    captured = row["captured_at"]
+    try:
+        captured = (datetime.fromisoformat(captured) + timedelta(seconds=start)).isoformat()
+    except (TypeError, ValueError):
+        pass
+    title = f"{row['title'] or source.stem} · corte"[:300]
+    with connect() as db:
+        new_id = db.execute(
+            """INSERT INTO video_segments(source_path,captured_at,app,title,duration_seconds,status)
+               VALUES(?,?,?,?,?,'pending')""",
+            (media_source_key(target), captured, row["app"] or "", title, end - start),
+        ).lastrowid
+        # Os destaques do trecho vão junto, já na régua do arquivo novo.
+        db.execute(
+            """INSERT INTO video_markers(video_id,offset_seconds,title,ai_generated)
+               SELECT ?,offset_seconds-?,title,ai_generated FROM video_markers
+               WHERE video_id=? AND offset_seconds>=? AND offset_seconds<?""",
+            (new_id, start, video_id, start, end),
+        )
+    return {
+        "ok": True, "id": new_id, "start_seconds": start, "end_seconds": end,
+        "duration_seconds": end - start, "captured_at": captured, "analysis_reset": False,
+        "name": target.name, "new_file": True,
+    }
+
 
 @app.put("/api/video-markers/{marker_id}")
 def update_video_marker(marker_id: int, payload: MarkerUpdate) -> dict:

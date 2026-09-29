@@ -247,7 +247,7 @@ export const api = {
   createVideoSession: (name:string,source_folder:string) => request<{ok:boolean;id:number;name:string}>("/api/video-sessions",{method:"POST",body:JSON.stringify({name,source_folder})}),
   joinVideoSession: (video_paths:string[],session_ids:number[],name:string) => request<{ok:boolean;id:number;name:string;clips:number;merged_sessions:number}>("/api/video-sessions/join",{method:"POST",body:JSON.stringify({video_paths,session_ids,name})}),
   createVideoMarker: (videoId:number,offset_seconds:number,title="") => request<VideoMarker>(`/api/videos/${videoId}/markers`,{method:"POST",body:JSON.stringify({offset_seconds,title})}),
-  trimVideo: (videoId:number,start_seconds:number,end_seconds:number) => request<{ok:boolean;id:number;duration_seconds:number;captured_at:string;analysis_reset:boolean}>(`/api/videos/${videoId}/trim`,{method:"POST",body:JSON.stringify({start_seconds,end_seconds})}),
+  trimVideo: (videoId:number,start_seconds:number,end_seconds:number,as_new_file=false) => request<{ok:boolean;id:number;duration_seconds:number;captured_at:string;analysis_reset:boolean;name?:string;new_file?:boolean}>(`/api/videos/${videoId}/trim`,{method:"POST",body:JSON.stringify({start_seconds,end_seconds,as_new_file})}),
   updateVideoMarker: (id:number,title:string) => request<{ok:boolean}>(`/api/video-markers/${id}`,{method:"PUT",body:JSON.stringify({title})}),
   deleteVideoMarker: (id:number) => request<{ok:boolean}>(`/api/video-markers/${id}`,{method:"DELETE"}),
   processVideoSession: (id:number) => request<{ok:boolean;id:number;status:string}>(`/api/video-sessions/${id}/process`,{method:"POST"}),

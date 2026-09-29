@@ -50,8 +50,8 @@
     "semantic_hash": "e2a58c05296314cf10f371f9f740ee5b"
   },
   "bin/game-video-loop": {
-    "mtime": 1790646683.22859,
-    "ast_hash": "c5fb5076be7f2aca68b0fe297da825a8",
+    "mtime": 1790647323.0493076,
+    "ast_hash": "5b95856041d2e6fd21f505c4d3bd4676",
     "semantic_hash": ""
   },
   "bin/grava-audio.sh": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1790644445.2682827,
-    "ast_hash": "d96234a1211a49cc64607a839249e534",
+    "mtime": 1790647396.9760742,
+    "ast_hash": "36f96959e7252fa0667ad2dd9761921d",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": ""
   },
   "app/capture/winvideo.py": {
-    "mtime": 1790646691.8724122,
-    "ast_hash": "572952e7e1dd4d5f7d06a7f7abfa0721",
+    "mtime": 1790647396.9741323,
+    "ast_hash": "7f152715dc1412f36dae2b45d6ca657e",
     "semantic_hash": ""
   },
   "app/backend/audio_intelligence.py": {

@@ -253,6 +253,59 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(video["captured_at"], "2026-08-23T10:00:10-03:00")
             self.assertEqual((session["status"], session["summary"]), ("pending", ""))
 
+    def test_trim_to_new_file_keeps_the_original_and_its_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clip.mkv"
+            source.write_bytes(b"original")
+            db_path = root / "lume.sqlite3"
+            with patch.object(database, "DB_PATH", db_path):
+                database.initialize()
+                with database.connect() as db:
+                    session_id = db.execute("INSERT INTO video_sessions(name,status,summary) VALUES('Jogo','done','resumo')").lastrowid
+                    video_id = db.execute(
+                        """INSERT INTO video_segments(source_path,captured_at,status,description,app,title,duration_seconds,session_id)
+                           VALUES(?,'2026-08-23T10:00:00-03:00','done','antiga','osu!','Partida',120,?)""",
+                        (str(source), session_id),
+                    ).lastrowid
+                    db.executemany(
+                        "INSERT INTO video_markers(video_id,offset_seconds,title) VALUES(?,?,?)",
+                        [(video_id, 2, "fora"), (video_id, 72, "dentro"), (video_id, 100, "fora")],
+                    )
+
+                def fake_run(command, timeout=0):
+                    Path(command[-1]).write_bytes(b"trimmed")
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                with patch.object(backend_main, "safe_video_path", return_value=source), \
+                     patch.object(backend_main, "probe_video_duration", return_value=120), \
+                     patch.object(backend_main, "run", side_effect=fake_run), \
+                     patch.object(backend_main, "media_source_key", side_effect=str), \
+                     patch.object(backend_main, "delete_video_caches") as caches:
+                    result = backend_main.trim_video(video_id, backend_main.VideoTrimRequest(
+                        start_seconds=70, end_seconds=95, as_new_file=True))
+
+                with database.connect() as db:
+                    original = db.execute("SELECT * FROM video_segments WHERE id=?", (video_id,)).fetchone()
+                    copy = db.execute("SELECT * FROM video_segments WHERE id=?", (result["id"],)).fetchone()
+                    original_markers = db.execute("SELECT COUNT(*) FROM video_markers WHERE video_id=?", (video_id,)).fetchone()[0]
+                    markers = db.execute("SELECT offset_seconds,title FROM video_markers WHERE video_id=?", (result["id"],)).fetchall()
+                    session = db.execute("SELECT status FROM video_sessions WHERE id=?", (session_id,)).fetchone()
+            target = root / "clip_corte_1m10s-1m35s.mkv"
+            caches.assert_not_called()
+            self.assertEqual(source.read_bytes(), b"original")
+            self.assertEqual(target.read_bytes(), b"trimmed")
+            self.assertEqual(result["name"], target.name)
+            self.assertNotEqual(result["id"], video_id)
+            self.assertEqual((original["status"], original["description"], original["duration_seconds"]), ("done", "antiga", 120))
+            self.assertEqual(original_markers, 3)
+            self.assertEqual(session["status"], "done")
+            self.assertEqual(copy["source_path"], str(target))
+            self.assertEqual((copy["title"], copy["app"], copy["status"]), ("Partida · corte", "osu!", "pending"))
+            self.assertEqual(copy["duration_seconds"], 25)
+            self.assertEqual(copy["captured_at"], "2026-08-23T10:01:10-03:00")
+            self.assertEqual([(row["offset_seconds"], row["title"]) for row in markers], [(2, "dentro")])
+
     def test_video_audio_cache_lives_under_selected_media_root(self):
         self.assertEqual(backend_main.VIDEO_AUDIO_TRACK_DIR.parent.parent, backend_main.MEDIA_ROOT)
         self.assertEqual(backend_main.VIDEO_THUMBNAIL_DIR.parent.parent, backend_main.MEDIA_ROOT)

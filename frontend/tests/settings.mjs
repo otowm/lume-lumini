@@ -42,6 +42,7 @@ try {
       if(path==='/api/test/video-window')data={ok:true,window_id:'',title:'Jogo Novo',window_class:'jogonovo.exe',executable:'jogonovo.exe',monitor_resolution:'1366x768',info:'',matched:false,matched_pattern:''};
       if(path==='/api/settings/schedule')data={time:'03:00',enabled:false};
       if(path==='/api/ollama/models')data={online:false,models:[]};
+      if(path==='/api/settings/video/sounds')data={items:[{slot:'clipe',label:'Clipe salvo',custom:false,name:''}],presets:['minimal','organic']};
       await route.fulfill({json:data});
     });
     await page.goto(base);
