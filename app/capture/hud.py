@@ -663,6 +663,10 @@ class Hud:
         self._event_seq = 0
         self._event_started = 0.0
         self._event: tuple[str, str] | None = None
+        #: Avisos que o atalho mandou esconder. Enquanto só eles existirem, a
+        #: HUD fica fora da tela, ainda que o modo escolhido a abrisse.
+        self._dismissed: frozenset[str] | None = None
+        self._alert_keys: frozenset[str] = frozenset()
 
     # --- estado -----------------------------------------------------------
     def _snapshot(self) -> HudSnapshot:
@@ -732,8 +736,30 @@ class Hud:
             log(f"[hud] {alert.text}: {alert.detail}")
             break  # um aviso por vez; uma sirene de falhas seria pior que nada
 
+    def _note_alerts(self, status: HudStatus) -> None:
+        """Guarda os avisos atuais e desfaz a dispensa quando eles mudam.
+
+        A dispensa vale para *aqueles* avisos: um aviso novo é notícia e volta
+        a abrir a HUD. Quando todos somem, ela também acaba — o próximo que
+        aparecer precisa ser visto.
+        """
+        self._alert_keys = frozenset(alert.key for alert in status.alerts)
+        if self._dismissed is not None and (
+                not self._alert_keys or not self._alert_keys <= self._dismissed):
+            self._dismissed = None
+
+    @property
+    def _forced_open(self) -> bool:
+        """Os avisos estão abrindo a HUD além do que o modo escolhido pediria."""
+        return bool(self._alert_keys) and self.display_mode != "expanded"
+
     def _should_show(self, snapshot: HudSnapshot, status: HudStatus,
                      event: tuple[str, str, EventFrame] | None) -> bool:
+        if self._dismissed is not None:
+            # No Linux a HUD não deixa o clique atravessar. Fora do jogo, com o
+            # aviso da contagem aberto por cima, ela prendia o que estava atrás
+            # até a folga vencer; dispensada, sai da frente de verdade.
+            return False
         if self.display_mode == "hidden":
             # Oculto não significa surdo: qualquer aviso e toda confirmação
             # pontual ainda precisam atravessar o modo discreto.
@@ -782,6 +808,7 @@ class Hud:
         try:
             snapshot = self._snapshot()
             status = evaluate(snapshot)
+            self._note_alerts(status)
             self._decay(snapshot)
             self._observe_event(snapshot)
             event = self._current_event()
@@ -814,6 +841,20 @@ class Hud:
         root.after(delay, self._tick, root)
 
     def toggle(self) -> None:
+        """Atalho da HUD: alterna o modo ou dispensa os avisos que a abriram.
+
+        Com um aviso forçando a HUD aberta, girar o modo não mudaria nada na
+        tela — o aviso a reabriria em qualquer um deles. Então o atalho a
+        esconde até surgir um aviso diferente; apertado de novo, traz de volta.
+        """
+        if self._dismissed is not None:
+            self._dismissed = None
+            log("[hud] avisos à vista de novo")
+            return
+        if self._forced_open:
+            self._dismissed = self._alert_keys
+            log("[hud] avisos dispensados até surgir um novo")
+            return
         current = self.DISPLAY_MODES.index(self.display_mode)
         self.display_mode = self.DISPLAY_MODES[(current + 1) % len(self.DISPLAY_MODES)]
         labels = {"compact": "compacto", "expanded": "expandido", "hidden": "oculto"}

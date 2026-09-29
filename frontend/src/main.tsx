@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, uploadVideo, type ActivitySession, type AudioSettings, type Capture, type CleanupSettings, type DaySummary, type EditingEntry, type EditingFolder, type GameIcon, type HourSummary, type OllamaModel, type PipelineQueue, type PromptSetting, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type AppMode, type LightVersion, type ShareUpload, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
+import { api, uploadVideo, type ActivitySession, type AudioSettings, type Capture, type ConfirmationSound, type ConfirmationSounds as ConfirmationSoundList, type CleanupSettings, type DaySummary, type EditingEntry, type EditingFolder, type GameIcon, type HourSummary, type OllamaModel, type PipelineQueue, type PromptSetting, type QueueCounts, type QueueItem, type QueueJob, type QueueSpeed, type RawFile, type ScheduleSettings, type ScreenSequenceResult, type ScreenSettings, type Status, type StorageSettings, type SummaryMediaItem, type AppMode, type LightVersion, type ShareUpload, type VideoAudioTrack, type VideoChapter, type VideoFile, type VideoMarker, type VideoSession, type VideoSettings, type VideoSpeaker, type VideoTranscriptSegment, type VoiceIdentity } from "./api";
 import "./styles.css";
 import "./markers.css";
 import "./selection.css";
@@ -160,6 +160,33 @@ function GameCover({game}:{game:string}) {
   const initials=game.split(/\s+/).map(part=>part[0]).join("").slice(0,2).toUpperCase();
   const source=gameCovers[game]||icon?.url;
   return <span className={`game-option-cover${!gameCovers[game]&&icon?.kind==="cover"?" cover":""}`} aria-hidden="true">{!failed&&source?<img src={source} alt="" onError={()=>setFailed(true)}/>:<b>{initials}</b>}</span>;
+}
+
+function ConfirmationSounds({volume,onVolume}:{volume:number;onVolume:(volume:number)=>void}){
+  const [items,setItems]=useState<ConfirmationSound[]>([]);
+  const [presets,setPresets]=useState<string[]>([]);
+  const [preset,setPreset]=useState("minimal");
+  const [working,setWorking]=useState("");
+  const [message,setMessage]=useState("");
+  useEffect(()=>{api.confirmationSounds().then(result=>{setItems(result.items);setPresets(result.presets)}).catch(error=>setMessage((error as Error).message))},[]);
+  const run=async(slot:string,action:()=>Promise<ConfirmationSoundList|{ok:boolean}>,done="")=>{
+    setWorking(slot);setMessage("");
+    try{const result=await action();if("items" in result)setItems(result.items);if(done)setMessage(done)}
+    catch(error){setMessage(error instanceof Error?error.message:"Não foi possível concluir.")}
+    finally{setWorking("")}
+  };
+  return <section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Atalho</span><h3>Sons de confirmação</h3><p>Tocados direto no seu fone, sem depender dos sons de notificação do sistema. Um arquivo novo vale já no próximo atalho.</p></div></div>
+    <label className="sound-volume"><span>Volume · {volume ? `${volume}%` : "desligado"}</span><input type="range" min="0" max="100" step="5" value={volume} onChange={event=>onVolume(+event.target.value)}/></label>
+    {presets.length>0&&<div className="sound-preset"><label><span>Pacote pronto · uisfx</span><select value={preset} onChange={event=>setPreset(event.target.value)}>{presets.map(theme=><option key={theme} value={theme}>{theme[0].toUpperCase()+theme.slice(1)}</option>)}</select></label><button className="secondary" disabled={!!working} onClick={()=>run("preset",()=>api.applyConfirmationSoundPreset(preset),`Pacote ${preset} aplicado. Use “Testar” para ouvir cada som.`)}>Aplicar pacote</button></div>}
+    <div className="sound-list">{items.map(item=><div className="sound-row" key={item.slot}>
+      <div><strong>{item.label}</strong><span>{item.custom?item.name:"Padrão do sistema"}</span></div>
+      <button className="ghost" disabled={!!working||!volume} onClick={()=>run(item.slot,()=>api.testConfirmationSound(item.slot,volume))}>Testar</button>
+      <label className={`secondary sound-pick${working?" disabled":""}`}>Escolher arquivo<input type="file" accept=".oga,.ogg,.opus,.wav,.flac,.mp3,audio/*" disabled={!!working} onChange={event=>{const file=event.target.files?.[0];event.target.value="";if(file)void run(item.slot,()=>api.uploadConfirmationSound(item.slot,file))}}/></label>
+      {item.custom&&<button className="ghost" disabled={!!working} onClick={()=>run(item.slot,()=>api.resetConfirmationSound(item.slot))}>Usar padrão</button>}
+    </div>)}</div>
+    <p className="help">Formatos: OGG, OPUS, WAV, FLAC ou MP3, até 5 MB. No Windows só arquivos WAV substituem os bipes, e sem controle de volume.</p>
+    {message&&<p className="help">{message}</p>}
+  </section>;
 }
 
 function SteamGridDbSettings(){
@@ -499,6 +526,7 @@ function VideoSettingsTab({tab,settings,patterns,models,ollamaOnline,busy,ia=tru
       <p className="help">{clips?`Tocar ${hotkey} salva os últimos ${settings.replay_seconds}s; tocar de novo dentro desse tempo estende o mesmo clipe, que chega à biblioteca quando a janela fecha. Segurar ${hotkey} por ${settings.hotkey_hold_seconds||0.6}s abre uma gravação longa até você segurar de novo — nela, o toque vira marcador.`:`Tocar ${hotkey} adiciona um marcador com som de confirmação; o player começa ${settings.marker_preroll_seconds}s antes dele.`}</p>
       {!clips&&<label className="check"><input type="checkbox" checked={settings.pause_other_captures} onChange={event=>onSettings({...settings,pause_other_captures:event.target.checked})}/><span>Pausar prints e áudio durante a gravação</span></label>}
     </section>
+    <ConfirmationSounds volume={settings.sound_volume??100} onVolume={sound_volume=>onSettings({...settings,sound_volume})}/>
     {microphone}
     <section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Qualidade</span><h3>Imagem e codificação</h3><p>O FPS é o padrão dos apps novos; resolução e FPS de cada app ficam na lista acima.</p></div></div>
       <div className="form-grid video-quality-grid">
@@ -507,7 +535,7 @@ function VideoSettingsTab({tab,settings,patterns,models,ollamaOnline,busy,ia=tru
         <label><span>Formato</span><select value={settings.encoder==="cpu"?"h264":settings.codec} disabled={settings.encoder==="cpu"} onChange={event=>onSettings({...settings,codec:event.target.value as VideoSettings["codec"]})}><option value="h264">H.264 · mais compatível</option><option value="hevc">HEVC · arquivos menores</option></select></label>
       </div>
     </section>
-    <section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Durante a gravação</span><h3>HUD de gravação</h3></div></div><label className="check"><input type="checkbox" checked={settings.hud_enabled} onChange={event=>onSettings({...settings,hud_enabled:event.target.checked})}/><span><strong>Mostrar a HUD durante a gravação</strong><small>Uma faixa com o tempo, os medidores de microfone e Discord, e avisos quando a captura não engata.</small></span></label>{settings.hud_enabled&&<><div className="form-grid"><label><span>Onde aparecer</span><select value={settings.hud_placement} onChange={event=>onSettings({...settings,hud_placement:event.target.value as VideoSettings["hud_placement"]})}><option value="second">No outro monitor</option><option value="game">Sobre o jogo</option><option value="both">Nos dois</option></select></label><label><span>Canto</span><select value={settings.hud_corner} onChange={event=>onSettings({...settings,hud_corner:event.target.value as VideoSettings["hud_corner"]})}><option value="top-right">Superior direito</option><option value="top-left">Superior esquerdo</option><option value="bottom-right">Inferior direito</option><option value="bottom-left">Inferior esquerdo</option></select></label><label><span>Atalho para alternar modo</span><input value={settings.hud_hotkey} onChange={event=>onSettings({...settings,hud_hotkey:event.target.value})}/></label></div><label className="check"><input type="checkbox" checked={settings.hud_sound} onChange={event=>onSettings({...settings,hud_sound:event.target.checked})}/><span>Avisar com som quando a captura falhar</span></label><p className="help">{settings.hud_placement==="game"?"Jogos em tela cheia exclusiva podem esconder a HUD — é limitação do Windows, não do Lume. Se ela sumir, use “No outro monitor”; o aviso sonoro chega de qualquer jeito.":"O atalho alterna entre Compacto, Expandido e Oculto. No modo Oculto, avisos e animações de clip ou marcador continuam aparecendo."}</p></>}</section>
+    <section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Durante a gravação</span><h3>HUD de gravação</h3></div></div><label className="check"><input type="checkbox" checked={settings.hud_enabled} onChange={event=>onSettings({...settings,hud_enabled:event.target.checked})}/><span><strong>Mostrar a HUD durante a gravação</strong><small>Uma faixa com o tempo, os medidores de microfone e Discord, e avisos quando a captura não engata.</small></span></label>{settings.hud_enabled&&<><div className="form-grid"><label><span>Onde aparecer</span><select value={settings.hud_placement} onChange={event=>onSettings({...settings,hud_placement:event.target.value as VideoSettings["hud_placement"]})}><option value="second">No outro monitor</option><option value="game">Sobre o jogo</option><option value="both">Nos dois</option></select></label><label><span>Canto</span><select value={settings.hud_corner} onChange={event=>onSettings({...settings,hud_corner:event.target.value as VideoSettings["hud_corner"]})}><option value="top-right">Superior direito</option><option value="top-left">Superior esquerdo</option><option value="bottom-right">Inferior direito</option><option value="bottom-left">Inferior esquerdo</option></select></label><label><span>Atalho para alternar modo</span><input value={settings.hud_hotkey} onChange={event=>onSettings({...settings,hud_hotkey:event.target.value})}/></label></div><label className="check"><input type="checkbox" checked={settings.hud_sound} onChange={event=>onSettings({...settings,hud_sound:event.target.checked})}/><span>Avisar com som quando a captura falhar</span></label><p className="help">{settings.hud_placement==="game"?"Jogos em tela cheia exclusiva podem esconder a HUD — é limitação do Windows, não do Lume. Se ela sumir, use “No outro monitor”; o aviso sonoro chega de qualquer jeito.":"O atalho alterna entre Compacto, Expandido e Oculto. No modo Oculto, avisos e animações de clip ou marcador continuam aparecendo. Com um aviso aberto, o atalho o esconde até surgir outro."}</p></>}</section>
     {ia&&<section className="settings-group"><div className="settings-group-title"><div><span className="eyebrow">Inteligência artificial</span><h3>Análise dos vídeos</h3><p>Quanto menor o intervalo, mais detalhada a descrição e mais demorado o processamento.</p></div></div>
       <div className="form-grid">
         <label><span>Perfil da análise</span><select value={settings.analysis_profile} onChange={event=>profile(event.target.value as VideoSettings["analysis_profile"])}><option value="fast">Rápida · a cada 10s</option><option value="balanced">Equilibrada · a cada 5s</option><option value="detailed">Detalhada · a cada 2s</option><option value="custom">Personalizada</option></select></label>
@@ -1191,6 +1219,15 @@ function App() {
     finally { setBusy(false); }
   };
 
+  // Fora do jogo a gravação só encerra quando a folga vence; enquanto isso a
+  // captura está presa. Isto antecipa o fim, pelo mesmo caminho do prazo.
+  const forceEndVideo = async () => {
+    setBusy(true);
+    try { await api.endVideoSession(); await refresh(); }
+    catch (err) { setError((err as Error).message); }
+    finally { setBusy(false); }
+  };
+
   const openPrivacy = async () => {
     setMobileNavOpen(false);
     setPanel("privacy");
@@ -1370,7 +1407,15 @@ function App() {
     : `a cada ${status?.settings.interval_seconds || 20}s`;
   const automaticCapturePause = !!status && (status.capture_paused_by_video || status.capture_paused_by_idle);
   const automaticPauseTitle = status?.capture_paused_by_video ? "Pausada pelo vídeo" : "Pausada por inatividade";
-  const automaticPauseNote = status?.capture_paused_by_video
+  const videoGraceRemaining = status?.video.recording ? status.video.focus_grace_remaining ?? null : null;
+  const canForceEndVideo = !!status?.capture_paused_by_video && videoGraceRemaining !== null;
+  const captureButtonLabel = canForceEndVideo ? "Forçar encerramento"
+    : automaticCapturePause ? "Retomada automática"
+    : status?.capturing ? "Pausar captura" : "Retomar captura";
+  const captureButtonAction = canForceEndVideo ? forceEndVideo : toggleCapture;
+  const automaticPauseNote = canForceEndVideo
+    ? `Fora do jogo: a gravação encerra em ${Math.ceil(videoGraceRemaining ?? 0)}s e áudio e telas voltam em seguida.`
+    : status?.capture_paused_by_video
     ? "Áudio e telas retomam automaticamente quando o gravador seletivo encerrar."
     : `Áudio e telas retomam ao detectar atividade. O vídeo seletivo continua disponível.`;
 
@@ -1683,7 +1728,7 @@ function App() {
       {ia&&<div className="capture-card">
         <div className="capture-title"><i className={automaticCapturePause?"video":status?.capturing?"pulse":"off"}/><strong>{automaticCapturePause?automaticPauseTitle:status?.capturing?"Capturando":"Captura pausada"}</strong></div>
         {automaticCapturePause?<p className="video-pause-note">{automaticPauseNote}</p>:<div className="capture-meta"><span>{bytes(status?.storage.bytes)}</span><span>{status?.capturing ? captureLabel : "em pausa"}</span></div>}
-        <button className="secondary block" disabled={busy || !status || automaticCapturePause} onClick={toggleCapture}>{automaticCapturePause?"Retomada automática":status?.capturing?"Pausar captura":"Retomar captura"}</button>
+        <button className="secondary block" disabled={busy || !status || (automaticCapturePause && !canForceEndVideo)} onClick={()=>void captureButtonAction()}>{captureButtonLabel}</button>
       </div>}
       {!ia&&<UpdateNotice recording={Boolean(status?.video.recording)}/>}
       <div className="privacy-links">{ia&&<button onClick={openDiagnostics}>Diagnóstico</button>}{ia&&<button onClick={openPrivacy}>Privacidade</button>}<button onClick={openSettings}>Ajustes</button></div>
@@ -1825,7 +1870,7 @@ function App() {
         <div className="palette-section"><span className="palette-label">Ações</span>
           <button className="palette-item" disabled={busy||!memoryDays.length} onClick={()=>{setPalette(false);void forceSummary()}}><b>✦</b><span>Gerar resumo de {new Date(`${selectedDay}T12:00:00`).toLocaleDateString("pt-BR")}</span></button>
           <button className="palette-item" disabled={busy} onClick={()=>{setPalette(false);void generateHours()}}><b>◷</b><span>Gerar linha do tempo e atividades</span></button>
-          <button className="palette-item" disabled={busy||!status||automaticCapturePause} onClick={()=>{setPalette(false);void toggleCapture()}}><b>{status?.capturing?"❚❚":"▶"}</b><span>{automaticCapturePause?"Retomada automática":status?.capturing?"Pausar captura":"Retomar captura"}</span></button>
+          <button className="palette-item" disabled={busy||!status||(automaticCapturePause&&!canForceEndVideo)} onClick={()=>{setPalette(false);void captureButtonAction()}}><b>{canForceEndVideo?"■":status?.capturing?"❚❚":"▶"}</b><span>{captureButtonLabel}</span></button>
           <button className="palette-item" onClick={()=>{setPalette(false);openQueuePanel()}}><b>◍</b><span>Abrir fila de processamento</span>{queueCount>0&&<small>{queueCount} na fila</small>}</button>
         </div>
       </div>

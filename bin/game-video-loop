@@ -66,6 +66,9 @@ mkdir -p "$output_dir"
 pause_state="${XDG_RUNTIME_DIR:-/tmp}/captura-dia-video-paused"
 recording_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-video-recording"
 activity_flag="${XDG_RUNTIME_DIR:-/tmp}/lume-video-active"
+# Pedido da interface ("Forçar encerramento") para não esperar a folga inteira.
+# Só vale com a contagem correndo; voltar ao jogo o descarta.
+end_request="${XDG_RUNTIME_DIR:-/tmp}/lume-video-end-session"
 audio_bus_script="${CAPTURA_DIA_AUDIO_BUS:-$HOME/bin/audio-bus.sh}"
 captures_paused=false
 event_seq=0
@@ -116,6 +119,8 @@ focus_grace_deadline=null
 # corre, o toque do atalho volta a significar marcador, como no modo contínuo.
 long_recording=false
 long_started_epoch=0
+# Horário do nome do arquivo: o do clipe absorvido, quando houver um.
+long_target_epoch=0
 long_started=0
 long_clip_file=''
 long_markers=()
@@ -221,17 +226,40 @@ interruptible_sleep() {
 }
 
 # Três confirmações, deliberadamente diferentes entre si: quem está jogando
-# reconhece o que aconteceu sem tirar os olhos do jogo. `complete` é o aceite de
-# sempre (marcador, clipe); `device-added` abre a gravação longa e
-# `device-removed` a fecha — um par que sobe e desce, como um interruptor.
+# reconhece o que aconteceu sem tirar os olhos do jogo. `clipe`, e
+# `clipe-estendido` quando o toque cai na janela do anterior; `marcador` no modo
+# contínuo; `longa-inicio` abre a gravação longa e `longa-fim` a fecha.
+#
+# Cada uma pode ser trocada na interface (arquivo em $config_dir/sons/<slot>.*,
+# mesma regra de app/capture/sounds.py). O arquivo é tocado direto pelo
+# pw-play: o canberra usava o canal de notificações, e com ele mudo — ou com
+# um tema sem esses sons — o atalho ficava calado sem erro nenhum.
 confirmation_sound() {
-  local theme="${1:-complete}"
-  # O player de tema pode demorar para abrir o servidor de áudio. Rodar em
-  # segundo plano mantém o trap de USR1 instantâneo e não congela o gravador.
+  local slot="${1:-marcador}" sound='' volume candidate
+  case "$slot" in
+    longa-inicio) sound=/usr/share/sounds/freedesktop/stereo/device-added.oga ;;
+    longa-fim) sound=/usr/share/sounds/freedesktop/stereo/device-removed.oga ;;
+    clipe|clipe-estendido) sound=/usr/share/sounds/freedesktop/stereo/complete.oga ;;
+    *) slot=marcador; sound=/usr/share/sounds/freedesktop/stereo/complete.oga ;;
+  esac
+  for candidate in "$config_dir/sons/$slot".*; do
+    case "${candidate,,}" in
+      *.oga|*.ogg|*.opus|*.wav|*.flac|*.mp3) [[ -f "$candidate" ]] && { sound="$candidate"; break; } ;;
+    esac
+  done
+  # Relido a cada toque: mexer no volume na interface vale no próximo atalho,
+  # sem esperar a sessão seguinte.
+  volume="$(sed -n 's/^VIDEO_SOUND_VOLUME=//p' "$config_file" 2>/dev/null | tail -n1 || true)"
+  [[ "$volume" =~ ^[0-9]+$ ]] || volume=100
+  ((volume > 100)) && volume=100
+  ((volume == 0)) && return 0
+  # Em segundo plano: o player pode demorar para abrir o servidor de áudio, e
+  # o trap de USR1 precisa continuar instantâneo.
   (
-    canberra-gtk-play -i "$theme" >/dev/null 2>&1 && exit 0
-    sound="/usr/share/sounds/freedesktop/stereo/$theme.oga"
-    [[ -r "$sound" ]] && paplay "$sound" >/dev/null 2>&1 && exit 0
+    if [[ -r "$sound" ]]; then
+      command -v pw-play >/dev/null && pw-play --volume "$((volume / 100)).$(printf '%02d' $((volume % 100)))" "$sound" >/dev/null 2>&1 && exit 0
+      command -v paplay >/dev/null && paplay --volume=$((65536 * volume / 100)) "$sound" >/dev/null 2>&1 && exit 0
+    fi
     printf '\a' >/dev/tty 2>/dev/null || true
   ) &
 }
@@ -676,7 +704,13 @@ save_clip() {
   now="$(date +%s.%N)"
   kill -USR1 "$rec_pid" 2>/dev/null || return 0
   publish_activity clip_saving "Salvando clipe…"
-  confirmation_sound
+  # Se vai estender só se confirma segundos depois, na emenda; o som não pode
+  # esperar tanto. A janela aberta agora é o que decide a emenda lá na frente.
+  if pending_clip_window_open; then
+    confirmation_sound clipe-estendido
+  else
+    confirmation_sound clipe
+  fi
   mkdir -p "$pending_dir"
   # O replay vive em RAM; escrever os últimos segundos é rápido, não instantâneo.
   staged="$(wait_for_stage_file "$clip_stage" "${now%%.*}" || true)"
@@ -864,10 +898,10 @@ add_long_marker() {
 
 start_long_recording() {
   [[ -n "${rec_pid:-}" ]] || { publish_activity ignored "Nenhum jogo monitorado"; return 0; }
-  # A gravação longa tem pré-roll próprio: o clipe que esperava não é estendido
-  # por ela, e ficar pendente só atrasaria a publicação dele.
-  flush_pending_clip >/dev/null || true
-  long_started_epoch="$(date +%s)"
+  local now
+  now="$(date +%s.%N)"
+  long_started_epoch="${now%%.*}"
+  long_target_epoch="$long_started_epoch"
   long_started=$SECONDS
   long_markers=()
   long_clip_file=''
@@ -878,13 +912,34 @@ start_long_recording() {
   kill -s RTMIN "$rec_pid" 2>/dev/null || true
   long_recording=true
   publish_activity long_started "Gravação longa iniciada"
-  confirmation_sound device-added
+  confirmation_sound longa-inicio
   long_clip_file="$(wait_for_stage_file "$clip_stage" "$long_started_epoch" || true)"
   [[ -n "$long_clip_file" ]] || log "o pré-roll não saiu; a gravação longa terá só o que vier daqui"
+  absorb_pending_clip "$now"
   # Sem evento: o estado "gravando tudo" é permanente, e quem o mostra é o ponto
   # vermelho da HUD. Como evento, ele ainda competiria com o marcador pela mesma
   # faixa — e chegaria depois dele, por causa da espera pelo pré-roll.
   publish_activity
+}
+
+# Um clipe que ainda esperava na janela de replay vira o começo da gravação
+# longa, em vez de sair como arquivo à parte. Soltos, os dois repetiam o trecho
+# em comum: o pré-roll cobre os mesmos segundos que o clipe acabou de salvar.
+# A emenda é a mesma do clipe estendido — o pré-roll entra como o "clipe novo".
+absorb_pending_clip() {
+  local now="$1"
+  [[ -n "$pending_clip_file" ]] || return 0
+  if [[ -n "$long_clip_file" ]] && merge_pending_clip "$long_clip_file" "$now"; then
+    log "o clipe anterior virou o começo da gravação longa"
+    long_clip_file="$pending_clip_file"
+    # O arquivo começa onde o clipe começava, e é esse o horário do nome.
+    ((pending_clip_start > 0)) && long_target_epoch="$pending_clip_start"
+    pending_clip_file='' pending_clip_epoch=0 pending_clip_start=0
+    clips_saved=$((clips_saved > 0 ? clips_saved - 1 : 0))
+    return 0
+  fi
+  # Sem sobreposição (ou a emenda falhou): o clipe segue como arquivo próprio.
+  flush_pending_clip >/dev/null || true
 }
 
 stop_long_recording() {
@@ -892,10 +947,10 @@ stop_long_recording() {
   long_recording=false
   kill -s RTMIN "${rec_pid:-0}" 2>/dev/null || true
   publish_activity long_saving "Fechando gravação longa…"
-  confirmation_sound device-removed
+  confirmation_sound longa-fim
   local recording_file target offset preroll=0
   recording_file="$(wait_for_stage_file "$long_stage" "$long_started_epoch" || true)"
-  target="$(buffer_target "$long_started_epoch")"
+  target="$(buffer_target "$long_target_epoch")"
   if [[ -n "$long_clip_file" && -n "$recording_file" ]]; then
     preroll="$(media_duration "$long_clip_file")"; preroll="${preroll:-0}"
     if concat_videos "$target" "$long_clip_file" "$recording_file"; then
@@ -909,7 +964,7 @@ stop_long_recording() {
       log "não consegui emendar clipe e gravação; adotando os dois separados"
       preroll=0
       adopt_video "$long_clip_file" "$target"
-      target="$(buffer_target "$((long_started_epoch + 1))")"
+      target="$(buffer_target "$((long_target_epoch + 1))")"
       adopt_video "$recording_file" "$target"
     fi
   elif [[ -n "$recording_file" ]]; then
@@ -1066,6 +1121,7 @@ while true; do
   event_seq=0
   last_event_json=''
   focus_grace_deadline=null
+  rm -f "$end_request"
   publish_activity
   begin_game_session
   started=$SECONDS
@@ -1084,6 +1140,7 @@ while true; do
         fi
         focus_away=0
         focus_grace_deadline=null
+        rm -f "$end_request"
         ;;
       na-tela)
         # Segura o que estiver valendo. Se a contagem já corria, ela fica onde
@@ -1106,6 +1163,12 @@ while true; do
         fi
         ;;
     esac
+    if ((focus_away > 0)) && [[ -e "$end_request" ]]; then
+      rm -f "$end_request"
+      log "sessão encerrada à força pela interface ($focus_reason)"
+      session_ended=true
+      break
+    fi
     # A janela de mesclagem fechou: o clipe que esperava vira arquivo do buffer.
     if [[ -n "$pending_clip_file" ]] && ! pending_clip_window_open; then
       flush_pending_clip >/dev/null || true

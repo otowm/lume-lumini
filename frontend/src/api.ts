@@ -30,7 +30,9 @@ export type Status = {
   screen: { active: boolean; active_state: string };
   video: {
     enabled: boolean; service_active: boolean; active_state: string;
-    recording: boolean; mode: "continuous" | "clips"; window: string; started_at: number | null; pausing_captures: boolean;
+    recording: boolean; mode: "continuous" | "clips"; window: string; started_at: number | null;
+    /** Segundos até a sessão encerrar fora do jogo; `null` com o jogo em foco. */
+    focus_grace_remaining?: number | null; pausing_captures: boolean;
     pause_other_captures: boolean;
   };
   files: {
@@ -108,7 +110,9 @@ export type StorageSettings = {
 export type StorageCandidate = {root:string;disk:{total:number;used:number;free:number}};
 export type OllamaModel = {name:string;size:number;modified_at:string;capabilities:string[]};
 export type GameIcon = {url:string;kind:"icon"|"cover"};
-export type VideoSettings = {enabled:boolean;codec:"h264"|"hevc";encoder?:"auto"|"gpu"|"cpu";capture_mode:"continuous"|"clips";replay_seconds:number;fps:number;geometry:string;segment_seconds:number;sample_frames:number;sample_geometry:string;retention_minutes:number;delete_after_description:boolean;pause_other_captures:boolean;focus_grace_seconds:number;analysis_profile:"fast"|"balanced"|"detailed"|"custom";scan_interval_seconds:number;max_keyframes:number;web_search_enabled:boolean;searxng_url:string;web_search_safety_limit:number;thinking_enabled:boolean;vision_model:string;text_model:string;marker_hotkey:string;marker_key_code?:string;hotkey_hold_seconds:number;marker_preroll_seconds:number;hud_enabled:boolean;hud_placement:"game"|"second"|"both";hud_corner:"top-left"|"top-right"|"bottom-left"|"bottom-right";hud_hotkey:string;hud_sound:boolean;resolve_fps:number;resolve_start_timecode:string;patterns:string[];pattern_modes:Record<string,"continuous"|"clips">;pattern_fps:Record<string,number>;pattern_geometry:Record<string,string>;pattern_sources:Record<string,"game"|"window">;service?:{active:boolean}};
+export type ConfirmationSound = {slot:"clipe"|"clipe-estendido"|"marcador"|"longa-inicio"|"longa-fim";label:string;custom:boolean;name:string};
+export type ConfirmationSounds = {items:ConfirmationSound[];presets:string[]};
+export type VideoSettings = {enabled:boolean;codec:"h264"|"hevc";encoder?:"auto"|"gpu"|"cpu";capture_mode:"continuous"|"clips";replay_seconds:number;fps:number;geometry:string;segment_seconds:number;sample_frames:number;sample_geometry:string;retention_minutes:number;delete_after_description:boolean;pause_other_captures:boolean;focus_grace_seconds:number;analysis_profile:"fast"|"balanced"|"detailed"|"custom";scan_interval_seconds:number;max_keyframes:number;web_search_enabled:boolean;searxng_url:string;web_search_safety_limit:number;thinking_enabled:boolean;vision_model:string;text_model:string;marker_hotkey:string;marker_key_code?:string;hotkey_hold_seconds:number;marker_preroll_seconds:number;hud_enabled:boolean;hud_placement:"game"|"second"|"both";hud_corner:"top-left"|"top-right"|"bottom-left"|"bottom-right";hud_hotkey:string;hud_sound:boolean;sound_volume?:number;resolve_fps:number;resolve_start_timecode:string;patterns:string[];pattern_modes:Record<string,"continuous"|"clips">;pattern_fps:Record<string,number>;pattern_geometry:Record<string,string>;pattern_sources:Record<string,"game"|"window">;service?:{active:boolean}};
 export type VideoMarker = {id:number;video_id:number;offset_seconds:number;title:string;ai_generated:number;created_at:string};
 export type WebSource = {title:string;url:string;snippet:string;query?:string};
 export type TagStatus = "candidate" | "active" | "dormant" | "rejected";
@@ -199,6 +203,7 @@ export function uploadVideo(file:File,onProgress:(percent:number)=>void,sessionI
 export const api = {
   status: () => request<Status>("/api/status"),
   capture: (action: "pause" | "resume") => request(`/api/capture/${action}`, { method: "POST" }),
+  endVideoSession: () => request(`/api/video/end-session`, { method: "POST" }),
   sensitive: () => request<{ patterns: string[] }>("/api/settings/sensitive"),
   saveSensitive: (patterns: string[]) => request("/api/settings/sensitive", { method: "PUT", body: JSON.stringify({ patterns }) }),
   saveSettings: (settings: ScreenSettings) => request("/api/settings/screen", { method: "PUT", body: JSON.stringify(settings) }),
@@ -222,6 +227,16 @@ export const api = {
   saveVideoSettings: (settings:VideoSettings) => request<VideoSettings>("/api/settings/video",{method:"PUT",body:JSON.stringify(settings)}),
   retryGameIcons: () => request<{ok:boolean;retrying:number}>("/api/game-icons/retry",{method:"POST"}),
   gameIcons: (names:string[]) => request<Record<string,GameIcon|null>>(`/api/game-icons?${names.map(name=>`names=${encodeURIComponent(name)}`).join("&")}`),
+  confirmationSounds: () => request<ConfirmationSounds>("/api/settings/video/sounds"),
+  uploadConfirmationSound: async (slot:string,file:File) => {
+    // Corpo cru, como na importação de vídeo: o `request` força JSON.
+    const response=await fetch(`/api/settings/video/sounds/${slot}?name=${encodeURIComponent(file.name)}`,{method:"PUT",headers:{"Content-Type":"application/octet-stream"},body:file});
+    if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail||`Erro HTTP ${response.status}`)}
+    return response.json() as Promise<ConfirmationSounds>;
+  },
+  applyConfirmationSoundPreset: (theme:string) => request<ConfirmationSounds>(`/api/settings/video/sounds/preset/${encodeURIComponent(theme)}`,{method:"POST"}),
+  resetConfirmationSound: (slot:string) => request<ConfirmationSounds>(`/api/settings/video/sounds/${slot}`,{method:"DELETE"}),
+  testConfirmationSound: (slot:string,volume:number) => request<{ok:boolean}>(`/api/settings/video/sounds/${slot}/test?volume=${volume}`,{method:"POST"}),
   steamGridDb: () => request<{configured:boolean}>("/api/settings/steamgriddb"),
   saveSteamGridDb: (key:string) => request<{configured:boolean}>("/api/settings/steamgriddb",{method:"PUT",body:JSON.stringify({key})}),
   ollamaModels: () => request<{online:boolean;models:OllamaModel[];error?:string}>("/api/ollama/models"),

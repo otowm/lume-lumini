@@ -7,6 +7,7 @@ reinício, formato do estado) e o resto é pulado explicitamente.
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -497,6 +498,54 @@ class VideoReplayClipTests(unittest.TestCase):
                              "a espera não reabriu a partir do segundo atalho")
             self.assertFalse(incoming.exists(), "o clipe novo ficou solto além da emenda")
             self.assertEqual(loop.clips_saved, 0, "mesclar contou um clipe a mais")
+
+    def test_long_recording_absorbs_the_pending_clip(self):
+        """Clipe e gravação longa logo depois: um arquivo só, sem trecho repetido."""
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "clipe.mkv"
+            pending.write_bytes(b"pendente")
+            preroll = Path(directory) / "Replay 2.mkv"
+            preroll.write_bytes(b"pre-roll")
+            loop = self._clip_loop(winvideo)
+            loop.pending_clip, loop.pending_clip_at = pending, 1000.0
+            loop.clips_saved = 1
+            loop.long_clip = preroll
+
+            def concat(destination, *parts):
+                destination.write_bytes(b"emendado")
+                return True
+
+            with unittest.mock.patch.object(winvideo, "media_duration", return_value=60.0), \
+                 unittest.mock.patch.object(winvideo, "cut_head", return_value=True), \
+                 unittest.mock.patch.object(winvideo, "concat_videos", side_effect=concat), \
+                 unittest.mock.patch.object(loop, "flush_pending_clip") as flush:
+                held = (loop.pending_clip, loop.pending_clip_at)
+                loop.pending_clip, loop.pending_clip_at = None, 0.0
+                loop._absorb_pending_clip(held, 1020.0)
+
+            flush.assert_not_called()
+            self.assertEqual(loop.long_clip, pending)
+            self.assertEqual(pending.read_bytes(), b"emendado")
+            self.assertIsNone(loop.pending_clip)
+            self.assertEqual(loop.clips_saved, 0)
+
+    def test_a_clip_too_old_for_the_preroll_is_published_on_its_own(self):
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "clipe.mkv"
+            pending.write_bytes(b"pendente")
+            preroll = Path(directory) / "Replay 2.mkv"
+            preroll.write_bytes(b"pre-roll")
+            loop = self._clip_loop(winvideo)
+            loop.long_clip = preroll
+            with unittest.mock.patch.object(winvideo, "media_duration", return_value=60.0), \
+                 unittest.mock.patch.object(loop, "flush_pending_clip") as flush:
+                loop._absorb_pending_clip((pending, 1000.0), 1070.0)
+            flush.assert_called_once()
+            self.assertEqual(loop.long_clip, preroll)
 
     def test_a_hotkey_after_the_replay_window_opens_another_clip(self):
         """Sem sobreposição não há o que mesclar: são duas jogadas distintas."""
@@ -2311,6 +2360,59 @@ class HudDisplayModeTests(unittest.TestCase):
         self.assertFalse(hud._should_expand(HudStatus("ok", "Clipes armados")))
 
 
+    def test_hotkey_dismisses_alerts_that_force_the_hud_open(self):
+        """Fora do jogo o aviso da contagem reabria a HUD em qualquer modo.
+
+        No Linux ela não deixa o clique atravessar, então prendia o que estava
+        atrás até a folga vencer. O atalho tem que conseguir tirá-la da frente.
+        """
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        hud.display_mode = "hidden"
+        snapshot = HudSnapshot(recording=True)
+        away = HudStatus("warn", "Fora do jogo · para em 40s",
+                         [Alert("fora-do-jogo", "warn", "Fora do jogo · para em 40s")])
+        hud._note_alerts(away)
+        self.assertTrue(hud._should_show(snapshot, away, None))
+
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "hidden", "dispensar não gira o modo")
+        hud._note_alerts(away)
+        self.assertFalse(hud._should_show(snapshot, away, None))
+
+        # Um aviso novo é notícia: volta a abrir.
+        worse = HudStatus("fail", "Microfone sem sinal", [
+            Alert("fora-do-jogo", "warn", "Fora do jogo · para em 39s"),
+            Alert("ausente:Microfone", "fail", "Microfone sem sinal")])
+        hud._note_alerts(worse)
+        self.assertTrue(hud._should_show(snapshot, worse, None))
+
+    def test_hotkey_brings_dismissed_alerts_back(self):
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        snapshot = HudSnapshot(recording=True)
+        away = HudStatus("warn", "Fora do jogo", [Alert("fora-do-jogo", "warn", "Fora do jogo")])
+        hud._note_alerts(away)
+        hud.toggle()
+        self.assertFalse(hud._should_show(snapshot, away, None))
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "compact")
+        self.assertTrue(hud._should_show(snapshot, away, None))
+
+    def test_dismissal_ends_when_the_alerts_clear(self):
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        away = HudStatus("warn", "Fora do jogo", [Alert("fora-do-jogo", "warn", "Fora do jogo")])
+        hud._note_alerts(away)
+        hud.toggle()
+        hud._note_alerts(HudStatus("ok", "Gravando"))
+        hud._note_alerts(away)
+        self.assertTrue(hud._should_show(HudSnapshot(recording=True), away, None))
+
+
 class VideoActivityFlagTests(unittest.TestCase):
     """O sinal de atividade tem um significado só, e ele é caro de errar.
 
@@ -2382,6 +2484,31 @@ class VideoActivityFlagTests(unittest.TestCase):
         self.assertFalse(expired)
         self.assertEqual(loop.focus_grace_deadline, 0.0)
 
+    def test_interface_request_ends_the_countdown_early(self):
+        """O pedido da interface só encerra com a contagem já correndo."""
+        from app.capture.winvideo import VideoLoop
+
+        loop = object.__new__(VideoLoop)
+        loop.settings = SimpleNamespace(focus_grace=60)
+        loop.focus_grace_deadline = 0.0
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "lume-video-end-session"
+            with unittest.mock.patch("app.capture.winvideo.video_end_request_flag",
+                                     return_value=request), \
+                 unittest.mock.patch("app.capture.winvideo.time.monotonic", return_value=100.0), \
+                 unittest.mock.patch("app.capture.winvideo.time.time", return_value=1_000.0):
+                # Com o jogo em foco o pedido é descartado, não guardado.
+                request.touch()
+                loop._update_focus_grace("jogo", -1.0)
+                self.assertFalse(request.exists())
+
+                lost_at, expired = loop._update_focus_grace("fora", -1.0)
+                self.assertFalse(expired)
+                request.touch()
+                _lost_at, expired = loop._update_focus_grace("fora", lost_at)
+            self.assertTrue(expired)
+            self.assertFalse(request.exists())
+
     def test_an_unreadable_foreground_window_neither_starts_nor_advances_the_countdown(self):
         """"Não sei que janela é essa" não é "o usuário saiu do jogo".
 
@@ -2419,6 +2546,71 @@ class VideoActivityFlagTests(unittest.TestCase):
              unittest.mock.patch("app.capture.winvideo.time.time", return_value=1_030.0):
             _held_at, expired = loop._update_focus_grace("fora", held_at)
         self.assertTrue(expired)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "requer ffmpeg")
+class LinuxLongRecordingAbsorbsClipTests(unittest.TestCase):
+    """Clipe seguido de gravação longa: um arquivo só, sem trecho repetido.
+
+    O pré-roll da gravação longa cobre os mesmos segundos que o clipe acabou
+    de salvar. Soltos, os dois repetiam a jogada; aqui o clipe vira o começo.
+    Roda as funções do próprio script sobre vídeos de verdade.
+    """
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "game-video-loop"
+    FUNCTIONS = ("log", "concat_videos", "media_seconds", "merge_pending_clip",
+                 "flush_pending_clip", "absorb_pending_clip")
+
+    def _functions(self) -> str:
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        blocks = [re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.S | re.M).group(0)
+                  for name in self.FUNCTIONS]
+        return "\n".join(blocks)
+
+    @staticmethod
+    def _clip(path: Path, seconds: int) -> None:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"testsrc=size=64x64:rate=10:duration={seconds}",
+                        "-c:v", "libx264", "-g", "1", str(path)], check=True)
+
+    def _absorb(self, directory: Path, now: str) -> list[str]:
+        pending_dir = directory / "pendente"
+        pending_dir.mkdir()
+        self._clip(pending_dir / "pendente.mp4", 6)
+        self._clip(directory / "preroll.mp4", 6)
+        script = f"""set -euo pipefail
+{self._functions()}
+pending_dir={pending_dir}
+pending_clip_file={pending_dir}/pendente.mp4 pending_clip_epoch=1000 pending_clip_start=994
+long_clip_file={directory}/preroll.mp4 long_target_epoch=1002 clips_saved=1
+flush_pending_clip() {{ touch {directory}/publicado; pending_clip_file=''; }}
+absorb_pending_clip {now}
+echo "$long_clip_file|$long_target_epoch|${{pending_clip_file:-vazio}}|$clips_saved"
+media_seconds "$long_clip_file"; echo
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_the_pending_clip_becomes_the_head_of_the_long_recording(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            state, seconds = self._absorb(directory, "1002.0")
+            long_clip, target, pending, clips = state.split("|")
+            self.assertEqual(long_clip, str(directory / "pendente" / "pendente.mp4"))
+            self.assertEqual(target, "994", "o nome não saiu do horário do clipe")
+            self.assertEqual(pending, "vazio", "o clipe continuou pendente")
+            self.assertEqual(clips, "0", "o clipe absorvido continuou contado")
+            # 6s pendentes, 2s depois o pré-roll de 6s: 2s de começo + 6s = 8s.
+            self.assertAlmostEqual(float(seconds), 8.0, delta=0.3)
+            self.assertFalse((directory / "preroll.mp4").exists())
+
+    def test_a_clip_outside_the_preroll_stays_a_file_of_its_own(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            state, _seconds = self._absorb(directory, "1010.0")
+            self.assertTrue((directory / "publicado").exists(), "o clipe não foi publicado à parte")
+            self.assertEqual(state, f"{directory}/preroll.mp4|1002|vazio|1")
 
 
 class StableAppLabelTests(unittest.TestCase):

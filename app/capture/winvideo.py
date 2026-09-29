@@ -29,10 +29,10 @@ from . import gamesession, get_backend
 from .base import parse_video_app_rule, read_patterns, read_shell_config
 from .imagediff import thumbnail
 from .winhotkey import DEFAULT_HOLD_SECONDS, MarkerHotkey
-from . import obs
+from . import obs, sounds
 from ..backend.main_paths import CONFIG_DIR, VIDEO_DIR
 from ..backend.database import initialize
-from ..backend.runtime import video_activity_flag, video_recording_flag
+from ..backend.runtime import video_activity_flag, video_end_request_flag, video_recording_flag
 
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
@@ -264,6 +264,15 @@ def concat_videos(destination: Path, *parts: Path) -> bool:
     return result.returncode == 0 and destination.is_file()
 
 
+def _consume_end_request() -> bool:
+    """Apaga o pedido de encerramento da interface e diz se ele existia."""
+    try:
+        video_end_request_flag().unlink()
+    except OSError:
+        return False
+    return True
+
+
 class VideoLoop:
     def __init__(self, once: bool = False, max_wait: float | None = None) -> None:
         self.backend = get_backend()
@@ -470,7 +479,12 @@ class VideoLoop:
         now = time.monotonic()
         if state == "jogo":
             self.focus_grace_deadline = 0.0
+            _consume_end_request()
             return -1.0, False
+        # "Forçar encerramento" na interface: só vale com a contagem correndo.
+        if focus_lost_at >= 0 and _consume_end_request():
+            log("[foco] sessão encerrada à força pela interface")
+            return focus_lost_at, True
         if state == "na-tela":
             # Segura o que estiver valendo: uma contagem já em curso fica onde
             # está, empurrada volta a volta, em vez de correr enquanto o menu
@@ -496,10 +510,22 @@ class VideoLoop:
         "long_stop": ((1318, 70), (1046, 70), (784, 150)),
     }
 
+    @staticmethod
+    def _sound_volume() -> int:
+        try:
+            return int(read_shell_config(VIDEO_CONFIG).get("VIDEO_SOUND_VOLUME", "100"))
+        except ValueError:
+            return 100
+
     @classmethod
     def _confirmation_sound(cls, variant: str = "ok") -> None:
         """Confirma uma ação aceita sem depender da interface estar em foco."""
         if sys.platform != "win32":
+            return
+        # Um .wav escolhido na interface substitui a melodia do slot.
+        slot = {"clip": "clipe", "clip_merged": "clipe-estendido",
+                "long_start": "longa-inicio", "long_stop": "longa-fim"}.get(variant, "marcador")
+        if sounds.play(slot, cls._sound_volume()):
             return
         try:
             import winsound
@@ -583,10 +609,13 @@ class VideoLoop:
     # --- gravação longa ---------------------------------------------------
     def start_long_recording(self) -> None:
         """Guarda o pré-roll e começa a gravar em paralelo ao Replay Buffer."""
-        # A gravação longa tem pré-roll próprio: o clipe que esperava não é
-        # estendido por ela, e ficar pendente só atrasaria a publicação dele.
-        self.flush_pending_clip()
-        self.long_started_at = time.time()
+        now = time.time()
+        # O clipe que esperava na janela de replay vira o começo da gravação
+        # longa. Tirado daqui já: o laço principal o publicaria enquanto o
+        # pré-roll é salvo, e ele sairia à parte, repetindo o trecho em comum.
+        held = (self.pending_clip, self.pending_clip_at)
+        self.pending_clip, self.pending_clip_at = None, 0.0
+        self.long_started_at = now
         self.long_started = time.monotonic()
         self.long_markers = []
         self.long_clip = None
@@ -597,6 +626,7 @@ class VideoLoop:
         self.long_clip = self._save_replay_file()
         if self.long_clip is None:
             log("[longa] o pré-roll não saiu; grava-se só do atalho em diante")
+        self._absorb_pending_clip(held, now)
         try:
             obs.call("StartRecord")
         except (obs.ObsError, OSError) as exc:
@@ -610,6 +640,23 @@ class VideoLoop:
         self._publish_activity()
         log("[longa] gravação longa iniciada com pré-roll de "
             f"{self.settings.replay_seconds}s")
+
+    def _absorb_pending_clip(self, held: tuple[Path | None, float], now: float) -> None:
+        """Emenda o clipe pendente na frente do pré-roll, como no clipe estendido."""
+        pending, since = held
+        if pending is None:
+            return
+        merged = None
+        if self.long_clip is not None:
+            merged = self._merge_pending_clip(self.long_clip, now, held=held)
+        if merged is not None:
+            log("[longa] o clipe anterior virou o começo da gravação longa")
+            self.long_clip = merged
+            self.clips_saved = max(0, self.clips_saved - 1)
+            return
+        # Sem sobreposição (ou a emenda falhou): o clipe segue como arquivo próprio.
+        self.pending_clip, self.pending_clip_at = pending, since
+        self.flush_pending_clip()
 
     def stop_long_recording(self) -> Path | None:
         """Encerra a gravação longa e emenda o pré-roll na frente dela."""
@@ -735,7 +782,7 @@ class VideoLoop:
                 f"estendido para {total:.0f}s")
             self._note_event("clip_merged",
                              f"Clipe estendido · {total / 60:.0f}:{total % 60:02.0f}")
-            self._confirmation_sound()
+            self._confirmation_sound("clip_merged")
             return merged
         # Sem sobreposição: o que esperava vira arquivo do buffer e o novo
         # assume a vez.
@@ -749,7 +796,7 @@ class VideoLoop:
             self._write_sidecars(path)
             self.last_clip_name = path.name
             self._note_event("clip_saved", f"Clipe salvo · {self.settings.replay_seconds}s")
-            self._confirmation_sound()
+            self._confirmation_sound("clip")
             return path
         self.pending_clip = pending
         self.pending_clip_at = now
@@ -757,7 +804,7 @@ class VideoLoop:
         log(f"[clipe] últimos {self.settings.replay_seconds}s salvos; "
             f"aguardando a janela de mesclagem")
         self._note_event("clip_saved", f"Clipe salvo · {self.settings.replay_seconds}s")
-        self._confirmation_sound()
+        self._confirmation_sound("clip")
         return pending
 
     def _rescue_stale_pending_clip(self) -> None:
@@ -788,20 +835,24 @@ class VideoLoop:
             except OSError as exc:
                 log(f"[aviso] falha ao recuperar {leftover.name}: {exc}")
 
-    def _merge_pending_clip(self, incoming: Path, now: float) -> Path | None:
+    def _merge_pending_clip(self, incoming: Path, now: float,
+                            held: tuple[Path | None, float] | None = None) -> Path | None:
         """Estende o clipe que espera, quando o pedido novo se sobrepõe a ele.
+
+        ``held`` é um clipe pendente já tirado da vez (a gravação longa o
+        segura enquanto salva o pré-roll); sem ele, vale o pendente atual.
 
         O pendente termina no atalho anterior; o novo cobre os segundos
         anteriores a este. Se o começo do novo cai dentro do pendente, o trecho
         em comum não pode aparecer duas vezes — e o corte sai do *fim* do
         pendente, porque só esse lado é exato com cópia de streams.
         """
-        pending = self.pending_clip
+        pending, since = held if held is not None else (self.pending_clip, self.pending_clip_at)
         if pending is None or not pending.is_file():
             return None
         pending_seconds = media_duration(pending)
         incoming_seconds = media_duration(incoming)
-        delta = now - self.pending_clip_at
+        delta = now - since
         if pending_seconds <= 0 or incoming_seconds <= 0 or delta >= incoming_seconds:
             return None
         head = pending_seconds + delta - incoming_seconds
@@ -834,7 +885,8 @@ class VideoLoop:
             incoming.unlink(missing_ok=True)
         # O arquivo começa onde começava — só o fim andou —, então o nome segue
         # valendo; a espera reabre a partir deste atalho.
-        self.pending_clip_at = now
+        if held is None:
+            self.pending_clip_at = now
         return pending
 
     def flush_pending_clip(self) -> Path | None:

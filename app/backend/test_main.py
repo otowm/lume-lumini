@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import os
 import json
@@ -766,6 +767,37 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(recording["started_at"], 1786200000.0)
             self.assertFalse(recording["pausing_captures"])
             self.assertTrue(recording["pause_other_captures"])
+
+    def test_end_video_session_only_during_the_focus_countdown(self):
+        """"Forçar encerramento" só existe enquanto a folga fora do jogo corre."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            flag = root / "lume-video-active"
+            request = root / "lume-video-end-session"
+            now = 1_800_000_000.0
+            flag.write_text(json.dumps({"window": "Jogo", "started_at": now - 60,
+                                        "focus_grace_deadline": None}), encoding="utf-8")
+            with (
+                patch.object(backend_main, "VIDEO_CONFIG", root / "missing.conf"),
+                patch.object(backend_main, "video_activity_flag", return_value=flag),
+                patch.object(backend_main, "video_recording_flag", return_value=root / "pausing"),
+                patch.object(backend_main, "video_end_request_flag", return_value=request),
+                patch.object(backend_main.time, "time", return_value=now),
+                patch.object(backend_main, "unit_state", return_value={"active": True}),
+            ):
+                os.utime(flag, (now, now))
+                self.assertIsNone(selective_video_status()["focus_grace_remaining"])
+                with self.assertRaises(backend_main.HTTPException) as failure:
+                    backend_main.end_video_session()
+                self.assertEqual(failure.exception.status_code, 409)
+                self.assertFalse(request.exists())
+
+                flag.write_text(json.dumps({"window": "Jogo", "started_at": now - 60,
+                                            "focus_grace_deadline": now + 42}), encoding="utf-8")
+                os.utime(flag, (now, now))
+                result = backend_main.end_video_session()
+            self.assertEqual(result["focus_grace_remaining"], 42.0)
+            self.assertTrue(request.exists())
 
     def test_selective_video_status_expires_abandoned_activity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2361,6 +2393,74 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
         self.assertEqual(after["hud_placement"], "second")
         self.assertEqual(after["hud_hotkey"], "Ctrl+Shift+F8")
         self.assertEqual(after["focus_grace_seconds"], 20)
+        self.assertEqual(after["sound_volume"], 100)
+
+    def test_sound_volume_survives_a_save(self):
+        self.assertEqual(self._round_trip("VIDEO_SOUND_VOLUME=35\n")["sound_volume"], 35)
+
+
+class ConfirmationSoundTests(unittest.TestCase):
+    """Sons do atalho: o arquivo enviado substitui o padrão, e remover o devolve."""
+
+    def setUp(self):
+        from app.capture import sounds
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        patcher = patch.object(sounds, "SOUNDS_DIR", Path(self.directory.name) / "sons")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sounds = sounds
+
+    def _upload(self, slot: str, name: str, data: bytes):
+        request = SimpleNamespace(stream=lambda: _chunks(data))
+        return asyncio.run(backend_main.upload_confirmation_sound(slot, request, name=name))
+
+    def test_upload_replaces_the_previous_file_and_reset_restores_default(self):
+        self._upload("marcador", "plim.wav", b"RIFF1")
+        result = self._upload("marcador", "ding.ogg", b"OggS2")
+        item = next(item for item in result["items"] if item["slot"] == "marcador")
+        self.assertEqual(item, {"slot": "marcador", "label": "Marcador",
+                                "custom": True, "name": "marcador.ogg"})
+        self.assertEqual(sorted(p.name for p in self.sounds.SOUNDS_DIR.iterdir()), ["marcador.ogg"])
+
+        backend_main.reset_confirmation_sound("marcador")
+        self.assertIsNone(self.sounds.custom_sound("marcador"))
+
+    def test_preset_fills_every_slot_with_the_theme_sounds(self):
+        result = backend_main.apply_confirmation_sound_preset("minimal")
+        self.assertIn("minimal", result["presets"])
+        self.assertTrue(all(item["custom"] for item in result["items"]))
+        preset = self.sounds.PRESETS_DIR / "minimal"
+        self.assertEqual(self.sounds.custom_sound("clipe").read_bytes(),
+                         (preset / "toggle-on.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("clipe-estendido").read_bytes(),
+                         (preset / "check.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("longa-inicio").read_bytes(),
+                         (preset / "double-click.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("longa-fim").read_bytes(),
+                         (preset / "deselect.ogg").read_bytes())
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            backend_main.apply_confirmation_sound_preset("../../etc")
+        self.assertEqual(failure.exception.status_code, 404)
+
+    def test_every_preset_has_all_its_sounds(self):
+        for theme in self.sounds.presets():
+            for name in set(self.sounds.PRESET_SOUNDS.values()):
+                self.assertTrue((self.sounds.PRESETS_DIR / theme / f"{name}.ogg").is_file(),
+                                f"{theme}/{name}.ogg")
+
+    def test_rejects_unknown_slots_and_formats(self):
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            self._upload("marcador", "virus.exe", b"MZ")
+        self.assertEqual(failure.exception.status_code, 422)
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            self._upload("../video", "plim.wav", b"RIFF")
+        self.assertEqual(failure.exception.status_code, 404)
+
+
+async def _chunks(data: bytes):
+    yield data
 
 
 class PromptSettingsTests(unittest.TestCase):
@@ -3287,7 +3387,7 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/settings/cleanup", "/api/test/screen", "/api/test/screen-change/start",
             "/api/test/screen-change/compare", "/api/test/video-window", "/api/test/audio",
             "/api/screenshot", "/api/audio", "/api/video", "/api/video-download",
-            "/api/video-thumbnail", "/api/video-audio-tracks", "/api/video-audio-track",
+            "/api/video-thumbnail", "/api/video-audio-tracks", "/api/video-audio-track", "/api/video/end-session",
             "/api/share/light", "/api/video-light", "/api/share/upload",
             "/api/share/links/{link_id}", "/api/videos", "/api/videos/import",
             "/api/video-sessions", "/api/video-sessions/join", "/api/video-sessions/{session_id}",
@@ -3297,7 +3397,8 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/files/unprocessed/all", "/api/retention/{kind}/{item_id}",
             "/api/media/raw/unkept", "/api/editing", "/api/editing/video/{video_id}",
             "/api/editing/session/{session_id}", "/api/editing/{name}", "/api/editing/open",
-            "/api/settings/steamgriddb", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
+            "/api/settings/steamgriddb", "/api/settings/video/sounds", "/api/settings/video/sounds/{slot}",
+            "/api/settings/video/sounds/{slot}/test", "/api/settings/video/sounds/preset/{theme}", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
         }
         sem_classificacao = []
         for rota in backend_main.app.routes:
