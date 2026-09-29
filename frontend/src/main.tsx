@@ -1748,6 +1748,11 @@ function App() {
         {automaticCapturePause?<p className="video-pause-note">{automaticPauseNote}</p>:<div className="capture-meta"><span>{bytes(status?.storage.bytes)}</span><span>{status?.capturing ? captureLabel : "em pausa"}</span></div>}
         <button className="secondary block" disabled={busy || !status || (automaticCapturePause && !canForceEndVideo)} onClick={()=>void captureButtonAction()}>{captureButtonLabel}</button>
       </div>}
+      {videoGraceRemaining!==null&&!(ia&&canForceEndVideo)&&<div className="capture-card video-ending">
+        <div className="capture-title"><i className="video"/><strong>Fora do jogo</strong></div>
+        <p className="video-pause-note">A gravação encerra em {Math.ceil(videoGraceRemaining)}s se você não voltar ao jogo.</p>
+        <button className="secondary block" disabled={busy} onClick={()=>void forceEndVideo()}>Forçar encerramento</button>
+      </div>}
       {!ia&&<UpdateNotice recording={Boolean(status?.video.recording)}/>}
       <div className="privacy-links">{ia&&<button onClick={openDiagnostics}>Diagnóstico</button>}{ia&&<button onClick={openPrivacy}>Privacidade</button>}<button onClick={openSettings}>Ajustes</button></div>
     </aside>

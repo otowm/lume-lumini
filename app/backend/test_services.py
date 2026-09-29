@@ -2293,6 +2293,49 @@ class HudStateTests(unittest.TestCase):
         status = evaluate(self._recording(meters=[mic]))
         self.assertEqual([alert.level for alert in status.alerts], ["warn"])
 
+    def test_with_the_ai_filter_a_quiet_player_is_not_a_silent_microphone(self):
+        """A supressão zera o bus sem fala; o microfone cru diz que ele vive."""
+        from app.capture import hudsource
+
+        with unittest.mock.patch.object(hudsource.time, "monotonic", return_value=1000.0):
+            tracker = hudsource._MeterTracker("Microfone", required=True)
+            tracker.external_liveness = True
+        with unittest.mock.patch.object(hudsource.time, "monotonic", return_value=1100.0):
+            tracker.update(present=True, peak_db=-100.0)   # bus em zero: jogando calado
+            tracker.alive()                                # o cru tem ruído próprio
+            self.assertLess(tracker.build().silent_seconds, 1.0)
+        with unittest.mock.patch.object(hudsource.time, "monotonic", return_value=1200.0):
+            # Headset mutado: o cru também zera, ninguém chama alive() — avisa.
+            tracker.update(present=True, peak_db=-100.0)
+            self.assertGreaterEqual(tracker.build().silent_seconds, 100.0)
+
+    def test_with_external_liveness_the_bus_peak_no_longer_counts_as_sound(self):
+        from app.capture import hudsource
+
+        with unittest.mock.patch.object(hudsource.time, "monotonic", return_value=1000.0):
+            tracker = hudsource._MeterTracker("Microfone", required=True)
+            tracker.external_liveness = True
+        with unittest.mock.patch.object(hudsource.time, "monotonic", return_value=1060.0):
+            tracker.update(present=True, peak_db=-20.0)
+            self.assertEqual(tracker.build().silent_seconds, 60.0)
+            self.assertEqual(tracker.build().peak_db, -20.0, "a barra segue mostrando o bus")
+            tracker.external_liveness = False
+            tracker.update(present=True, peak_db=-20.0)
+            self.assertEqual(tracker.build().silent_seconds, 0.0, "sem filtro, vale o de sempre")
+
+    def test_finds_the_raw_microphone_behind_the_ai_filter(self):
+        from app.capture import hudsource
+
+        modules = ("12\tmodule-null-sink\tsink_name=MicBus channels=1\t\n"
+                   "40\tmodule-ladspa-source\tsource_name=LumeMicLimpo master=alsa_input.headset.mono "
+                   "plugin=/usr/lib/ladspa/librnnoise_ladspa.so control=80,200,20,0,0\t\n")
+        result = SimpleNamespace(stdout=modules)
+        with unittest.mock.patch.object(hudsource.subprocess, "run", return_value=result):
+            self.assertEqual(hudsource._clean_mic_master(), "alsa_input.headset.mono")
+        without = SimpleNamespace(stdout="12\tmodule-null-sink\tsink_name=MicBus\t\n")
+        with unittest.mock.patch.object(hudsource.subprocess, "run", return_value=without):
+            self.assertIsNone(hudsource._clean_mic_master())
+
     def test_alt_tab_countdown_is_a_visible_warning(self):
         from app.capture.hudstate import evaluate
 

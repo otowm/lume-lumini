@@ -1637,6 +1637,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result[0]["speaker"], "speaker_1")
         self.assertEqual(result[0]["events"], ["risada"])
 
+    def test_audio_without_speech_skips_speaker_separation_but_keeps_events(self):
+        """Separar vozes custava minutos em áudio sem nenhuma fala transcrita."""
+        from app.backend import audio_intelligence
+
+        laugh = [{"start": 3.0, "end": 8.0, "event": "risada", "confidence": .9}]
+        with patch.object(audio_intelligence, "available", return_value=True), \
+             patch.object(audio_intelligence, "audio_channel_count", return_value=1), \
+             patch.object(audio_intelligence, "audio_stream_count", return_value=1), \
+             patch.object(audio_intelligence, "extract_audio"), \
+             patch.object(audio_intelligence, "read_pcm16", return_value=([0] * 16000, 16000)), \
+             patch.object(audio_intelligence, "diarize_file") as diarize, \
+             patch.object(audio_intelligence, "speaker_embeddings") as embeddings, \
+             patch.object(audio_intelligence, "detect_events", return_value=laugh):
+            result = audio_intelligence.analyze_video_audio(Path("silencio.wav"), [])
+            diarize.assert_not_called()
+            embeddings.assert_not_called()
+            self.assertEqual([event["event"] for event in result["events"]], ["risada"])
+
+            diarize.return_value = [{"start": 0.0, "end": 2.0, "speaker": "speaker_1"}]
+            embeddings.return_value = {"speaker_1": [0.1]}
+            spoken = audio_intelligence.analyze_video_audio(
+                Path("fala.wav"), [{"start": 0.5, "end": 1.5, "text": "oi"}])
+            diarize.assert_called_once()
+            self.assertEqual(spoken["segments"][0]["speaker"], "speaker_1")
+
     def test_adjacent_audio_events_are_consolidated(self):
         result = consolidate_events([
             {"start": 0, "end": 5, "event": "risada", "confidence": .7},
@@ -1762,6 +1787,83 @@ class ConfigTests(unittest.TestCase):
                     row = db.execute("SELECT status,error FROM captures WHERE id=?", (capture_id,)).fetchone()
             self.assertEqual(row["status"], "skipped")
             self.assertEqual(row["error"], "removido manualmente da fila")
+
+    def _audio_queue(self, root: Path, count: int) -> list[int]:
+        ids = []
+        with database.connect() as db:
+            for index in range(count):
+                audio = root / f"2026-08-06_10-0{index}-00.wav"
+                audio.write_bytes(b"audio")
+                ids.append(db.execute(
+                    "INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio',?,?,'pending')",
+                    (str(audio), f"2026-08-06T10:0{index}:00-03:00"),
+                ).lastrowid)
+        return ids
+
+    def test_next_audio_is_transcribed_while_the_current_one_is_analyzed(self):
+        """Whisper na placa e análise no processador não esperam mais um pelo outro."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"):
+                database.initialize()
+                self._audio_queue(root, 3)
+                transcribed: list[str] = []
+                second_started = threading.Event()
+
+                def transcribe(path):
+                    transcribed.append(path.name)
+                    if path.name.startswith("2026-08-06_10-01"):
+                        second_started.set()
+                    return {"title": "Áudio", "text": path.name, "app": "", "tags": [], "duration": 1, "segments": []}
+
+                overlapped = []
+
+                def analyze(path, segments, profiles):
+                    if path.name.startswith("2026-08-06_10-00"):
+                        # Ainda analisando o primeiro: o segundo já tem que estar na placa.
+                        overlapped.append(second_started.wait(5))
+                    return {"segments": [], "speakers": [], "events": [], "speaker_embeddings": {}}
+
+                with patch("app.backend.pipeline.transcribe", side_effect=transcribe), \
+                     patch("app.backend.pipeline.analyze_video_audio", side_effect=analyze), \
+                     patch("app.backend.pipeline.known_voice_profiles", return_value=[]), \
+                     patch("app.backend.pipeline.compact_saved_capture"):
+                    done = process_pending("audio", 3)
+                with database.connect() as db:
+                    rows = db.execute("SELECT status,text FROM captures ORDER BY id").fetchall()
+            self.assertEqual(overlapped, [True])
+            self.assertEqual(done, 3)
+            self.assertEqual(sorted(transcribed), sorted(set(transcribed)), "um áudio foi transcrito duas vezes")
+            self.assertEqual([row["status"] for row in rows], ["done"] * 3)
+            self.assertEqual([row["text"] for row in rows],
+                             [f"2026-08-06_10-0{index}-00.wav" for index in range(3)],
+                             "a transcrição adiantada foi gravada no áudio errado")
+
+    def test_audio_removed_from_the_queue_discards_its_early_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"):
+                database.initialize()
+                first, second = self._audio_queue(root, 2)
+
+                def analyze(path, segments, profiles):
+                    if path.name.startswith("2026-08-06_10-00"):
+                        with database.connect() as db:
+                            db.execute("UPDATE captures SET status='skipped',error='removido manualmente da fila' WHERE id=?",
+                                       (second,))
+                    return {"segments": [], "speakers": [], "events": [], "speaker_embeddings": {}}
+
+                result = {"title": "Áudio", "text": "texto", "app": "", "tags": [], "duration": 1, "segments": []}
+                with patch("app.backend.pipeline.transcribe", return_value=result), \
+                     patch("app.backend.pipeline.analyze_video_audio", side_effect=analyze) as analyzed, \
+                     patch("app.backend.pipeline.known_voice_profiles", return_value=[]), \
+                     patch("app.backend.pipeline.compact_saved_capture"):
+                    done = process_pending("audio", 2)
+                with database.connect() as db:
+                    removed = db.execute("SELECT status,text FROM captures WHERE id=?", (second,)).fetchone()
+            self.assertEqual(done, 1)
+            self.assertEqual(analyzed.call_count, 1)
+            self.assertEqual((removed["status"], removed["text"]), ("skipped", ""))
 
     def test_pipeline_queue_matches_audio_first_processing_order_and_reports_full_counts(self):
         with tempfile.TemporaryDirectory() as directory:

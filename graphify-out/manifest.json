@@ -25,13 +25,13 @@
     "semantic_hash": ""
   },
   "app/backend/pipeline.py": {
-    "mtime": 1790298499.6325688,
-    "ast_hash": "f67b876874dffff35d12986793fd07e1",
+    "mtime": 1790716978.8618891,
+    "ast_hash": "be92b40d0194118b41b9a0f4e35b8e6e",
     "semantic_hash": ""
   },
   "app/backend/test_main.py": {
-    "mtime": 1790650433.6021516,
-    "ast_hash": "a6ecef5fdfe1d3ae8b7187cb5989d242",
+    "mtime": 1790717010.670802,
+    "ast_hash": "f35067875123e76feb41584d0bc5c952",
     "semantic_hash": ""
   },
   "bin/audio-bus.sh": {
@@ -70,8 +70,8 @@
     "semantic_hash": ""
   },
   "frontend/src/main.tsx": {
-    "mtime": 1790650493.6048887,
-    "ast_hash": "660cdf5d4a42014d8b49b859695bc918",
+    "mtime": 1790652949.7389517,
+    "ast_hash": "580cacd7fe975ca74dc933f8ce0010c8",
     "semantic_hash": ""
   },
   "frontend/tsconfig.json": {
@@ -185,8 +185,8 @@
     "semantic_hash": ""
   },
   "app/capture/linux.py": {
-    "mtime": 1790546892.419552,
-    "ast_hash": "4707fba7d91bf866a194f3259ccdbd1c",
+    "mtime": 1790653696.9910023,
+    "ast_hash": "f72329665ef939e6bcefe264853c652c",
     "semantic_hash": ""
   },
   "app/capture/selftest.py": {
@@ -240,8 +240,8 @@
     "semantic_hash": ""
   },
   "app/backend/test_services.py": {
-    "mtime": 1790649021.7249327,
-    "ast_hash": "ee0739bdf16f1a414205763f42dc14a6",
+    "mtime": 1790653715.2191887,
+    "ast_hash": "4ef0e8221a27b3772434edb85425e836",
     "semantic_hash": ""
   },
   "app/capture/obs.py": {
@@ -255,8 +255,8 @@
     "semantic_hash": ""
   },
   "app/backend/audio_intelligence.py": {
-    "mtime": 1789676916.0531054,
-    "ast_hash": "9eabb872353a20981122172831e03751",
+    "mtime": 1790716926.8795192,
+    "ast_hash": "09299b9ec21e07fe265bbbe5e3172c60",
     "semantic_hash": ""
   },
   "bin/install-audio-intelligence": {
@@ -305,8 +305,8 @@
     "semantic_hash": ""
   },
   "app/capture/hudsource.py": {
-    "mtime": 1789942872.8640056,
-    "ast_hash": "f336146034d43196f256f978d0a7efc5",
+    "mtime": 1790653729.0538158,
+    "ast_hash": "becb46073036b4b78886e0074646f65d",
     "semantic_hash": ""
   },
   "app/capture/hudstate.py": {
@@ -440,8 +440,8 @@
     "semantic_hash": ""
   },
   "frontend/tests/settings.mjs": {
-    "mtime": 1790648234.422301,
-    "ast_hash": "5bbf787d4061f7ad613abea0a3cc0e4a",
+    "mtime": 1790653053.7906375,
+    "ast_hash": "d2e731ddf9e96e121239b871a6b95a50",
     "semantic_hash": ""
   },
   "app/backend/test_updater.py": {

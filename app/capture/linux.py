@@ -27,6 +27,9 @@ AUDIO_BUS = Path(os.environ.get("CAPTURA_DIA_AUDIO_BUS", HOME / "bin/audio-bus.s
 MIC_SOURCE = os.environ.get("MIC_SOURCE", "MicBus.monitor")
 DISCORD_SOURCE = os.environ.get("DISCORD_SOURCE", "DiscordBus.monitor")
 AUDIO_SOURCE = os.environ.get("AUDIO_SOURCE", "RecordBus.monitor")
+#: Fonte virtual do microfone já limpo pela supressão por IA, criada pelo
+#: ``bin/audio-bus.sh`` (``MIC_CLEAN``) — o nome é o contrato entre os dois.
+CLEAN_MIC_SOURCE = "LumeMicLimpo"
 
 
 def _mic_filter() -> str:
