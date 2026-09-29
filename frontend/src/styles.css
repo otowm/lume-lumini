@@ -549,10 +549,31 @@ main{min-width:0;flex:1;display:flex;flex-direction:column}
 .window-test.matched{border-color:rgba(82,214,166,.45);background:rgba(82,214,166,.07)}
 .window-test.matched p{color:var(--green)}
 .window-test.unmatched p{color:#eec27f}
+.mic-ai{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;padding:10px 12px;border:1px solid var(--divider);border-radius:8px;background:var(--surface2)}
+.mic-ai .check{margin:0}
+.mic-ai-missing{margin:0;font-size:10px;color:#eec27f}
+.mic-ai-missing code{font-size:10px}
+.mic-ai-vad{display:flex;flex-direction:column;gap:5px}
+.mic-ai-vad span{font-size:11px;color:var(--muted)}
+.mic-ai-vad small{font-size:10px;color:var(--muted)}
+.sound-volume{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.sound-volume span{font-size:11px;color:var(--muted)}
+.sound-preset{display:flex;align-items:flex-end;gap:8px;margin-bottom:12px}
+.sound-preset label{display:flex;flex-direction:column;gap:6px;flex:1}
+.sound-preset span{font-size:11px;color:var(--muted)}
+.sound-list{display:flex;flex-direction:column;gap:8px}
+.sound-row{display:grid;grid-template-columns:1fr auto auto auto;align-items:center;gap:8px;padding:10px 12px;border:1px solid var(--divider);border-radius:8px;background:var(--surface2)}
+.sound-row div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.sound-row strong{font-size:12px}
+.sound-row span{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sound-pick{cursor:pointer}
+.sound-pick input{display:none}
+.sound-pick.disabled{opacity:.5;pointer-events:none}
+@media (max-width:560px){.sound-row{grid-template-columns:1fr 1fr}.sound-row div{grid-column:1/-1}}
 .video-advanced-toggle{display:flex;justify-content:flex-end;margin:10px 2px -3px}
 .video-advanced-toggle .ghost{padding:4px 8px;border-color:transparent;color:var(--muted);font-size:10px}
 .video-advanced-toggle .ghost:hover,.video-advanced-toggle .ghost[aria-pressed=true]{color:var(--accent3);background:rgba(141,124,245,.08)}
-.video-advanced-panel{margin-top:14px;padding:12px;border:1px dashed var(--divider);border-radius:9px;background:rgba(0,0,0,.08)}
+.video-advanced-panel{margin-top:12px;padding:12px;border:1px dashed var(--divider);border-radius:9px;background:rgba(0,0,0,.08)}
 .app-confirm-modal{width:min(510px,calc(100vw - 48px))}
 .app-confirm-candidate{display:flex;align-items:center;gap:12px;padding:13px;border:1px solid var(--divider);border-radius:9px;background:var(--surface2)}
 .app-confirm-candidate>span{width:42px;height:42px;flex:none;display:grid;place-items:center;border-radius:10px;background:rgba(141,124,245,.16);color:var(--accent3);font-size:18px;font-weight:700}
@@ -571,6 +592,26 @@ main{min-width:0;flex:1;display:flex;flex-direction:column}
 .change-test-result.capture strong{color:var(--green)}
 .change-test-result.capture i b{background:var(--green)}
 .change-test-result.skip strong{color:#eec27f}
+.mic-gate{margin-top:14px}
+.mic-gate-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px;font-size:11px;color:var(--muted)}
+.mic-gate-head strong{font-size:12px;color:var(--text);font-variant-numeric:tabular-nums}
+/* Nível ao vivo e limite na mesma barra: à esquerda do marcador (--gate) o
+   portão fecha, então o trecho do nível que cai ali fica âmbar e o que passa
+   dele fica verde. O range por cima é transparente, só o marcador aparece. */
+.mic-gate-track{position:relative;height:18px;border-radius:99px;background:linear-gradient(to right,rgba(0,0,0,.35) 0 var(--gate),rgba(233,233,237,.07) var(--gate) 100%);box-shadow:inset 0 0 0 1px var(--divider)}
+.mic-gate-level{position:absolute;inset:3px;border-radius:99px;background:linear-gradient(to right,#b88a45 0 var(--gate),var(--green) var(--gate) 100%);clip-path:inset(0 calc(100% - var(--level)) 0 0 round 99px);transition:clip-path .12s linear}
+.mic-gate-track input[type=range]{position:absolute;inset:-4px 0;width:100%;height:calc(100% + 8px);margin:0;background:transparent;appearance:none;-webkit-appearance:none;cursor:ew-resize}
+.mic-gate-track input[type=range]::-webkit-slider-runnable-track{background:transparent;height:100%}
+.mic-gate-track input[type=range]::-moz-range-track{background:transparent}
+.mic-gate-track input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:6px;height:26px;border-radius:3px;background:#f4f1ff;box-shadow:0 0 0 2px rgba(20,20,28,.85),0 2px 6px rgba(0,0,0,.4)}
+.mic-gate-track input[type=range]::-moz-range-thumb{width:6px;height:26px;border:0;border-radius:3px;background:#f4f1ff;box-shadow:0 0 0 2px rgba(20,20,28,.85),0 2px 6px rgba(0,0,0,.4)}
+.mic-gate-track input[type=range]:focus-visible{outline:0}
+.mic-gate-track input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 2px rgba(20,20,28,.85),0 0 0 5px rgba(141,124,245,.45)}
+.mic-gate>small{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mic-gate-status b{width:7px;height:7px;border-radius:50%;background:#b88a45}
+.mic-gate-status.open{color:var(--green)}
+.mic-gate-status.open b{background:var(--green)}
+.video-settings .mic-settings>.help,.mic-settings>.help{margin:12px 0 0;font-size:11px;line-height:1.5;color:var(--muted)}
 .ai-settings{margin-top:15px;padding:12px;border:1px solid rgba(82,214,166,.3);border-radius:8px;background:rgba(82,214,166,.05)}
 .ai-settings h3{font-size:13px;margin:0 0 10px}
 .ai-settings .check{align-items:flex-start;margin:9px 0}
@@ -1087,3 +1128,36 @@ button.tile:hover{border-color:rgba(141,124,245,.45);background:linear-gradient(
 .update-notice { padding: 8px 12px; font-size: 12px; }
 .update-notice p { line-height: 1.45; overflow-wrap: anywhere; }
 .update-notice button { white-space: normal; margin: 4px 0; }
+
+/* Aba Vídeo seletivo: cada grupo com título à esquerda e ação à direita. */
+.video-settings>.settings-group:first-child{margin-top:0}
+.video-settings .settings-group-title{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}
+.video-settings .settings-group-title h3{margin:0}
+.video-settings .settings-group-title p{margin:4px 0 0;max-width:68ch;font-size:11px;line-height:1.5;color:var(--muted)}
+.video-settings .settings-group-title p a{color:var(--accent3)}
+.video-settings .settings-group>.help{margin:10px 0 0;font-size:11px;line-height:1.5}
+.video-settings .settings-group-title>div:first-child{flex:1;min-width:0}
+.video-recorder-switch .settings-group-title{align-items:center;margin-bottom:0}
+/* Atalho numa linha própria: campo e botão lado a lado, dica embaixo. */
+.video-settings .hotkey-field{grid-column:1/-1;grid-template-columns:minmax(0,1fr) auto;align-items:end;column-gap:8px;row-gap:5px}
+.video-settings .hotkey-field button{padding:9px 13px}
+.video-settings .hotkey-field small{grid-column:1/-1;font-size:11px}
+.video-settings .check{align-items:flex-start}
+.video-settings .check>span:has(strong){display:flex;flex-direction:column;gap:2px}
+.video-settings .check strong{font-size:12px}
+.video-settings .check small{font-size:11px;color:var(--muted)}
+.video-settings .check+.form-grid{margin-top:12px}
+.video-recorder-switch .switch-row{flex:none;font-size:12px}
+.app-rule-actions{display:flex;flex:none;align-items:center;gap:6px}
+.app-rule-actions .ghost{padding:6px 9px;border-color:transparent;color:var(--muted);font-size:11px}
+.app-rule-actions .ghost:hover,.app-rule-actions .ghost[aria-pressed=true]{color:var(--accent3);background:rgba(141,124,245,.08)}
+.video-mode-choice{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.video-mode-choice label{display:flex;align-items:flex-start;gap:9px;padding:10px 11px;border:1px solid var(--divider);border-radius:9px;background:rgba(0,0,0,.18);cursor:pointer;transition:border-color .15s,background .15s}
+.video-mode-choice label:hover{border-color:rgba(141,124,245,.35)}
+.video-mode-choice label.active{border-color:rgba(141,124,245,.6);background:rgba(141,124,245,.1)}
+.video-mode-choice input{margin:2px 0 0;accent-color:var(--accent)}
+.video-mode-choice span{display:flex;flex-direction:column;gap:3px}
+.video-mode-choice strong{font-size:12px}
+.video-mode-choice small{font-size:11px;line-height:1.4;color:var(--muted)}
+.video-quality-grid{grid-template-columns:repeat(3,1fr)}
+@media(max-width:620px){.video-mode-choice,.video-quality-grid{grid-template-columns:1fr}.video-settings .settings-group-title{flex-direction:column}}

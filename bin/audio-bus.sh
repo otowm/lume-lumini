@@ -40,6 +40,13 @@ if [[ -z "${C2_EXCLUDE:-}" && -r "$_c2_config" ]]; then
   C2_EXCLUDE="$(awk -F= '$1 == "C2_EXCLUDE" {v=$2; gsub(/^["'"'"']|["'"'"']$/, "", v); print v}' "$_c2_config")"
 fi
 C2_EXCLUDE="${C2_EXCLUDE:-}"
+#: Fonte virtual com o microfone já limpo pelo RNNoise (plugin LADSPA do pacote
+#: noise-suppression-for-voice). O `afftdn` do gravador só tira ruído constante;
+#: teclado e mouse são estalos, e é a rede neural com detecção de voz que os
+#: separa da fala. É a mesma supressão que o OBS aplica no Windows.
+MIC_CLEAN=LumeMicLimpo
+AUDIO_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia/audio.conf"
+
 #: De quanto em quanto tempo o modo watch refaz os taps (Discord e apps).
 WATCH_INTERVAL="${WATCH_INTERVAL:-3}"
 
@@ -66,7 +73,16 @@ unload_bus() {
   done
 }
 
+unload_clean_mic() {
+  local id
+  for id in $(pactl list short modules 2>/dev/null |
+      awk -v n="$MIC_CLEAN" '$2 == "module-ladspa-source" && $0 ~ ("source_name=" n "([[:space:]]|$)") {print $1}'); do
+    pactl unload-module "$id" >/dev/null 2>&1 || true
+  done
+}
+
 unload_all() {
+  unload_clean_mic
   unload_bus RecordBus
   unload_bus DiscordBus
   unload_bus MicBus
@@ -99,7 +115,8 @@ make_null_sink() {
 selected_mic() {
   local default source
   default="$(pactl get-default-source 2>/dev/null || true)"
-  if [[ -n "$default" && "$default" != *.monitor ]] && source_exists "$default"; then
+  if [[ -n "$default" && "$default" != *.monitor && "$default" != "$MIC_CLEAN" ]] \
+      && source_exists "$default"; then
     echo "$default"
     return 0
   fi
@@ -192,6 +209,62 @@ link_ports() {
   pw-link "$1" "$2" 2>/dev/null || true
 }
 
+rnnoise_plugin() {
+  local dir
+  # Como no PipeWire: com LADSPA_PATH definido, só ele vale.
+  local path="${LADSPA_PATH:-/usr/lib/ladspa:/usr/lib64/ladspa:/usr/local/lib/ladspa}"
+  for dir in ${path//:/ }; do
+    [[ -f "$dir/librnnoise_ladspa.so" ]] && { echo "$dir/librnnoise_ladspa.so"; return 0; }
+  done
+  return 1
+}
+
+# "<ligado> <limite de voz>" do audio.conf. Relido a cada volta do watch: mudar
+# na interface vale em segundos, sem reiniciar gravador nenhum.
+clean_mic_settings() {
+  local enabled=true threshold=80
+  if [[ -r "$AUDIO_CONF" ]]; then
+    enabled="$(awk -F= '$1 == "MIC_AI_DENOISE_ENABLED" {v=$2} END {print v}' "$AUDIO_CONF")"
+    threshold="$(awk -F= '$1 == "MIC_VAD_THRESHOLD" {v=$2} END {print v}' "$AUDIO_CONF")"
+  fi
+  [[ "$enabled" == false ]] || enabled=true
+  [[ "$threshold" =~ ^[0-9]+$ ]] && ((threshold <= 99)) || threshold=80
+  echo "$enabled $threshold"
+}
+
+# Fonte que alimenta o MicBus: o microfone limpo quando a supressão por IA está
+# ligada e o plugin existe; o microfone cru em qualquer outro caso — faltar o
+# plugin nunca pode deixar a faixa muda.
+mic_feed() {
+  local mic="$1" enabled threshold plugin control current
+  read -r enabled threshold < <(clean_mic_settings)
+  if [[ "$enabled" != true ]] || ! plugin="$(rnnoise_plugin)"; then
+    unload_clean_mic
+    echo "$mic"
+    return 0
+  fi
+  # Na ordem das portas do plugin: limite de voz, espera depois da fala (não
+  # corta o fim das palavras), espera retroativa (não come o começo), reservado
+  # e mistura do sinal cru — zero, senão o teclado volta junto.
+  control="$threshold,200,20,0,0"
+  current="$(pactl list short modules 2>/dev/null | awk -v n="$MIC_CLEAN" \
+    '$2 == "module-ladspa-source" && $0 ~ ("source_name=" n "([[:space:]]|$)")')"
+  # Troca de headset ou de limite: o filtro é refeito sobre o microfone novo.
+  if [[ -n "$current" && ( "$current" != *"master=$mic "* || "$current" != *"control=$control"* ) ]]; then
+    unload_clean_mic
+    current=''
+  fi
+  if [[ -z "$current" ]] && ! pactl load-module module-ladspa-source \
+      source_name="$MIC_CLEAN" master="$mic" plugin="$plugin" label=noise_suppressor_mono \
+      control="$control" rate=48000 channels=1 \
+      source_properties="device.description=$MIC_CLEAN node.virtual=true" >/dev/null 2>&1; then
+    echo "AVISO: não consegui ligar a supressão por IA; o MicBus segue com o microfone cru." >&2
+    echo "$mic"
+    return 0
+  fi
+  echo "$MIC_CLEAN"
+}
+
 # Deriva o microfone para o MicBus. Usa pw-link, e não module-loopback, para
 # que as três faixas percorram caminhos de latência equivalente: com o loopback
 # de 200 ms só o mic chegava atrasado, e o WAV de 3 canais saía desalinhado.
@@ -200,6 +273,7 @@ tap_mic() {
   sink_exists MicBus || return 0
   local mic port linked
   mic="$(selected_mic)" || return 0
+  mic="$(mic_feed "$mic")"
   # Trocar de headset no meio da sessão deixaria o anterior ligado, porque o
   # watch só acrescenta links: o c0 ganharia duas fontes, uma delas muda. Solta
   # o que não for do mic escolhido antes de ligar o que for.

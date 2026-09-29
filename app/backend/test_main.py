@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import os
 import json
@@ -251,6 +252,59 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(video["description"], "")
             self.assertEqual(video["captured_at"], "2026-08-23T10:00:10-03:00")
             self.assertEqual((session["status"], session["summary"]), ("pending", ""))
+
+    def test_trim_to_new_file_keeps_the_original_and_its_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "clip.mkv"
+            source.write_bytes(b"original")
+            db_path = root / "lume.sqlite3"
+            with patch.object(database, "DB_PATH", db_path):
+                database.initialize()
+                with database.connect() as db:
+                    session_id = db.execute("INSERT INTO video_sessions(name,status,summary) VALUES('Jogo','done','resumo')").lastrowid
+                    video_id = db.execute(
+                        """INSERT INTO video_segments(source_path,captured_at,status,description,app,title,duration_seconds,session_id)
+                           VALUES(?,'2026-08-23T10:00:00-03:00','done','antiga','osu!','Partida',120,?)""",
+                        (str(source), session_id),
+                    ).lastrowid
+                    db.executemany(
+                        "INSERT INTO video_markers(video_id,offset_seconds,title) VALUES(?,?,?)",
+                        [(video_id, 2, "fora"), (video_id, 72, "dentro"), (video_id, 100, "fora")],
+                    )
+
+                def fake_run(command, timeout=0):
+                    Path(command[-1]).write_bytes(b"trimmed")
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                with patch.object(backend_main, "safe_video_path", return_value=source), \
+                     patch.object(backend_main, "probe_video_duration", return_value=120), \
+                     patch.object(backend_main, "run", side_effect=fake_run), \
+                     patch.object(backend_main, "media_source_key", side_effect=str), \
+                     patch.object(backend_main, "delete_video_caches") as caches:
+                    result = backend_main.trim_video(video_id, backend_main.VideoTrimRequest(
+                        start_seconds=70, end_seconds=95, as_new_file=True))
+
+                with database.connect() as db:
+                    original = db.execute("SELECT * FROM video_segments WHERE id=?", (video_id,)).fetchone()
+                    copy = db.execute("SELECT * FROM video_segments WHERE id=?", (result["id"],)).fetchone()
+                    original_markers = db.execute("SELECT COUNT(*) FROM video_markers WHERE video_id=?", (video_id,)).fetchone()[0]
+                    markers = db.execute("SELECT offset_seconds,title FROM video_markers WHERE video_id=?", (result["id"],)).fetchall()
+                    session = db.execute("SELECT status FROM video_sessions WHERE id=?", (session_id,)).fetchone()
+            target = root / "clip_corte_1m10s-1m35s.mkv"
+            caches.assert_not_called()
+            self.assertEqual(source.read_bytes(), b"original")
+            self.assertEqual(target.read_bytes(), b"trimmed")
+            self.assertEqual(result["name"], target.name)
+            self.assertNotEqual(result["id"], video_id)
+            self.assertEqual((original["status"], original["description"], original["duration_seconds"]), ("done", "antiga", 120))
+            self.assertEqual(original_markers, 3)
+            self.assertEqual(session["status"], "done")
+            self.assertEqual(copy["source_path"], str(target))
+            self.assertEqual((copy["title"], copy["app"], copy["status"]), ("Partida · corte", "osu!", "pending"))
+            self.assertEqual(copy["duration_seconds"], 25)
+            self.assertEqual(copy["captured_at"], "2026-08-23T10:01:10-03:00")
+            self.assertEqual([(row["offset_seconds"], row["title"]) for row in markers], [(2, "dentro")])
 
     def test_video_audio_cache_lives_under_selected_media_root(self):
         self.assertEqual(backend_main.VIDEO_AUDIO_TRACK_DIR.parent.parent, backend_main.MEDIA_ROOT)
@@ -766,6 +820,37 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(recording["started_at"], 1786200000.0)
             self.assertFalse(recording["pausing_captures"])
             self.assertTrue(recording["pause_other_captures"])
+
+    def test_end_video_session_only_during_the_focus_countdown(self):
+        """"Forçar encerramento" só existe enquanto a folga fora do jogo corre."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            flag = root / "lume-video-active"
+            request = root / "lume-video-end-session"
+            now = 1_800_000_000.0
+            flag.write_text(json.dumps({"window": "Jogo", "started_at": now - 60,
+                                        "focus_grace_deadline": None}), encoding="utf-8")
+            with (
+                patch.object(backend_main, "VIDEO_CONFIG", root / "missing.conf"),
+                patch.object(backend_main, "video_activity_flag", return_value=flag),
+                patch.object(backend_main, "video_recording_flag", return_value=root / "pausing"),
+                patch.object(backend_main, "video_end_request_flag", return_value=request),
+                patch.object(backend_main.time, "time", return_value=now),
+                patch.object(backend_main, "unit_state", return_value={"active": True}),
+            ):
+                os.utime(flag, (now, now))
+                self.assertIsNone(selective_video_status()["focus_grace_remaining"])
+                with self.assertRaises(backend_main.HTTPException) as failure:
+                    backend_main.end_video_session()
+                self.assertEqual(failure.exception.status_code, 409)
+                self.assertFalse(request.exists())
+
+                flag.write_text(json.dumps({"window": "Jogo", "started_at": now - 60,
+                                            "focus_grace_deadline": now + 42}), encoding="utf-8")
+                os.utime(flag, (now, now))
+                result = backend_main.end_video_session()
+            self.assertEqual(result["focus_grace_remaining"], 42.0)
+            self.assertTrue(request.exists())
 
     def test_selective_video_status_expires_abandoned_activity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2265,10 +2350,10 @@ class VideoWindowTestEndpointTests(unittest.TestCase):
     encontrar.
     """
 
-    def _test(self, window: str, patterns: list[str], backend_name: str = "linux") -> dict:
+    def _test(self, window: str, patterns: list[str], backend_name: str = "linux", **extra) -> dict:
         from app.backend.main import VideoWindowTest, test_video_window
 
-        backend = SimpleNamespace(name=backend_name, active_window=lambda: window)
+        backend = SimpleNamespace(name=backend_name, active_window=lambda: window, **extra)
         with patch.object(backend_main, "get_backend", return_value=backend):
             return test_video_window(VideoWindowTest(patterns=patterns))
 
@@ -2289,6 +2374,20 @@ class VideoWindowTestEndpointTests(unittest.TestCase):
                                    ["exe:^steam_app_[0-9]+$"])["matched"])
         self.assertFalse(self._test("Counter-Strike 2 | cs2.exe",
                                     ["class:cs2"], backend_name="windows")["matched"])
+
+
+    def test_reports_the_game_monitor_resolution(self):
+        """Adicionar um jogo usa a resolução do monitor dele, não 1920x1080 fixo."""
+        result = self._test("Jogo | jogo.exe", [], backend_name="windows",
+                            active_monitor_resolution=lambda: "1600x900")
+        self.assertEqual(result["monitor_resolution"], "1600x900")
+
+    def test_monitor_resolution_failure_does_not_break_the_window_test(self):
+        def broken():
+            raise OSError("sem monitor")
+        result = self._test("Jogo | jogo.exe", [], active_monitor_resolution=broken)
+        self.assertIsNone(result["monitor_resolution"])
+        self.assertEqual(result["executable"], "jogo.exe")
 
 
 class VideoSettingsRoundTripTests(unittest.TestCase):
@@ -2347,6 +2446,92 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
         self.assertEqual(after["hud_placement"], "second")
         self.assertEqual(after["hud_hotkey"], "Ctrl+Shift+F8")
         self.assertEqual(after["focus_grace_seconds"], 20)
+        self.assertEqual(after["sound_volume"], 100)
+
+    def test_sound_volume_survives_a_save(self):
+        self.assertEqual(self._round_trip("VIDEO_SOUND_VOLUME=35\n")["sound_volume"], 35)
+
+
+class AudioSettingsTests(unittest.TestCase):
+    def test_ai_denoise_is_on_by_default_and_survives_a_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "audio.conf"
+            with patch.object(backend_main, "AUDIO_CONFIG", config), \
+                 patch.object(backend_main, "rnnoise_plugin_installed", return_value=True):
+                before = backend_main.get_audio_settings()
+                self.assertTrue(before.mic_ai_denoise_enabled)
+                self.assertEqual(before.mic_vad_threshold, 80)
+                self.assertTrue(before.mic_ai_denoise_available)
+                changed = before.model_copy(update={"mic_ai_denoise_enabled": False, "mic_vad_threshold": 91})
+                backend_main.update_audio_settings(changed, backend_main.BackgroundTasks())
+                after = backend_main.get_audio_settings()
+            self.assertFalse(after.mic_ai_denoise_enabled)
+            self.assertEqual(after.mic_vad_threshold, 91)
+            self.assertIn("MIC_AI_DENOISE_ENABLED=false", config.read_text(encoding="utf-8"))
+
+
+class ConfirmationSoundTests(unittest.TestCase):
+    """Sons do atalho: o arquivo enviado substitui o padrão, e remover o devolve."""
+
+    def setUp(self):
+        from app.capture import sounds
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        patcher = patch.object(sounds, "SOUNDS_DIR", Path(self.directory.name) / "sons")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sounds = sounds
+
+    def _upload(self, slot: str, name: str, data: bytes):
+        request = SimpleNamespace(stream=lambda: _chunks(data))
+        return asyncio.run(backend_main.upload_confirmation_sound(slot, request, name=name))
+
+    def test_upload_replaces_the_previous_file_and_reset_restores_default(self):
+        self._upload("marcador", "plim.wav", b"RIFF1")
+        result = self._upload("marcador", "ding.ogg", b"OggS2")
+        item = next(item for item in result["items"] if item["slot"] == "marcador")
+        self.assertEqual(item, {"slot": "marcador", "label": "Marcador",
+                                "custom": True, "name": "marcador.ogg"})
+        self.assertEqual(sorted(p.name for p in self.sounds.SOUNDS_DIR.iterdir()), ["marcador.ogg"])
+
+        backend_main.reset_confirmation_sound("marcador")
+        self.assertIsNone(self.sounds.custom_sound("marcador"))
+
+    def test_preset_fills_every_slot_with_the_theme_sounds(self):
+        result = backend_main.apply_confirmation_sound_preset("minimal")
+        self.assertIn("minimal", result["presets"])
+        self.assertTrue(all(item["custom"] for item in result["items"]))
+        preset = self.sounds.PRESETS_DIR / "minimal"
+        self.assertEqual(self.sounds.custom_sound("clipe").read_bytes(),
+                         (preset / "toggle-on.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("clipe-estendido").read_bytes(),
+                         (preset / "check.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("longa-inicio").read_bytes(),
+                         (preset / "double-click.ogg").read_bytes())
+        self.assertEqual(self.sounds.custom_sound("longa-fim").read_bytes(),
+                         (preset / "deselect.ogg").read_bytes())
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            backend_main.apply_confirmation_sound_preset("../../etc")
+        self.assertEqual(failure.exception.status_code, 404)
+
+    def test_every_preset_has_all_its_sounds(self):
+        for theme in self.sounds.presets():
+            for name in set(self.sounds.PRESET_SOUNDS.values()):
+                self.assertTrue((self.sounds.PRESETS_DIR / theme / f"{name}.ogg").is_file(),
+                                f"{theme}/{name}.ogg")
+
+    def test_rejects_unknown_slots_and_formats(self):
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            self._upload("marcador", "virus.exe", b"MZ")
+        self.assertEqual(failure.exception.status_code, 422)
+        with self.assertRaises(backend_main.HTTPException) as failure:
+            self._upload("../video", "plim.wav", b"RIFF")
+        self.assertEqual(failure.exception.status_code, 404)
+
+
+async def _chunks(data: bytes):
+    yield data
 
 
 class PromptSettingsTests(unittest.TestCase):
@@ -3252,6 +3437,7 @@ class ModoLuminiTests(unittest.TestCase):
                         "/api/share/upload", "/api/video-sessions", "/api/videos/12/markers",
                         "/api/videos/12/trim", "/api/videos/12/captured-at",
                         "/api/videos/preserve", "/api/settings/video", "/api/settings/storage",
+                        "/api/settings/audio",
                         "/api/editing", "/api/status", "/api/health", "/api/files"):
             self.assertFalse(backend_main.rota_de_ia(caminho), caminho)
 
@@ -3267,11 +3453,12 @@ class ModoLuminiTests(unittest.TestCase):
         gravacao = {
             "/api/updates", "/api/updates/prepare", "/api/updates/cancel", "/api/updates/install",
             "/api/health", "/api/status", "/api/capture/{action}", "/api/settings/screen",
+            "/api/settings/audio", "/api/settings/audio/mic-level",
             "/api/settings/sensitive", "/api/settings/storage", "/api/settings/video",
             "/api/settings/cleanup", "/api/test/screen", "/api/test/screen-change/start",
             "/api/test/screen-change/compare", "/api/test/video-window", "/api/test/audio",
             "/api/screenshot", "/api/audio", "/api/video", "/api/video-download",
-            "/api/video-thumbnail", "/api/video-audio-tracks", "/api/video-audio-track",
+            "/api/video-thumbnail", "/api/video-audio-tracks", "/api/video-audio-track", "/api/video/end-session",
             "/api/share/light", "/api/video-light", "/api/share/upload",
             "/api/share/links/{link_id}", "/api/videos", "/api/videos/import",
             "/api/video-sessions", "/api/video-sessions/join", "/api/video-sessions/{session_id}",
@@ -3281,7 +3468,8 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/files/unprocessed/all", "/api/retention/{kind}/{item_id}",
             "/api/media/raw/unkept", "/api/editing", "/api/editing/video/{video_id}",
             "/api/editing/session/{session_id}", "/api/editing/{name}", "/api/editing/open",
-            "/api/settings/steamgriddb", "/api/game-icons", "/api/game-icons/{file_name}",
+            "/api/settings/steamgriddb", "/api/settings/video/sounds", "/api/settings/video/sounds/{slot}",
+            "/api/settings/video/sounds/{slot}/test", "/api/settings/video/sounds/preset/{theme}", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
         }
         sem_classificacao = []
         for rota in backend_main.app.routes:

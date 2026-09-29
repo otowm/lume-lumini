@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -38,6 +40,7 @@ MISSING_RETRY_SECONDS = 7 * 86400
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 TIMEOUT = 8
 USER_AGENT = "Lume-GameIcons"
+_HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 Kind = Literal["icon", "cover"]
 _lock = threading.Lock()
@@ -64,10 +67,21 @@ def save_key(key: str) -> None:
             pass
     else:
         KEY_FILE.unlink(missing_ok=True)
+    # Quem ficou sem ícone por falta de chave merece outra chance já.
+    forget_missing()
+
+
+def forget_missing() -> int:
+    """Esquece os jogos marcados como "sem ícone", para buscá-los já.
+
+    Sem isso, um jogo não encontrado só é perguntado de novo depois de
+    ``MISSING_RETRY_SECONDS``. Devolve quantos voltam para a fila.
+    """
     with _lock:
         index = _read_index()
-        # Quem ficou sem ícone por falta de chave merece outra chance já.
-        _write_index({name: entry for name, entry in index.items() if entry.get("file")})
+        kept = {name: entry for name, entry in index.items() if entry.get("file")}
+        _write_index(kept)
+    return len(index) - len(kept)
 
 
 def verify_key(key: str) -> bool | None:
@@ -156,8 +170,32 @@ def _from_steam(name: str) -> tuple[str, Kind] | None:
     return f"{STEAM_ASSETS}/{int(match['id'])}/library_600x900.jpg", "cover"
 
 
+def _ico_to_png(body: bytes) -> bytes:
+    """Converte um ``.ico`` na sua maior imagem, em PNG.
+
+    Muitos jogos só têm ícone em ``.ico`` no SteamGridDB — Sea of Thieves, por
+    exemplo —, e o navegador não mostra o formato de forma confiável. Recusá-lo
+    deixava o jogo marcado como "sem ícone" por uma semana. O ffmpeg já está em
+    qualquer instalação (é o gravador) e escolhe sozinho a maior resolução.
+    """
+    # Arquivo, não pipe: o demuxer de .ico pula pelo índice de imagens, e numa
+    # entrada sem seek ele desiste em vários ícones reais ("Invalid data").
+    with tempfile.TemporaryDirectory(prefix="lume-ico-") as directory:
+        source = Path(directory) / "icone.ico"
+        source.write_bytes(body)
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(source),
+             "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"],
+            capture_output=True, timeout=20, creationflags=_HIDDEN_PROCESS)
+    if result.returncode != 0 or not result.stdout.startswith(b"\x89PNG"):
+        raise ValueError("não foi possível converter o .ico")
+    return result.stdout
+
+
 def _download(url: str, name: str) -> str:
     body = _get(url)
+    if body.startswith(b"\x00\x00\x01\x00"):
+        body = _ico_to_png(body)
     if body.startswith(b"\x89PNG"):
         suffix = "png"
     elif body.startswith(b"\xff\xd8"):

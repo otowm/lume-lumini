@@ -38,8 +38,8 @@ from ..capture.base import format_video_app_rule, parse_video_app_rule
 from ..capture.imagediff import compare_images
 from .database import connect, initialize, row_dict
 from .audio_intelligence import embedding_for_sample
-from .main_paths import AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
-from .runtime import VIDEO_ACTIVITY_FRESH_SECONDS, pipeline_pause_flag, video_activity_flag, video_recording_flag
+from .main_paths import AUDIO_CONFIG, AUDIO_DIR, CLIPS_DIR, CONFIG_DIR, DATA_ROOT, DB_PATH, EDIT_DIR, MEDIA_CACHE_DIR, MEDIA_ROOT, video_game_label, SCREEN_CONFIG, SCREEN_DIR, SENSITIVE_FILE, STORAGE_CONFIG, VIDEO_DIR, media_source_key, media_source_name, resolve_media_source, unlink_with_retry
+from .runtime import VIDEO_ACTIVITY_FRESH_SECONDS, pipeline_pause_flag, video_activity_flag, video_end_request_flag, video_recording_flag
 from .retention import cleanup_processed_capture_media, cleanup_ready_days, cleanup_settings, save_cleanup_settings
 from . import editing, game_icons, mode, prompts, sharing, tags as tag_vocabulary
 from .services import ActionResult, get_manager
@@ -66,8 +66,9 @@ ALLOWED_CONFIG = {
     "VIDEO_ANALYSIS_PROFILE","VIDEO_SCAN_INTERVAL_SECONDS","VIDEO_MAX_KEYFRAMES","VIDEO_FOCUS_GRACE_SECONDS",
     "VIDEO_WEB_SEARCH_ENABLED","SEARXNG_URL","VIDEO_WEB_SEARCH_SAFETY_LIMIT","AI_THINKING_ENABLED",
     "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_KEY_CODE","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
-    "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND",
+    "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND","VIDEO_SOUND_VOLUME",
     "VIDEO_RESOLVE_FPS","VIDEO_RESOLVE_START_TIMECODE",
+    "MIC_DENOISE_ENABLED","MIC_GATE_THRESHOLD_DB","MIC_AI_DENOISE_ENABLED","MIC_VAD_THRESHOLD",
 }
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
@@ -251,6 +252,28 @@ class ScreenSettings(BaseModel):
     privacy_fail_closed: bool
 
 
+class AudioSettings(BaseModel):
+    mic_denoise_enabled: bool
+    mic_gate_threshold_db: float = Field(ge=-60, le=-10)
+    # Supressão por IA (RNNoise com detecção de voz) antes do MicBus, no Linux.
+    # Tira teclado e mouse, que o `afftdn` não pega por serem estalos.
+    mic_ai_denoise_enabled: bool = True
+    # Confiança mínima de que é voz, em %; abaixo disso o microfone fica mudo.
+    mic_vad_threshold: int = Field(default=80, ge=0, le=99)
+    # Só leitura: o plugin está instalado? ``None`` onde não se aplica (no
+    # Windows o OBS já usa RNNoise na supressão comum).
+    mic_ai_denoise_available: bool | None = None
+
+
+def rnnoise_plugin_installed() -> bool | None:
+    if os.name == "nt":
+        return None
+    # Como no PipeWire: com LADSPA_PATH definido, só ele vale.
+    path = os.environ.get("LADSPA_PATH") or "/usr/lib/ladspa:/usr/lib64/ladspa:/usr/local/lib/ladspa"
+    dirs = [directory for directory in path.split(":") if directory]
+    return any((Path(directory) / "librnnoise_ladspa.so").is_file() for directory in dirs)
+
+
 class SensitiveWindows(BaseModel):
     patterns: list[str] = Field(max_length=200)
 
@@ -332,6 +355,8 @@ class ShareUploadRequest(BaseModel):
 class VideoTrimRequest(BaseModel):
     start_seconds: float = Field(ge=0, le=86400)
     end_seconds: float = Field(gt=0, le=86400)
+    # Grava o trecho num arquivo novo e deixa o original como está.
+    as_new_file: bool = False
 
 
 class SpeakerLabelUpdate(BaseModel):
@@ -504,6 +529,8 @@ class VideoSettings(BaseModel):
     hud_corner: Literal["top-left", "top-right", "bottom-left", "bottom-right"] = "top-right"
     hud_hotkey: str = Field(default="Ctrl+Shift+F8", pattern=r"^[A-Za-z0-9+_-]{1,40}$")
     hud_sound: bool = True
+    # Volume dos sons de confirmação do atalho; 0 os desliga.
+    sound_volume: int = Field(default=100, ge=0, le=100)
     resolve_fps: int = Field(default=0, ge=0, le=120)
     resolve_start_timecode: str = Field(default="01:00:00:00", pattern=r"^\d{2}:[0-5]\d:[0-5]\d:\d{2}$")
     patterns: list[str] = Field(max_length=100)
@@ -687,6 +714,12 @@ def _restart_screen_runtime() -> None:
     _report_runtime_failure("captura de tela", service_action("try-restart", ["captura-dia-tela.service"], timeout=20))
 
 
+def _restart_audio_runtime() -> None:
+    # grava-audio.sh só lê audio.conf ao subir; sem religar o filtro do
+    # microfone continuaria com o valor antigo até a próxima sessão.
+    _report_runtime_failure("captura de áudio", service_action("try-restart", ["captura-dia-audio.service"], timeout=20))
+
+
 def storage_payload(root: Path) -> dict:
     existing = root
     while not existing.exists() and existing != existing.parent:
@@ -758,7 +791,92 @@ def get_video_settings() -> dict:
     pattern_fps={pattern:fps for pattern,_mode,fps,_geometry,_source in parsed_rules}
     pattern_geometry={pattern:geometry for pattern,_mode,_fps,geometry,_source in parsed_rules}
     pattern_sources={pattern:source for pattern,_mode,_fps,_geometry,source in parsed_rules}
-    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","encoder":config.get("VIDEO_ENCODER","auto") if config.get("VIDEO_ENCODER","auto") in {"auto","gpu","cpu"} else "auto","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_key_code":config.get("VIDEO_MARKER_KEY_CODE",""),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+    return {"enabled":config.get("VIDEO_ENABLED","false")=="true","codec":"hevc" if config.get("VIDEO_CODEC","h264").lower() in {"hevc","h265"} else "h264","encoder":config.get("VIDEO_ENCODER","auto") if config.get("VIDEO_ENCODER","auto") in {"auto","gpu","cpu"} else "auto","capture_mode":default_mode,"replay_seconds":int(config.get("VIDEO_REPLAY_SECONDS","60")),"fps":default_fps,"geometry":default_geometry,"segment_seconds":int(config.get("VIDEO_SEGMENT_SECONDS","60")),"sample_frames":int(config.get("VIDEO_SAMPLE_FRAMES","6")),"sample_geometry":config.get("VIDEO_SAMPLE_GEOMETRY","960x540"),"retention_minutes":int(config.get("VIDEO_RETENTION_MINUTES","60")),"delete_after_description":config.get("DELETE_AFTER_DESCRIPTION","false")=="true","pause_other_captures":config.get("PAUSE_OTHER_CAPTURES","true")=="true","focus_grace_seconds":int(config.get("VIDEO_FOCUS_GRACE_SECONDS","20")),"analysis_profile":config.get("VIDEO_ANALYSIS_PROFILE","detailed"),"scan_interval_seconds":float(config.get("VIDEO_SCAN_INTERVAL_SECONDS","2")),"max_keyframes":int(config.get("VIDEO_MAX_KEYFRAMES","80")),"web_search_enabled":config.get("VIDEO_WEB_SEARCH_ENABLED","false")=="true","searxng_url":config.get("SEARXNG_URL","http://127.0.0.1:8889"),"web_search_safety_limit":int(config.get("VIDEO_WEB_SEARCH_SAFETY_LIMIT","50")),"thinking_enabled":config.get("AI_THINKING_ENABLED","false")=="true","vision_model":os.environ.get("LUME_VISION_MODEL") or config.get("LUME_VISION_MODEL","qwen3-vl-ctx:latest"),"text_model":os.environ.get("LUME_TEXT_MODEL") or config.get("LUME_TEXT_MODEL","qwen3.5:9b"),"marker_hotkey":config.get("VIDEO_MARKER_HOTKEY","F8"),"marker_key_code":config.get("VIDEO_MARKER_KEY_CODE",""),"hotkey_hold_seconds":float(config.get("VIDEO_HOTKEY_HOLD_SECONDS","0.6")),"marker_preroll_seconds":int(config.get("VIDEO_MARKER_PREROLL_SECONDS","8")),"hud_enabled":config.get("VIDEO_HUD_ENABLED","true")=="true","hud_placement":config.get("VIDEO_HUD_PLACEMENT","second"),"hud_corner":config.get("VIDEO_HUD_CORNER","top-right"),"hud_hotkey":config.get("VIDEO_HUD_HOTKEY","Ctrl+Shift+F8"),"hud_sound":config.get("VIDEO_HUD_SOUND","true")=="true","sound_volume":_config_int(config,"VIDEO_SOUND_VOLUME",100,0,100),"resolve_fps":int(config.get("VIDEO_RESOLVE_FPS","0")),"resolve_start_timecode":config.get("VIDEO_RESOLVE_START_TIMECODE","01:00:00:00"),"patterns":patterns,"pattern_modes":pattern_modes,"pattern_fps":pattern_fps,"pattern_geometry":pattern_geometry,"pattern_sources":pattern_sources,"service":unit_state("captura-dia-video.service")}
+
+
+def _config_int(config: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(config.get(key, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _confirmation_sounds() -> dict:
+    from ..capture import sounds
+
+    return {"items": [{"slot": slot, "label": label,
+                       "custom": (path := sounds.custom_sound(slot)) is not None,
+                       "name": path.name if path else ""}
+                      for slot, (label, _default) in sounds.SLOTS.items()],
+            "presets": sounds.presets()}
+
+
+def _sound_slot(slot: str):
+    from ..capture import sounds
+
+    if slot not in sounds.SLOTS:
+        raise HTTPException(status_code=404, detail="Som desconhecido")
+    return sounds
+
+
+@app.get("/api/settings/video/sounds")
+def list_confirmation_sounds() -> dict:
+    """Os três sons de confirmação do atalho e se cada um foi personalizado."""
+    return _confirmation_sounds()
+
+
+@app.post("/api/settings/video/sounds/preset/{theme}")
+def apply_confirmation_sound_preset(theme: str) -> dict:
+    """Preenche todos os sons com um pacote pronto do uisfx."""
+    from ..capture import sounds
+
+    try:
+        sounds.apply_preset(theme)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Pacote de sons desconhecido")
+    return _confirmation_sounds()
+
+
+@app.put("/api/settings/video/sounds/{slot}")
+async def upload_confirmation_sound(slot: str, request: Request,
+                                    name: str = Query(min_length=1, max_length=255)) -> dict:
+    """Troca o som de um slot pelo arquivo enviado.
+
+    O gravador procura ``sons/<slot>.*`` a cada toque, então vale no próximo
+    atalho, sem reiniciar nada.
+    """
+    sounds = _sound_slot(slot)
+    extension = Path(name).suffix.lower()
+    if extension not in sounds.EXTENSIONS:
+        raise HTTPException(status_code=422,
+                            detail=f"Formato não aceito. Use: {', '.join(sorted(sounds.EXTENSIONS))}")
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > sounds.MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Som grande demais; o limite é 5 MB")
+    if not data:
+        raise HTTPException(status_code=422, detail="Arquivo vazio")
+    sounds.SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+    partial = sounds.SOUNDS_DIR / f".{slot}{extension}.upload"
+    partial.write_bytes(bytes(data))
+    sounds.clear_custom(slot)
+    partial.replace(sounds.SOUNDS_DIR / f"{slot}{extension}")
+    return _confirmation_sounds()
+
+
+@app.delete("/api/settings/video/sounds/{slot}")
+def reset_confirmation_sound(slot: str) -> dict:
+    _sound_slot(slot).clear_custom(slot)
+    return _confirmation_sounds()
+
+
+@app.post("/api/settings/video/sounds/{slot}/test")
+def test_confirmation_sound(slot: str, volume: int = Query(default=100, ge=0, le=100)) -> dict:
+    """Toca o som nesta máquina, com o volume ainda não salvo da interface."""
+    if not _sound_slot(slot).play(slot, volume):
+        raise HTTPException(status_code=503, detail="Não consegui tocar o som (pw-play/paplay ausentes?)")
+    return {"ok": True}
 
 
 @app.get("/api/ollama/models")
@@ -830,6 +948,7 @@ VIDEO_HUD_PLACEMENT={settings.hud_placement}
 VIDEO_HUD_CORNER={settings.hud_corner}
 VIDEO_HUD_HOTKEY={shlex.quote(settings.hud_hotkey)}
 VIDEO_HUD_SOUND={'true' if settings.hud_sound else 'false'}
+VIDEO_SOUND_VOLUME={settings.sound_volume}
 VIDEO_RESOLVE_FPS={settings.resolve_fps}
 VIDEO_RESOLVE_START_TIMECODE={settings.resolve_start_timecode}
 """
@@ -1515,6 +1634,7 @@ def selective_video_status() -> dict:
         recording = False
     window = ""
     started_at: float | None = None
+    focus_grace_remaining: float | None = None
     mode = config.get("VIDEO_CAPTURE_MODE", "continuous").lower()
     if recording:
         try:
@@ -1531,6 +1651,9 @@ def selective_video_status() -> dict:
                 value = activity.get("started_at")
                 if isinstance(value, (int, float)) and value > 0:
                     started_at = float(value)
+                deadline = activity.get("focus_grace_deadline")
+                if isinstance(deadline, (int, float)) and deadline > 0:
+                    focus_grace_remaining = max(0.0, float(deadline) - time.time())
             else:
                 window = raw
                 started_at = flag.stat().st_mtime
@@ -1546,9 +1669,31 @@ def selective_video_status() -> dict:
         "mode": mode,
         "window": window,
         "started_at": started_at,
+        # Segundos até a sessão encerrar por falta de foco; ``None`` com o jogo
+        # em foco. É a janela em que a interface oferece "Forçar encerramento".
+        "focus_grace_remaining": focus_grace_remaining,
         "pausing_captures": recording and pause_flag.is_file(),
         "pause_other_captures": config.get("PAUSE_OTHER_CAPTURES", "true").lower() == "true",
     }
+
+
+@app.post("/api/video/end-session")
+def end_video_session() -> dict:
+    """Encerra agora a sessão que já está contando para parar fora do jogo.
+
+    Quem sai do jogo e quer as capturas de volta não precisa esperar a folga
+    inteira. O pedido vira um arquivo que o laço de vídeo consome na volta
+    seguinte — o mesmo caminho do encerramento por prazo vencido, com o arquivo
+    finalizado do mesmo jeito.
+    """
+    video = selective_video_status()
+    if not video["recording"] or video["focus_grace_remaining"] is None:
+        raise HTTPException(status_code=409,
+                            detail="Só dá para forçar o encerramento durante a contagem fora do jogo")
+    flag = video_end_request_flag()
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.touch()
+    return video
 
 
 @app.post("/api/capture/{action}")
@@ -1606,6 +1751,32 @@ PRIVACY_FAIL_CLOSED={'true' if settings.privacy_fail_closed else 'false'}
     changed = atomic_write_if_changed(SCREEN_CONFIG, content)
     if changed:
         background_tasks.add_task(_restart_screen_runtime)
+    return {"ok": True, "settings": settings, "restart_pending": changed}
+
+
+@app.get("/api/settings/audio", response_model=AudioSettings)
+def get_audio_settings() -> AudioSettings:
+    config = parse_shell_config(AUDIO_CONFIG)
+    return AudioSettings(
+        mic_denoise_enabled=config.get("MIC_DENOISE_ENABLED", "true").lower() == "true",
+        mic_gate_threshold_db=float(config.get("MIC_GATE_THRESHOLD_DB", "-45")),
+        mic_ai_denoise_enabled=config.get("MIC_AI_DENOISE_ENABLED", "true").lower() == "true",
+        mic_vad_threshold=_config_int(config, "MIC_VAD_THRESHOLD", 80, 0, 99),
+        mic_ai_denoise_available=rnnoise_plugin_installed(),
+    )
+
+
+@app.put("/api/settings/audio")
+def update_audio_settings(settings: AudioSettings, background_tasks: BackgroundTasks) -> dict:
+    content = f'''# Gerenciado pela interface Lume.
+MIC_DENOISE_ENABLED={'true' if settings.mic_denoise_enabled else 'false'}
+MIC_GATE_THRESHOLD_DB={settings.mic_gate_threshold_db:g}
+MIC_AI_DENOISE_ENABLED={'true' if settings.mic_ai_denoise_enabled else 'false'}
+MIC_VAD_THRESHOLD={settings.mic_vad_threshold}
+'''
+    changed = atomic_write_if_changed(AUDIO_CONFIG, content)
+    if changed:
+        background_tasks.add_task(_restart_audio_runtime)
     return {"ok": True, "settings": settings, "restart_pending": changed}
 
 
@@ -1770,9 +1941,13 @@ def test_video_window(payload: VideoWindowTest) -> dict:
     window_class = identity if backend.name != "windows" else ""
     fields = {"title": title, "exe": identity, "class": window_class}
     matched_pattern = next((source for source, field, regex in compiled if regex.search(fields[field])), "")
+    try:
+        monitor_resolution = backend.active_monitor_resolution()
+    except Exception:
+        monitor_resolution = None
     return {
         "ok": True, "window_id": "", "title": title, "window_class": identity,
-        "executable": identity,
+        "executable": identity, "monitor_resolution": monitor_resolution,
         "info": info, "matched": bool(matched_pattern), "matched_pattern": matched_pattern,
     }
 
@@ -1807,6 +1982,23 @@ def test_audio(seconds: int = Query(default=5, ge=2, le=15)) -> dict:
             "max_db": maximum.group(1) if maximum else None,
             "silent": not maximum or maximum.group(1) == "-inf",
         }
+
+
+@app.get("/api/settings/audio/mic-level")
+def mic_level(ms: int = Query(default=300, ge=100, le=1500)) -> dict:
+    """Pico do microfone cru (sem denoise/portão) numa janela curta.
+
+    A interface faz polling nisto enquanto o teste de calibração está aberto,
+    para desenhar a barra ao vivo ao lado do controle de volume mínimo.
+    """
+    seconds = ms / 1000
+    argv = get_backend().mic_level_argv(seconds)
+    if argv is None:
+        raise HTTPException(status_code=501, detail="Medição ao vivo do microfone ainda não é suportada neste sistema.")
+    result = run(argv, timeout=seconds + 10)
+    maximum = re.search(r"max_volume:\s*([^\s]+) dB", result.stderr)
+    silent = not maximum or maximum.group(1) == "-inf"
+    return {"ok": True, "peak_db": None if silent else float(maximum.group(1)), "silent": silent}
 
 
 @app.get("/api/screenshot")
@@ -2085,6 +2277,12 @@ def game_icon_lookup(names: list[str] = Query(default=[], max_length=100)) -> di
     found = game_icons.lookup([name[:120] for name in names])
     return {name: {"url": f"/api/game-icons/{entry['file']}", "kind": entry["kind"]} if entry else None
             for name, entry in found.items()}
+
+
+@app.post("/api/game-icons/retry")
+def game_icon_retry() -> dict:
+    """Busca de novo, já, os jogos que ficaram sem ícone."""
+    return {"ok": True, "retrying": game_icons.forget_missing()}
 
 
 @app.get("/api/game-icons/{file_name}")
@@ -2415,16 +2613,20 @@ def update_video_date(video_id: int, payload: VideoDateUpdate) -> dict:
 
 @app.post("/api/videos/{video_id}/trim")
 def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
-    """Substitui um clipe pelo intervalo escolhido e invalida a análise antiga."""
+    """Substitui um clipe pelo intervalo escolhido e invalida a análise antiga.
+
+    Com ``as_new_file`` o trecho vira um vídeo novo na biblioteca e o original
+    fica intacto — inclusive a análise dele, que continua valendo.
+    """
     initialize()
     with connect() as db:
         row = db.execute(
-            "SELECT source_path,captured_at,status,session_id,preserved FROM video_segments WHERE id=?",
+            "SELECT source_path,captured_at,status,session_id,preserved,app,title FROM video_segments WHERE id=?",
             (video_id,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Vídeo não encontrado")
-    if row["status"] in ("queued", "processing"):
+    if row["status"] in ("queued", "processing") and not payload.as_new_file:
         raise HTTPException(status_code=409, detail="Interrompa ou aguarde a análise antes de cortar")
 
     source = safe_video_path(row["source_path"])
@@ -2437,6 +2639,8 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
         raise HTTPException(status_code=422, detail="O corte precisa ter pelo menos 0,25 segundo")
     if start >= total or (start <= 0.05 and end >= total - 0.05):
         raise HTTPException(status_code=422, detail="Escolha um intervalo menor que o vídeo original")
+    if payload.as_new_file:
+        return _trim_video_to_new_file(video_id, row, source, start, end)
 
     temporary = source.with_name(f".{source.stem}.lume-trim-{secrets.token_hex(5)}{source.suffix}")
     cancel_video_audio_track_job(source)
@@ -2481,6 +2685,52 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
         "ok": True, "id": video_id, "start_seconds": start, "end_seconds": end,
         "duration_seconds": end - start, "captured_at": captured, "analysis_reset": True,
     }
+
+def _trim_video_to_new_file(video_id: int, row, source: Path, start: float, end: float) -> dict:
+    def clock(seconds: float) -> str:
+        total = int(seconds)
+        return f"{total // 60}m{total % 60:02d}s"
+
+    target = source.with_name(f"{source.stem}_corte_{clock(start)}-{clock(end)}{source.suffix}")
+    counter = 2
+    while target.exists():
+        target = source.with_name(f"{source.stem}_corte_{clock(start)}-{clock(end)}_{counter}{source.suffix}")
+        counter += 1
+    temporary = target.with_name(f".{target.stem}.lume-trim-{secrets.token_hex(5)}{target.suffix}")
+    try:
+        result = run(trim_video_command(source, temporary, start, end - start), timeout=3600)
+        if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail=result.stderr.strip() or "O FFmpeg não conseguiu salvar o corte")
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+    captured = row["captured_at"]
+    try:
+        captured = (datetime.fromisoformat(captured) + timedelta(seconds=start)).isoformat()
+    except (TypeError, ValueError):
+        pass
+    title = f"{row['title'] or source.stem} · corte"[:300]
+    with connect() as db:
+        new_id = db.execute(
+            """INSERT INTO video_segments(source_path,captured_at,app,title,duration_seconds,status)
+               VALUES(?,?,?,?,?,'pending')""",
+            (media_source_key(target), captured, row["app"] or "", title, end - start),
+        ).lastrowid
+        # Os destaques do trecho vão junto, já na régua do arquivo novo.
+        db.execute(
+            """INSERT INTO video_markers(video_id,offset_seconds,title,ai_generated)
+               SELECT ?,offset_seconds-?,title,ai_generated FROM video_markers
+               WHERE video_id=? AND offset_seconds>=? AND offset_seconds<?""",
+            (new_id, start, video_id, start, end),
+        )
+    return {
+        "ok": True, "id": new_id, "start_seconds": start, "end_seconds": end,
+        "duration_seconds": end - start, "captured_at": captured, "analysis_reset": False,
+        "name": target.name, "new_file": True,
+    }
+
 
 @app.put("/api/video-markers/{marker_id}")
 def update_video_marker(marker_id: int, payload: MarkerUpdate) -> dict:

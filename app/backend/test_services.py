@@ -7,6 +7,7 @@ reinício, formato do estado) e o resto é pulado explicitamente.
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -498,6 +499,54 @@ class VideoReplayClipTests(unittest.TestCase):
             self.assertFalse(incoming.exists(), "o clipe novo ficou solto além da emenda")
             self.assertEqual(loop.clips_saved, 0, "mesclar contou um clipe a mais")
 
+    def test_long_recording_absorbs_the_pending_clip(self):
+        """Clipe e gravação longa logo depois: um arquivo só, sem trecho repetido."""
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "clipe.mkv"
+            pending.write_bytes(b"pendente")
+            preroll = Path(directory) / "Replay 2.mkv"
+            preroll.write_bytes(b"pre-roll")
+            loop = self._clip_loop(winvideo)
+            loop.pending_clip, loop.pending_clip_at = pending, 1000.0
+            loop.clips_saved = 1
+            loop.long_clip = preroll
+
+            def concat(destination, *parts):
+                destination.write_bytes(b"emendado")
+                return True
+
+            with unittest.mock.patch.object(winvideo, "media_duration", return_value=60.0), \
+                 unittest.mock.patch.object(winvideo, "cut_head", return_value=True), \
+                 unittest.mock.patch.object(winvideo, "concat_videos", side_effect=concat), \
+                 unittest.mock.patch.object(loop, "flush_pending_clip") as flush:
+                held = (loop.pending_clip, loop.pending_clip_at)
+                loop.pending_clip, loop.pending_clip_at = None, 0.0
+                loop._absorb_pending_clip(held, 1020.0)
+
+            flush.assert_not_called()
+            self.assertEqual(loop.long_clip, pending)
+            self.assertEqual(pending.read_bytes(), b"emendado")
+            self.assertIsNone(loop.pending_clip)
+            self.assertEqual(loop.clips_saved, 0)
+
+    def test_a_clip_too_old_for_the_preroll_is_published_on_its_own(self):
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "clipe.mkv"
+            pending.write_bytes(b"pendente")
+            preroll = Path(directory) / "Replay 2.mkv"
+            preroll.write_bytes(b"pre-roll")
+            loop = self._clip_loop(winvideo)
+            loop.long_clip = preroll
+            with unittest.mock.patch.object(winvideo, "media_duration", return_value=60.0), \
+                 unittest.mock.patch.object(loop, "flush_pending_clip") as flush:
+                loop._absorb_pending_clip((pending, 1000.0), 1070.0)
+            flush.assert_called_once()
+            self.assertEqual(loop.long_clip, preroll)
+
     def test_a_hotkey_after_the_replay_window_opens_another_clip(self):
         """Sem sobreposição não há o que mesclar: são duas jogadas distintas."""
         from app.capture import winvideo
@@ -534,6 +583,231 @@ class VideoReplayClipTests(unittest.TestCase):
             self.assertIn("Track2Name=Microfone", basic)
             self.assertIn("Track3Name=Discord", basic)
             self.assertIn("Track4Name=Sistema", basic)
+
+
+class ClipAudioTrackTests(unittest.TestCase):
+    """Recortar e emendar clipes não pode perder as faixas de áudio isoladas.
+
+    O gravador entrega a mixagem mais microfone, Discord e sistema separados;
+    sem ``-map 0`` o ffmpeg copiava uma faixa só, e a gravação longa e o clipe
+    estendido chegavam à biblioteca sem as faixas por fonte.
+    """
+
+    @staticmethod
+    def _audio_tracks(path: Path) -> int:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+             "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True)
+        return len(result.stdout.split())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_cut_and_concat_keep_every_audio_track(self):
+        from app.capture import winvideo
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "clipe.mkv"
+            inputs = ["-f", "lavfi", "-i", "testsrc=d=2:s=160x120"]
+            for frequency in (300, 500, 700, 900):
+                inputs += ["-f", "lavfi", "-i", f"sine=f={frequency}:d=2"]
+            maps = [arg for index in range(5) for arg in ("-map", str(index))]
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *inputs, *maps,
+                            "-c:v", "libx264", "-c:a", "aac", str(source)], check=True)
+            self.assertEqual(self._audio_tracks(source), 4)
+
+            head = Path(directory) / "comeco.mkv"
+            self.assertTrue(winvideo.cut_head(source, head, 1.0))
+            self.assertEqual(self._audio_tracks(head), 4, "o recorte perdeu faixas")
+            joined = Path(directory) / "emendado.mkv"
+            self.assertTrue(winvideo.concat_videos(joined, head, source))
+            self.assertEqual(self._audio_tracks(joined), 4, "a emenda perdeu faixas")
+
+    def test_linux_loop_copies_every_stream_when_cutting_or_joining(self):
+        script = (Path(__file__).resolve().parents[2] / "bin" / "game-video-loop").read_text(encoding="utf-8")
+        copies = [line for line in script.splitlines() if "-c copy" in line]
+        self.assertEqual(len(copies), 2, "mudou o número de cópias de stream; revise este teste")
+        for line in copies:
+            self.assertIn("-map 0", line, line.strip())
+
+
+class MonitorResolutionTests(unittest.TestCase):
+    """A resolução sugerida para um jogo novo é a física, não a lógica."""
+
+    def test_scaled_monitor_reports_physical_pixels(self):
+        # KDE a 125%: o monitor 1600x900 aparece como 1280x720 no Geometry.
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1280, 720, scale=1.25).resolution, "1600x900")
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1366, 768).resolution, "1366x768")
+        # Codificadores exigem dimensões pares.
+        self.assertEqual(Monitor(0, "DP-1", 0, 0, 1093, 615, scale=1.5).resolution, "1640x922")
+
+    def test_linux_reads_the_scale_of_each_output(self):
+        from app.capture import linux
+
+        output = (
+            "Output: 1 DP-1 abc\n\tenabled\n\tconnected\n\tGeometry: 0,0 1280x720\n\tScale: 1.25\n"
+            "Output: 2 HDMI-A-1 def\n\tenabled\n\tconnected\n\tGeometry: 1280,0 1920x1080\n\tScale: 1\n"
+        )
+        with unittest.mock.patch.object(linux.subprocess, "run",
+                                        return_value=SimpleNamespace(stdout=output, returncode=0)):
+            monitors = linux.LinuxCaptureBackend().list_monitors()
+        self.assertEqual([m.resolution for m in monitors], ["1600x900", "1920x1080"])
+        # A posição lógica continua intacta: é nela que as janelas se localizam.
+        self.assertEqual(monitors[1].geometry, "1920x1080+1280+0")
+
+    def test_windows_structs_match_the_win32_sizes(self):
+        """Com ``dmSize`` errado o EnumDisplaySettingsW recusa a chamada.
+
+        No Windows ``WCHAR`` tem 2 bytes; aqui simulamos isso para conferir o
+        layout contra os tamanhos documentados (DEVMODEW 220, MONITORINFOEXW 104).
+        """
+        import ctypes
+        from ctypes import wintypes
+        from app.capture import windows
+
+        with unittest.mock.patch.object(wintypes, "WCHAR", ctypes.c_uint16):
+            self.assertEqual(ctypes.sizeof(windows._devmode_w()), 220)
+            self.assertEqual(ctypes.sizeof(windows._monitor_info_ex()), 104)
+
+
+class VideoMicCleanupTests(unittest.TestCase):
+    """O microfone dos vídeos recebe a supressão e o volume mínimo da interface.
+
+    No Linux o gravador não filtra nada ao vivo, então a faixa do microfone é
+    refeita quando o vídeo é publicado (``game-video-loop --clean-mic``).
+    """
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "game-video-loop"
+
+    def _video(self, path: Path, levels_db: list[int], mic_source: str = "") -> None:
+        inputs = ["-f", "lavfi", "-i", "testsrc=d=2:s=160x120"]
+        for index, level in enumerate(levels_db):
+            source = mic_source if index == 1 and mic_source else f"sine=f={300 + 200 * index}:d=2,volume={level}dB"
+            inputs += ["-f", "lavfi", "-i", source]
+        maps = [arg for index in range(len(levels_db) + 1) for arg in ("-map", str(index))]
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", *inputs, *maps, "-ac", "2",
+                        "-c:v", "libx264", "-c:a", "libopus", str(path)], check=True)
+
+    def _clean(self, home: Path, video: Path, audio_conf: str) -> None:
+        config = home / "config" / "captura-dia"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "audio.conf").write_text(audio_conf, encoding="utf-8")
+        (config / "storage.conf").write_text(f"STORAGE_ROOT={home / 'midia'}\n", encoding="utf-8")
+        subprocess.run([str(self.SCRIPT), "--clean-mic", str(video)], check=True, timeout=60,
+                       env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config")})
+
+    @staticmethod
+    def _mean_db(path: Path, track: int) -> float:
+        result = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path), "-map", f"0:a:{track}",
+                                 "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+        import re
+        return float(re.search(r"mean_volume: (-?[\d.]+|-inf) dB", result.stderr).group(1).replace("-inf", "-120"))
+
+    @staticmethod
+    def _packets(path: Path, track: int) -> str:
+        return subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-map", f"0:a:{track}",
+                               "-c", "copy", "-f", "md5", "-"], capture_output=True, text=True, check=True).stdout
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_quiet_mic_is_gated_and_the_mix_is_rebuilt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            # Mixagem, microfone baixo, Discord, sistema. O `sine` do lavfi já
+            # sai 18 dB abaixo do máximo: o microfone fica perto de -68 dB,
+            # bem abaixo do limite de -30.
+            self._video(video, [-10, -50, -20, -25])
+            expected_mix = self._mean_db(video, 2), self._mean_db(video, 3)
+            discord = self._packets(video, 2)
+            self._clean(home, video, "MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n")
+
+            self.assertEqual(ClipAudioTrackTests._audio_tracks(video), 4)
+            self.assertLess(self._mean_db(video, 1), -70, "o portão não fechou o microfone baixo")
+            self.assertEqual(self._packets(video, 2), discord, "o Discord foi recodificado")
+            # A mixagem nova é a soma de Discord e sistema (o mic está mudo), no
+            # mesmo nível — sem a normalização do amix, que a baixaria.
+            import math
+            summed = 10 * math.log10(sum(10 ** (level / 10) for level in expected_mix))
+            self.assertAlmostEqual(self._mean_db(video, 0), summed, delta=1.5)
+            self.assertFalse((home / "midia" / ".microfone" / "clipe.mp4").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_voice_above_the_threshold_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            # Um tom contínuo é justamente o que a supressão de ruído remove,
+            # então aqui só o portão é testado.
+            self._video(video, [-10, 0, -20, -25])
+            before = self._mean_db(video, 1)
+            self._clean(home, video, "MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n")
+            self.assertAlmostEqual(self._mean_db(video, 1), before, delta=1.5)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_denoise_setting_reaches_the_filter(self):
+        """Ligada, a supressão atenua um chiado constante que o portão deixaria passar."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            levels = {}
+            for denoise in ("false", "true"):
+                video = home / f"clipe-{denoise}.mp4"
+                self._video(video, [-10, 0, -20, -25], mic_source="anoisesrc=d=2:c=white:a=0.005")
+                self._clean(home, video, f"MIC_DENOISE_ENABLED={denoise}\nMIC_GATE_THRESHOLD_DB=-60\n")
+                levels[denoise] = self._mean_db(video, 1)
+            self.assertLess(levels["true"], levels["false"] - 3)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg ausente")
+    def test_other_track_layouts_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home, video = Path(directory), Path(directory) / "clipe.mp4"
+            self._video(video, [-10, -50])
+            original = video.read_bytes()
+            self._clean(home, video, "MIC_GATE_THRESHOLD_DB=-30\n")
+            self.assertEqual(video.read_bytes(), original)
+
+    def test_every_publish_path_cleans_the_mic(self):
+        """Vídeo que chega ao buffer sem passar pela limpeza sai com o mic cru."""
+        script = self.SCRIPT.read_text(encoding="utf-8")
+        for step in ('clean_mic_track "$partial"\n    mv "$partial" "$final"',
+                     'clean_mic_track "$file"\n    mv "$file" "$target"',
+                     'clean_mic_track "$file"\n  mv "$file" "$target"',
+                     'rm -f "$long_clip_file" "$recording_file"\n      clean_mic_track "$target"'):
+            self.assertIn(step, script)
+
+
+class ObsMicFilterTests(unittest.TestCase):
+    """No Windows, o OBS filtra o microfone com os filtros nativos dele."""
+
+    def test_creates_denoise_before_the_gate(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([], True, -40)
+        created = [data["filterKind"] for kind, data in requests if kind == "CreateSourceFilter"]
+        self.assertEqual(created, ["noise_suppress_filter_v2", "noise_gate_filter"])
+        gate = next(data for kind, data in requests if data.get("filterKind") == "noise_gate_filter")
+        self.assertEqual(gate["filterSettings"]["open_threshold"], -40)
+        self.assertEqual(gate["filterSettings"]["close_threshold"], -46)
+        indexes = {data["filterName"]: data["filterIndex"] for kind, data in requests if kind == "SetSourceFilterIndex"}
+        self.assertEqual(indexes, {obs.MIC_DENOISE_FILTER: 0, obs.MIC_GATE_FILTER: 1})
+
+    def test_reapplying_updates_instead_of_stacking(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([obs.MIC_DENOISE_FILTER, obs.MIC_GATE_FILTER], True, -30)
+        self.assertNotIn("CreateSourceFilter", [kind for kind, _ in requests])
+
+    def test_turning_denoise_off_removes_it(self):
+        from app.capture import obs
+
+        requests = obs.mic_filter_requests([obs.MIC_DENOISE_FILTER, obs.MIC_GATE_FILTER], False, -30)
+        self.assertIn(("RemoveSourceFilter", {"sourceName": obs.MIC_INPUT, "filterName": obs.MIC_DENOISE_FILTER}),
+                      requests)
+        index = next(data for kind, data in requests if kind == "SetSourceFilterIndex")
+        self.assertEqual(index["filterIndex"], 0)
+
+    def test_settings_fall_back_to_defaults(self):
+        from app.capture import obs
+
+        self.assertEqual(obs.mic_filter_settings({}), (True, -45.0))
+        self.assertEqual(obs.mic_filter_settings({"MIC_DENOISE_ENABLED": "false",
+                                                  "MIC_GATE_THRESHOLD_DB": "lixo"}), (False, -45.0))
+        self.assertEqual(obs.mic_filter_settings({"MIC_GATE_THRESHOLD_DB": "-5"}), (True, -10.0))
 
 
 class ObsWindowSpecTests(unittest.TestCase):
@@ -1365,6 +1639,84 @@ class LinuxAudioTapTests(unittest.TestCase):
         self.assertIn("31 92", links)
 
 
+@unittest.skipIf(IS_WINDOWS, "o audio-bus é um script bash")
+class LinuxCleanMicTests(unittest.TestCase):
+    """Supressão por IA antes do MicBus: liga, desliga e nunca deixa a faixa muda."""
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "audio-bus.sh"
+    FUNCTIONS = ("unload_clean_mic", "rnnoise_plugin", "clean_mic_settings", "mic_feed")
+    MIC = "alsa_input.headset.mono"
+
+    def _feed(self, directory: Path, audio_conf: str = "", plugin: bool = True,
+              loaded: str = "") -> tuple[str, list[str]]:
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        functions = "\n".join(re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.S | re.M).group(0)
+                               for name in self.FUNCTIONS)
+        ladspa = directory / "ladspa"
+        ladspa.mkdir()
+        if plugin:
+            (ladspa / "librnnoise_ladspa.so").write_bytes(b"")
+        conf = directory / "audio.conf"
+        conf.write_text(audio_conf, encoding="utf-8")
+        modules = directory / "modules"
+        modules.write_text(loaded, encoding="utf-8")
+        log = directory / "pactl.log"
+        script = f"""set -euo pipefail
+MIC_CLEAN=LumeMicLimpo AUDIO_CONF={conf}
+pactl() {{
+  echo "$*" >> {log}
+  case "$1 $2" in
+    "list short") cat {modules} ;;
+  esac
+}}
+{functions}
+mic_feed {self.MIC}
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "LADSPA_PATH": str(ladspa)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
+        return result.stdout.strip(), calls
+
+    def test_on_by_default_it_feeds_the_bus_from_the_clean_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw))
+        self.assertEqual(source, "LumeMicLimpo")
+        load = next(call for call in calls if call.startswith("load-module"))
+        self.assertIn("module-ladspa-source", load)
+        self.assertIn(f"master={self.MIC} ", load)
+        self.assertIn("label=noise_suppressor_mono", load)
+        self.assertIn("control=80,200,20,0,0", load)
+
+    def test_without_the_plugin_the_raw_mic_keeps_recording(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), plugin=False)
+        self.assertEqual(source, self.MIC)
+        self.assertFalse([call for call in calls if call.startswith("load-module")])
+
+    def test_turning_it_off_removes_the_filter(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), "MIC_AI_DENOISE_ENABLED=false\n", loaded=loaded)
+        self.assertEqual(source, self.MIC)
+        self.assertIn("unload-module 42", calls)
+
+    def test_a_new_threshold_rebuilds_the_filter(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), "MIC_VAD_THRESHOLD=92\n", loaded=loaded)
+        self.assertEqual(source, "LumeMicLimpo")
+        self.assertIn("unload-module 42", calls)
+        self.assertTrue(any("control=92,200,20,0,0" in call for call in calls if call.startswith("load-module")))
+
+    def test_an_unchanged_filter_is_left_alone(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            _source, calls = self._feed(Path(raw), loaded=loaded)
+        self.assertFalse([call for call in calls if "load-module" in call],
+                         "o watch refazia o filtro a cada volta")
+
+
 @unittest.skipIf(IS_WINDOWS, "o gravador do Linux é um script bash")
 class LinuxFocusVerdictTests(LinuxCaptureModeTests):
     """Sair do jogo é uma coisa; o KWin mudar de ideia por um segundo é outra.
@@ -1800,6 +2152,64 @@ class LinuxAudioTrackTests(unittest.TestCase):
         self.assertEqual(argv.count("pulse"), 1)
         self.assertNotIn("-filter_complex", argv)
 
+    def test_mic_channel_gets_denoise_and_gate_by_default(self):
+        """Sem audio.conf, o microfone ainda ganha o tratamento padrão."""
+        from app.capture import linux
+
+        with unittest.mock.patch.object(linux, "AUDIO_CONFIG", Path(tempfile.gettempdir()) / "no-such-audio.conf"):
+            argv = linux.LinuxCaptureBackend().audio_record_argv(
+                AudioConfig(outdir=Path(tempfile.gettempdir()), channels=3, duration_seconds=5))
+        filter_complex = argv[argv.index("-filter_complex") + 1]
+        self.assertIn("[0:a]pan=mono|c0=c0,afftdn,agate=threshold=", filter_complex)
+
+    def test_mic_level_argv_measures_the_raw_signal_without_filters(self):
+        """A calibração precisa do sinal cru: filtrado, o silêncio de fundo
+        sempre apareceria mudo e o portão nunca teria o que mostrar."""
+        from app.capture.linux import LinuxCaptureBackend
+
+        argv = LinuxCaptureBackend().mic_level_argv(0.3)
+        self.assertIn("MicBus.monitor", argv)
+        self.assertIn("volumedetect", argv)
+        # volumedetect só imprime max_volume em nível info.
+        self.assertEqual(argv[argv.index("-loglevel") + 1], "info")
+        self.assertNotIn("agate", " ".join(argv))
+        self.assertNotIn("afftdn", " ".join(argv))
+
+    def test_windows_backend_measures_the_default_mic_through_dshow(self):
+        """O dshow corta nomes longos: casa pelo prefixo do nome do WASAPI."""
+        from app.capture import wasapi
+
+        backend = WindowsCaptureBackend()
+        with unittest.mock.patch.object(wasapi, "default_endpoint_name",
+                                        return_value="Microfone (HyperX Cloud II Wireless)"), \
+             unittest.mock.patch.object(backend, "_list_audio_devices",
+                                        return_value=["Mixagem estéreo (Realtek)", "Microfone (HyperX Cloud II Wirel"]):
+            argv = backend.mic_level_argv(0.3)
+        self.assertIn("audio=Microfone (HyperX Cloud II Wirel", argv)
+        self.assertEqual(argv[argv.index("-loglevel") + 1], "info")
+
+    def test_windows_backend_without_a_known_mic_reports_unsupported(self):
+        from app.capture import wasapi
+
+        backend = WindowsCaptureBackend()
+        with unittest.mock.patch.object(wasapi, "default_endpoint_name", return_value="Microfone USB"), \
+             unittest.mock.patch.object(backend, "_list_audio_devices", return_value=["Outro dispositivo"]):
+            self.assertIsNone(backend.mic_level_argv(0.3))
+
+    def test_audio_conf_can_disable_denoise_and_tune_the_gate(self):
+        from app.capture import linux
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "audio.conf"
+            config.write_text("MIC_DENOISE_ENABLED=false\nMIC_GATE_THRESHOLD_DB=-30\n", encoding="utf-8")
+            with unittest.mock.patch.object(linux, "AUDIO_CONFIG", config):
+                argv = linux.LinuxCaptureBackend().audio_record_argv(
+                    AudioConfig(outdir=Path(tempfile.gettempdir()), channels=3, duration_seconds=5))
+        filter_complex = argv[argv.index("-filter_complex") + 1]
+        self.assertNotIn("afftdn", filter_complex)
+        # -30 dB em amplitude linear: 10 ** (-30/20) ~= 0.0316.
+        self.assertIn("agate=threshold=0.031623", filter_complex)
+
 
 class HudStateTests(unittest.TestCase):
     """As regras que decidem se a captura está saudável.
@@ -2028,6 +2438,59 @@ class HudDisplayModeTests(unittest.TestCase):
         self.assertFalse(hud._should_expand(HudStatus("ok", "Clipes armados")))
 
 
+    def test_hotkey_dismisses_alerts_that_force_the_hud_open(self):
+        """Fora do jogo o aviso da contagem reabria a HUD em qualquer modo.
+
+        No Linux ela não deixa o clique atravessar, então prendia o que estava
+        atrás até a folga vencer. O atalho tem que conseguir tirá-la da frente.
+        """
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        hud.display_mode = "hidden"
+        snapshot = HudSnapshot(recording=True)
+        away = HudStatus("warn", "Fora do jogo · para em 40s",
+                         [Alert("fora-do-jogo", "warn", "Fora do jogo · para em 40s")])
+        hud._note_alerts(away)
+        self.assertTrue(hud._should_show(snapshot, away, None))
+
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "hidden", "dispensar não gira o modo")
+        hud._note_alerts(away)
+        self.assertFalse(hud._should_show(snapshot, away, None))
+
+        # Um aviso novo é notícia: volta a abrir.
+        worse = HudStatus("fail", "Microfone sem sinal", [
+            Alert("fora-do-jogo", "warn", "Fora do jogo · para em 39s"),
+            Alert("ausente:Microfone", "fail", "Microfone sem sinal")])
+        hud._note_alerts(worse)
+        self.assertTrue(hud._should_show(snapshot, worse, None))
+
+    def test_hotkey_brings_dismissed_alerts_back(self):
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        snapshot = HudSnapshot(recording=True)
+        away = HudStatus("warn", "Fora do jogo", [Alert("fora-do-jogo", "warn", "Fora do jogo")])
+        hud._note_alerts(away)
+        hud.toggle()
+        self.assertFalse(hud._should_show(snapshot, away, None))
+        hud.toggle()
+        self.assertEqual(hud.display_mode, "compact")
+        self.assertTrue(hud._should_show(snapshot, away, None))
+
+    def test_dismissal_ends_when_the_alerts_clear(self):
+        from app.capture.hudstate import Alert, HudSnapshot, HudStatus
+
+        hud = self._hud()
+        away = HudStatus("warn", "Fora do jogo", [Alert("fora-do-jogo", "warn", "Fora do jogo")])
+        hud._note_alerts(away)
+        hud.toggle()
+        hud._note_alerts(HudStatus("ok", "Gravando"))
+        hud._note_alerts(away)
+        self.assertTrue(hud._should_show(HudSnapshot(recording=True), away, None))
+
+
 class VideoActivityFlagTests(unittest.TestCase):
     """O sinal de atividade tem um significado só, e ele é caro de errar.
 
@@ -2099,6 +2562,31 @@ class VideoActivityFlagTests(unittest.TestCase):
         self.assertFalse(expired)
         self.assertEqual(loop.focus_grace_deadline, 0.0)
 
+    def test_interface_request_ends_the_countdown_early(self):
+        """O pedido da interface só encerra com a contagem já correndo."""
+        from app.capture.winvideo import VideoLoop
+
+        loop = object.__new__(VideoLoop)
+        loop.settings = SimpleNamespace(focus_grace=60)
+        loop.focus_grace_deadline = 0.0
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "lume-video-end-session"
+            with unittest.mock.patch("app.capture.winvideo.video_end_request_flag",
+                                     return_value=request), \
+                 unittest.mock.patch("app.capture.winvideo.time.monotonic", return_value=100.0), \
+                 unittest.mock.patch("app.capture.winvideo.time.time", return_value=1_000.0):
+                # Com o jogo em foco o pedido é descartado, não guardado.
+                request.touch()
+                loop._update_focus_grace("jogo", -1.0)
+                self.assertFalse(request.exists())
+
+                lost_at, expired = loop._update_focus_grace("fora", -1.0)
+                self.assertFalse(expired)
+                request.touch()
+                _lost_at, expired = loop._update_focus_grace("fora", lost_at)
+            self.assertTrue(expired)
+            self.assertFalse(request.exists())
+
     def test_an_unreadable_foreground_window_neither_starts_nor_advances_the_countdown(self):
         """"Não sei que janela é essa" não é "o usuário saiu do jogo".
 
@@ -2136,6 +2624,71 @@ class VideoActivityFlagTests(unittest.TestCase):
              unittest.mock.patch("app.capture.winvideo.time.time", return_value=1_030.0):
             _held_at, expired = loop._update_focus_grace("fora", held_at)
         self.assertTrue(expired)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "requer ffmpeg")
+class LinuxLongRecordingAbsorbsClipTests(unittest.TestCase):
+    """Clipe seguido de gravação longa: um arquivo só, sem trecho repetido.
+
+    O pré-roll da gravação longa cobre os mesmos segundos que o clipe acabou
+    de salvar. Soltos, os dois repetiam a jogada; aqui o clipe vira o começo.
+    Roda as funções do próprio script sobre vídeos de verdade.
+    """
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "game-video-loop"
+    FUNCTIONS = ("log", "concat_videos", "media_seconds", "merge_pending_clip",
+                 "flush_pending_clip", "absorb_pending_clip")
+
+    def _functions(self) -> str:
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        blocks = [re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.S | re.M).group(0)
+                  for name in self.FUNCTIONS]
+        return "\n".join(blocks)
+
+    @staticmethod
+    def _clip(path: Path, seconds: int) -> None:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"testsrc=size=64x64:rate=10:duration={seconds}",
+                        "-c:v", "libx264", "-g", "1", str(path)], check=True)
+
+    def _absorb(self, directory: Path, now: str) -> list[str]:
+        pending_dir = directory / "pendente"
+        pending_dir.mkdir()
+        self._clip(pending_dir / "pendente.mp4", 6)
+        self._clip(directory / "preroll.mp4", 6)
+        script = f"""set -euo pipefail
+{self._functions()}
+pending_dir={pending_dir}
+pending_clip_file={pending_dir}/pendente.mp4 pending_clip_epoch=1000 pending_clip_start=994
+long_clip_file={directory}/preroll.mp4 long_target_epoch=1002 clips_saved=1
+flush_pending_clip() {{ touch {directory}/publicado; pending_clip_file=''; }}
+absorb_pending_clip {now}
+echo "$long_clip_file|$long_target_epoch|${{pending_clip_file:-vazio}}|$clips_saved"
+media_seconds "$long_clip_file"; echo
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_the_pending_clip_becomes_the_head_of_the_long_recording(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            state, seconds = self._absorb(directory, "1002.0")
+            long_clip, target, pending, clips = state.split("|")
+            self.assertEqual(long_clip, str(directory / "pendente" / "pendente.mp4"))
+            self.assertEqual(target, "994", "o nome não saiu do horário do clipe")
+            self.assertEqual(pending, "vazio", "o clipe continuou pendente")
+            self.assertEqual(clips, "0", "o clipe absorvido continuou contado")
+            # 6s pendentes, 2s depois o pré-roll de 6s: 2s de começo + 6s = 8s.
+            self.assertAlmostEqual(float(seconds), 8.0, delta=0.3)
+            self.assertFalse((directory / "preroll.mp4").exists())
+
+    def test_a_clip_outside_the_preroll_stays_a_file_of_its_own(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            state, _seconds = self._absorb(directory, "1010.0")
+            self.assertTrue((directory / "publicado").exists(), "o clipe não foi publicado à parte")
+            self.assertEqual(state, f"{directory}/preroll.mp4|1002|vazio|1")
 
 
 class StableAppLabelTests(unittest.TestCase):

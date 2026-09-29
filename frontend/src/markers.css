@@ -30,6 +30,7 @@
 .marker-list span{font-size:10px}
 .continuous-session{min-width:0}
 .video-trimmer{padding:12px 14px;border-top:1px solid var(--divider);background:#171925}
+.video-trimmer .trim-warning{margin:0 0 10px;padding:8px 10px;border:1px solid rgba(238,194,127,.45);border-radius:7px;background:rgba(238,194,127,.08);color:#eec27f;font-size:10px;line-height:1.45}
 .video-trimmer header{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .video-trimmer header div{display:flex;flex-direction:column;gap:3px}
 .video-trimmer header strong{font-size:11px}

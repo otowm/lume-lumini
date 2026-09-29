@@ -51,6 +51,16 @@ def video_activity_flag() -> Path:
     return runtime_dir() / "lume-video-active"
 
 
+def video_end_request_flag() -> Path:
+    """Pedido da interface para encerrar já a sessão que está na contagem.
+
+    Só vale durante a folga depois de sair do jogo: o laço de vídeo o consome
+    ali e o descarta quando o foco volta, para que um clique antigo nunca
+    derrube a sessão seguinte.
+    """
+    return runtime_dir() / "lume-video-end-session"
+
+
 def pipeline_pause_flag() -> Path:
     """Sinal persistente de que o worker principal não deve iniciar."""
     return runtime_dir() / "lume-process-paused"

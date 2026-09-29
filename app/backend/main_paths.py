@@ -65,6 +65,7 @@ EDIT_DIR = MEDIA_ROOT / "edicao"
 MEDIA_CACHE_DIR = MEDIA_ROOT / ".lume-cache"
 DB_PATH = Path(os.environ.get("CAPTURA_DIA_DB_PATH", MEDIA_ROOT / "lume.sqlite3")).expanduser()
 SCREEN_CONFIG = CONFIG_DIR / "tela.conf"
+AUDIO_CONFIG = CONFIG_DIR / "audio.conf"
 SENSITIVE_FILE = CONFIG_DIR / "janelas-sensiveis.txt"
 SCREEN_BIN = Path(os.environ.get("CAPTURA_DIA_SCREEN_BIN", HOME / "bin/captura-tela.sh"))
 

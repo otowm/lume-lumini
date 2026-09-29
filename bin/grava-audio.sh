@@ -23,6 +23,22 @@ MIC_SRC="${MIC_SOURCE:-MicBus.monitor}"
 DISCORD_SRC="${DISCORD_SOURCE:-DiscordBus.monitor}"
 SYSTEM_SRC="${AUDIO_SOURCE:-RecordBus.monitor}"
 
+# Tratamento do microfone (supressão de ruído + portão de volume mínimo, como
+# a "sensibilidade de entrada" do Discord). Configurável em audio.conf; a
+# interface do Lume escreve nele via /api/settings/audio.
+audio_config="${XDG_CONFIG_HOME:-$HOME/.config}/captura-dia/audio.conf"
+MIC_DENOISE_ENABLED=true
+MIC_GATE_THRESHOLD_DB=-45
+[[ -r "$audio_config" ]] && source "$audio_config"
+
+# agate trabalha com amplitude linear (0-1), não dBFS: converte aqui para que
+# o arquivo de configuração e a interface só falem em dB, que é o que se lê
+# num medidor de volume.
+mic_gate_linear="$(awk -v db="$MIC_GATE_THRESHOLD_DB" 'BEGIN{printf "%.6f", 10 ^ (db / 20)}')"
+mic_filter="pan=mono|c0=c0"
+[[ "$MIC_DENOISE_ENABLED" == "true" ]] && mic_filter+=",afftdn"
+mic_filter+=",agate=threshold=${mic_gate_linear}:attack=5:release=250"
+
 [[ "$SEG_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "SEG_SECONDS inválido" >&2; exit 2; }
 mkdir -p "$OUTDIR"
 
@@ -57,7 +73,7 @@ ffmpeg -hide_banner -loglevel warning -nostdin \
   -f pulse -thread_queue_size 1024 -i "$MIC_SRC" \
   -f pulse -thread_queue_size 1024 -i "$DISCORD_SRC" \
   -f pulse -thread_queue_size 1024 -i "$SYSTEM_SRC" \
-  -filter_complex "[0:a]pan=mono|c0=c0[mic];[1:a]pan=mono|c0=c0[dis];[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];[mic][dis][sys]join=inputs=3:channel_layout=3.0:map=0.0-FL|1.0-FR|2.0-FC[out]" \
+  -filter_complex "[0:a]${mic_filter}[mic];[1:a]pan=mono|c0=c0[dis];[2:a]pan=mono|c0=0.5*c0+0.5*c1[sys];[mic][dis][sys]join=inputs=3:channel_layout=3.0:map=0.0-FL|1.0-FR|2.0-FC[out]" \
   -map "[out]" -ar 16000 -c:a pcm_s16le \
   -flush_packets 1 \
   -f segment -segment_time "$SEG_SECONDS" -reset_timestamps 1 -strftime 1 \

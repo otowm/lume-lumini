@@ -16,3 +16,19 @@ server:
   limiter: false
   image_proxy: false
 
+# Mecanismos extras: o pixiv já vem embutido no SearXNG (searx/engines/pixiv.py),
+# só vem desligado (disabled+inactive) por padrão porque precisa de um proxy de
+# imagem — o CDN i.pximg.net rejeita requisições sem Referer válido, então as
+# imagens tem que passar por um proxy que reescreve esse header.
+# Estou usando proxies públicos de terceiros (ok pra uso pessoal com pouco volume;
+# se isso virar uso pesado, o ideal é rodar seu próprio proxy, ver o link nos
+# comentários do settings.yml padrão do container: pixivfe-docs.pages.dev/hosting/image-proxy-server).
+engines:
+  - name: pixiv
+    disabled: false
+    inactive: false
+    pixiv_image_proxies:
+      - https://i.pixiv.cat
+      - https://pximg.cocomi.eu.org
+      - https://pximg.exozy.me
+
