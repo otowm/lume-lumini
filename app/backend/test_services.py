@@ -1639,6 +1639,84 @@ class LinuxAudioTapTests(unittest.TestCase):
         self.assertIn("31 92", links)
 
 
+@unittest.skipIf(IS_WINDOWS, "o audio-bus é um script bash")
+class LinuxCleanMicTests(unittest.TestCase):
+    """Supressão por IA antes do MicBus: liga, desliga e nunca deixa a faixa muda."""
+
+    SCRIPT = Path(__file__).resolve().parents[2] / "bin" / "audio-bus.sh"
+    FUNCTIONS = ("unload_clean_mic", "rnnoise_plugin", "clean_mic_settings", "mic_feed")
+    MIC = "alsa_input.headset.mono"
+
+    def _feed(self, directory: Path, audio_conf: str = "", plugin: bool = True,
+              loaded: str = "") -> tuple[str, list[str]]:
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        functions = "\n".join(re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.S | re.M).group(0)
+                               for name in self.FUNCTIONS)
+        ladspa = directory / "ladspa"
+        ladspa.mkdir()
+        if plugin:
+            (ladspa / "librnnoise_ladspa.so").write_bytes(b"")
+        conf = directory / "audio.conf"
+        conf.write_text(audio_conf, encoding="utf-8")
+        modules = directory / "modules"
+        modules.write_text(loaded, encoding="utf-8")
+        log = directory / "pactl.log"
+        script = f"""set -euo pipefail
+MIC_CLEAN=LumeMicLimpo AUDIO_CONF={conf}
+pactl() {{
+  echo "$*" >> {log}
+  case "$1 $2" in
+    "list short") cat {modules} ;;
+  esac
+}}
+{functions}
+mic_feed {self.MIC}
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "LADSPA_PATH": str(ladspa)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
+        return result.stdout.strip(), calls
+
+    def test_on_by_default_it_feeds_the_bus_from_the_clean_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw))
+        self.assertEqual(source, "LumeMicLimpo")
+        load = next(call for call in calls if call.startswith("load-module"))
+        self.assertIn("module-ladspa-source", load)
+        self.assertIn(f"master={self.MIC} ", load)
+        self.assertIn("label=noise_suppressor_mono", load)
+        self.assertIn("control=80,200,20,0,0", load)
+
+    def test_without_the_plugin_the_raw_mic_keeps_recording(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), plugin=False)
+        self.assertEqual(source, self.MIC)
+        self.assertFalse([call for call in calls if call.startswith("load-module")])
+
+    def test_turning_it_off_removes_the_filter(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), "MIC_AI_DENOISE_ENABLED=false\n", loaded=loaded)
+        self.assertEqual(source, self.MIC)
+        self.assertIn("unload-module 42", calls)
+
+    def test_a_new_threshold_rebuilds_the_filter(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            source, calls = self._feed(Path(raw), "MIC_VAD_THRESHOLD=92\n", loaded=loaded)
+        self.assertEqual(source, "LumeMicLimpo")
+        self.assertIn("unload-module 42", calls)
+        self.assertTrue(any("control=92,200,20,0,0" in call for call in calls if call.startswith("load-module")))
+
+    def test_an_unchanged_filter_is_left_alone(self):
+        loaded = f"42\tmodule-ladspa-source\tsource_name=LumeMicLimpo master={self.MIC} control=80,200,20,0,0 rate=48000\n"
+        with tempfile.TemporaryDirectory() as raw:
+            _source, calls = self._feed(Path(raw), loaded=loaded)
+        self.assertFalse([call for call in calls if "load-module" in call],
+                         "o watch refazia o filtro a cada volta")
+
+
 @unittest.skipIf(IS_WINDOWS, "o gravador do Linux é um script bash")
 class LinuxFocusVerdictTests(LinuxCaptureModeTests):
     """Sair do jogo é uma coisa; o KWin mudar de ideia por um segundo é outra.

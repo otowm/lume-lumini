@@ -1,6 +1,10 @@
 export type AudioSettings = {
   mic_denoise_enabled: boolean;
   mic_gate_threshold_db: number;
+  mic_ai_denoise_enabled?: boolean;
+  mic_vad_threshold?: number;
+  /** Plugin RNNoise instalado; `null` onde não se aplica (Windows). */
+  mic_ai_denoise_available?: boolean | null;
 };
 
 export type ScreenSettings = {

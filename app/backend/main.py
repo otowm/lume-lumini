@@ -68,7 +68,7 @@ ALLOWED_CONFIG = {
     "LUME_VISION_MODEL","LUME_TEXT_MODEL","VIDEO_MARKER_HOTKEY","VIDEO_MARKER_KEY_CODE","VIDEO_HOTKEY_HOLD_SECONDS","VIDEO_MARKER_PREROLL_SECONDS",
     "VIDEO_HUD_ENABLED","VIDEO_HUD_PLACEMENT","VIDEO_HUD_CORNER","VIDEO_HUD_HOTKEY","VIDEO_HUD_SOUND","VIDEO_SOUND_VOLUME",
     "VIDEO_RESOLVE_FPS","VIDEO_RESOLVE_START_TIMECODE",
-    "MIC_DENOISE_ENABLED","MIC_GATE_THRESHOLD_DB",
+    "MIC_DENOISE_ENABLED","MIC_GATE_THRESHOLD_DB","MIC_AI_DENOISE_ENABLED","MIC_VAD_THRESHOLD",
 }
 VIDEO_CONFIG = CONFIG_DIR / "video.conf"
 VIDEO_APPS = CONFIG_DIR / "video-apps.txt"
@@ -255,6 +255,23 @@ class ScreenSettings(BaseModel):
 class AudioSettings(BaseModel):
     mic_denoise_enabled: bool
     mic_gate_threshold_db: float = Field(ge=-60, le=-10)
+    # Supressão por IA (RNNoise com detecção de voz) antes do MicBus, no Linux.
+    # Tira teclado e mouse, que o `afftdn` não pega por serem estalos.
+    mic_ai_denoise_enabled: bool = True
+    # Confiança mínima de que é voz, em %; abaixo disso o microfone fica mudo.
+    mic_vad_threshold: int = Field(default=80, ge=0, le=99)
+    # Só leitura: o plugin está instalado? ``None`` onde não se aplica (no
+    # Windows o OBS já usa RNNoise na supressão comum).
+    mic_ai_denoise_available: bool | None = None
+
+
+def rnnoise_plugin_installed() -> bool | None:
+    if os.name == "nt":
+        return None
+    # Como no PipeWire: com LADSPA_PATH definido, só ele vale.
+    path = os.environ.get("LADSPA_PATH") or "/usr/lib/ladspa:/usr/lib64/ladspa:/usr/local/lib/ladspa"
+    dirs = [directory for directory in path.split(":") if directory]
+    return any((Path(directory) / "librnnoise_ladspa.so").is_file() for directory in dirs)
 
 
 class SensitiveWindows(BaseModel):
@@ -1743,6 +1760,9 @@ def get_audio_settings() -> AudioSettings:
     return AudioSettings(
         mic_denoise_enabled=config.get("MIC_DENOISE_ENABLED", "true").lower() == "true",
         mic_gate_threshold_db=float(config.get("MIC_GATE_THRESHOLD_DB", "-45")),
+        mic_ai_denoise_enabled=config.get("MIC_AI_DENOISE_ENABLED", "true").lower() == "true",
+        mic_vad_threshold=_config_int(config, "MIC_VAD_THRESHOLD", 80, 0, 99),
+        mic_ai_denoise_available=rnnoise_plugin_installed(),
     )
 
 
@@ -1751,6 +1771,8 @@ def update_audio_settings(settings: AudioSettings, background_tasks: BackgroundT
     content = f'''# Gerenciado pela interface Lume.
 MIC_DENOISE_ENABLED={'true' if settings.mic_denoise_enabled else 'false'}
 MIC_GATE_THRESHOLD_DB={settings.mic_gate_threshold_db:g}
+MIC_AI_DENOISE_ENABLED={'true' if settings.mic_ai_denoise_enabled else 'false'}
+MIC_VAD_THRESHOLD={settings.mic_vad_threshold}
 '''
     changed = atomic_write_if_changed(AUDIO_CONFIG, content)
     if changed:

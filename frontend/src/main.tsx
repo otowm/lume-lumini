@@ -563,6 +563,11 @@ function MicrophoneSettings({settings,levelDb,unsupported,onSettings}:{settings:
   const level=levelDb===null||levelDb<=-90?"silêncio":`${Math.round(levelDb)} dB`;
   return <section className="settings-group mic-settings">
     <div className="settings-group-title"><div><span className="eyebrow">Microfone nos vídeos</span><h3>Ruído e sensibilidade de entrada</h3><p>Limpa a faixa do microfone e a mixagem dos vídeos. Discord e sons do jogo não são alterados.</p></div></div>
+    {settings.mic_ai_denoise_available!=null&&<div className="mic-ai">
+      <label className="check"><input type="checkbox" checked={settings.mic_ai_denoise_enabled??true} onChange={e=>onSettings({...settings,mic_ai_denoise_enabled:e.target.checked})}/><span><strong>Supressão por IA · teclado, mouse e cliques</strong><small>RNNoise com detecção de voz: silencia o que não parece fala e atenua cliques enquanto você fala. Vale em segundos, sem reiniciar a gravação.</small></span></label>
+      {!settings.mic_ai_denoise_available&&<p className="mic-ai-missing">Plugin não instalado — o microfone segue sem ela. Instale com <code>sudo pacman -S noise-suppression-for-voice</code>.</p>}
+      {settings.mic_ai_denoise_available&&(settings.mic_ai_denoise_enabled??true)&&<label className="mic-ai-vad"><span>Exigência de voz · {settings.mic_vad_threshold??80}%</span><input type="range" min="0" max="99" step="1" value={settings.mic_vad_threshold??80} onChange={e=>onSettings({...settings,mic_vad_threshold:+e.target.value})}/><small>Mais alto corta mais teclado, mas pode engolir sílabas baixas. Comece em 80% e suba se ainda passar clique.</small></label>}
+    </div>}
     <label className="check"><input type="checkbox" checked={settings.mic_denoise_enabled} onChange={e=>onSettings({...settings,mic_denoise_enabled:e.target.checked})}/><span>Suprimir ruído de fundo constante (ventoinha, chiado)</span></label>
     <div className="mic-gate">
       <div className="mic-gate-head"><span id="mic-gate-label">Volume mínimo para gravar</span><strong>{threshold} dB</strong></div>

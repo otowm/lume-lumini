@@ -2452,6 +2452,24 @@ class VideoSettingsRoundTripTests(unittest.TestCase):
         self.assertEqual(self._round_trip("VIDEO_SOUND_VOLUME=35\n")["sound_volume"], 35)
 
 
+class AudioSettingsTests(unittest.TestCase):
+    def test_ai_denoise_is_on_by_default_and_survives_a_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "audio.conf"
+            with patch.object(backend_main, "AUDIO_CONFIG", config), \
+                 patch.object(backend_main, "rnnoise_plugin_installed", return_value=True):
+                before = backend_main.get_audio_settings()
+                self.assertTrue(before.mic_ai_denoise_enabled)
+                self.assertEqual(before.mic_vad_threshold, 80)
+                self.assertTrue(before.mic_ai_denoise_available)
+                changed = before.model_copy(update={"mic_ai_denoise_enabled": False, "mic_vad_threshold": 91})
+                backend_main.update_audio_settings(changed, backend_main.BackgroundTasks())
+                after = backend_main.get_audio_settings()
+            self.assertFalse(after.mic_ai_denoise_enabled)
+            self.assertEqual(after.mic_vad_threshold, 91)
+            self.assertIn("MIC_AI_DENOISE_ENABLED=false", config.read_text(encoding="utf-8"))
+
+
 class ConfirmationSoundTests(unittest.TestCase):
     """Sons do atalho: o arquivo enviado substitui o padrão, e remover o devolve."""
 
