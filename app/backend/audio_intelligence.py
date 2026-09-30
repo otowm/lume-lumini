@@ -101,14 +101,24 @@ def turns_within_duration(turns: list[dict], duration: float) -> list[dict]:
     return result
 
 
+#: Threads de cada etapa do sherpa-onnx. Sem isto ele usa uma só, e a
+#: separação de locutores era a etapa mais lenta do áudio (165 s em 15 min).
+#: Medido num Ryzen 5 5500 (6 núcleos): com 4, 75 s e o mesmo resultado; com 8,
+#: nada a mais — só tiraria núcleos do jogo que pode estar rodando ao lado.
+#: Eventos e digitais de voz também ganham (12→10 s e 11→5 s).
+ANALYSIS_THREADS = 4
+
+
 def diarize(samples, sample_rate: int = 16000) -> list[dict]:
     import sherpa_onnx
 
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(SEGMENTATION_MODEL)),
+            num_threads=ANALYSIS_THREADS,
         ),
-        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMBEDDING_MODEL)),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMBEDDING_MODEL),
+                                                              num_threads=ANALYSIS_THREADS),
         clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.9),
         min_duration_on=0.3,
         min_duration_off=0.5,
@@ -157,7 +167,7 @@ def detect_events(samples, sample_rate: int = 16000, window_seconds: float = 5, 
     config = sherpa_onnx.AudioTaggingConfig(
         model=sherpa_onnx.AudioTaggingModelConfig(
             zipformer=sherpa_onnx.OfflineZipformerAudioTaggingModelConfig(model=str(TAGGING_MODEL)),
-            num_threads=2, provider="cpu",
+            num_threads=ANALYSIS_THREADS, provider="cpu",
         ),
         labels=str(TAGGING_LABELS), top_k=8,
     )
@@ -291,7 +301,7 @@ def speaker_embeddings(samples, turns: list[dict], events: list[dict] | None = N
     import sherpa_onnx
 
     extractor = sherpa_onnx.SpeakerEmbeddingExtractor(sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-        model=str(EMBEDDING_MODEL), num_threads=1, provider="cpu",
+        model=str(EMBEDDING_MODEL), num_threads=ANALYSIS_THREADS, provider="cpu",
     ))
     grouped: dict[str, list] = {}
     for turn in clean_speaker_turns(turns, events or []):
@@ -398,13 +408,16 @@ def analyze_video_audio(video: Path, transcript_segments: list[dict], known_prof
             wav = Path(directory) / "audio.wav"
             extract_audio(video, wav)
             samples, sample_rate = read_pcm16(wav)
-            turns = diarize_file(wav)
+            # Sem nenhuma fala transcrita não há a quem atribuir locutor: separar
+            # vozes custava minutos em quase um quinto dos áudios para resultado
+            # nenhum. Os eventos (risada, música) valem mesmo sem fala.
+            turns = diarize_file(wav) if transcript_segments else []
             events = consolidate_events(detect_events(samples, sample_rate) + overlapping_speech(turns))
             enriched = enrich_segments(transcript_segments, turns, events)
             used = {item.get("speaker") for item in enriched if item.get("speaker")}
             relevant = [turn for turn in turns if turn["speaker"] in used]
             profiles = speaker_profiles(relevant, events)
-            embeddings = speaker_embeddings(samples, relevant, events)
+            embeddings = speaker_embeddings(samples, relevant, events) if relevant else {}
     for item in enriched:
         item["events"] = sorted({
             event["event"] for event in events

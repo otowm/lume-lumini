@@ -14,6 +14,7 @@ try {
     const writes = [];
     let updates = {current:'a'.repeat(40),latest:'b'.repeat(40),title:'Correção de gravação',available:true,can_prepare:true,pending:'',download_url:'https://github.com/otowm/lume-lumini/archive/refs/heads/main.zip'};
     let prepareCalls = 0;
+    let videoState = {enabled:true,recording:false,mode:'clips'}, endCalls = 0;
     const screen = {capture_mode:'interval',interval_seconds:30,change_poll_seconds:5,change_threshold_percent:5,change_max_interval_seconds:60,max_geometry:'1920x1080',split_monitors:false,active_monitor_only:true,privacy_fail_closed:true};
     let video = {enabled:true,codec:'hevc',capture_mode:'continuous',replay_seconds:60,fps:60,geometry:'1920x1080',segment_seconds:60,sample_frames:8,sample_geometry:'960x540',retention_minutes:60,delete_after_description:false,pause_other_captures:true,focus_grace_seconds:20,analysis_profile:'detailed',scan_interval_seconds:2,max_keyframes:80,patterns:[],pattern_modes:{},pattern_fps:{},pattern_geometry:{},pattern_sources:{},marker_hotkey:'F8',hotkey_hold_seconds:0.6,marker_preroll_seconds:8,hud_enabled:true,hud_placement:'second',hud_corner:'top-right',hud_hotkey:'Ctrl+Shift+F8',hud_sound:true,resolve_fps:0,resolve_start_timecode:'01:00:00:00'};
     let storage = {root:'/tmp/lumini-test',disk:{free:100000,total:200000},candidates:[],restart_required:false};
@@ -32,7 +33,7 @@ try {
         await route.fulfill({status:409,json:{detail:'Indisponível no Lumini'}});return;
       }
       let data = {items:[],hours:[],source_hours:[],summary:null,counts:{},running:false,total:0};
-      if(path==='/api/status')data={mode,settings:screen,capturing:false,audio:{active:false},screen:{active:false},video:{enabled:true,recording:false,mode:'clips'},files:{audio:{count:0,bytes:0},screen:{count:0,bytes:0}},storage:{bytes:0,disk_free:100000},idle:{supported:false}};
+      if(path==='/api/status')data={mode,settings:screen,capturing:false,audio:{active:false},screen:{active:false},video:videoState,files:{audio:{count:0,bytes:0},screen:{count:0,bytes:0}},storage:{bytes:0,disk_free:100000},idle:{supported:false}};
       if(path==='/api/settings/video'){if(put)video=request.postDataJSON();data=video}
       if(path==='/api/settings/storage'){if(put)storage={...storage,...request.postDataJSON()};data=storage}
       if(path==='/api/settings/audio'){if(put)audio=request.postDataJSON();data=audio}
@@ -42,6 +43,7 @@ try {
       if(path==='/api/test/video-window')data={ok:true,window_id:'',title:'Jogo Novo',window_class:'jogonovo.exe',executable:'jogonovo.exe',monitor_resolution:'1366x768',info:'',matched:false,matched_pattern:''};
       if(path==='/api/settings/schedule')data={time:'03:00',enabled:false};
       if(path==='/api/ollama/models')data={online:false,models:[]};
+      if(path==='/api/video/end-session'){endCalls++;data=videoState}
       if(path==='/api/settings/video/sounds')data={items:[{slot:'clipe',label:'Clipe salvo',custom:false,name:''}],presets:['minimal','organic']};
       await route.fulfill({json:data});
     });
@@ -121,6 +123,18 @@ try {
       await page.getByText('Buscando de novo 2 jogos que estavam sem ícone.').waitFor();
       console.log(`${mode}: busca de ícones que faltam OK`);
     }
+    // Fora do jogo, a contagem para encerrar tem que poder ser antecipada nos
+    // dois modos — no Lumini não existe o cartão da captura do dia para isso.
+    if(await page.locator('.settings-modal').count()){
+      await page.getByRole('button',{name:'Fechar janela',exact:true}).click();
+      await page.waitForFunction(()=>!document.querySelector('.settings-modal'));
+    }
+    videoState = {enabled:true,recording:true,mode:'clips',started_at:Date.now()/1000-120,focus_grace_remaining:37,pausing_captures:false};
+    await page.getByText('A gravação encerra em 37s se você não voltar ao jogo.').waitFor();
+    await page.getByRole('button',{name:'Forçar encerramento',exact:true}).click();
+    for(let i=0;i<20&&!endCalls;i++) await page.waitForTimeout(100);
+    assert.equal(endCalls,1);
+    console.log(`${mode}: forçar encerramento fora do jogo OK`);
     await page.close();
   }
 } finally {

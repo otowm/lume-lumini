@@ -1978,6 +1978,59 @@ def process_pending(kind: str, limit: int, *, capture_ids: list[int] | None = No
             f"SELECT * FROM captures WHERE kind=? AND status IN ('pending','error'){selected} ORDER BY captured_at,id LIMIT ?",
             [kind, *(capture_ids or []), limit if kind == "audio" else max(limit * 20, limit)],
         ).fetchall()
+    # Áudio: o whisper roda na placa de vídeo e a análise de locutores e
+    # eventos, no processador. Em fila, um esperava o outro; transcrever o
+    # próximo enquanto o atual é analisado tira a transcrição do caminho.
+    prefetch = TranscriptPrefetch(rows) if kind == "audio" else None
+    try:
+        return _process_rows(kind, limit, rows, prefetch)
+    finally:
+        if prefetch is not None:
+            prefetch.close()
+
+
+class TranscriptPrefetch:
+    """Transcreve de antemão o próximo áudio da fila, numa thread só.
+
+    Não toca no banco: o item só é marcado como "processando" quando chega a
+    vez dele, como sempre. Se até lá ele saiu da fila, o texto adiantado é
+    jogado fora — perde-se uma transcrição, nunca se grava a errada.
+    """
+
+    def __init__(self, rows) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._rows = list(rows)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lume-whisper")
+        self._futures: dict[int, object] = {}
+
+    def take(self, capture_id: int):
+        """Transcrição adiantada deste item, ou ``None`` se não houve."""
+        return self._futures.pop(capture_id, None)
+
+    def start_after(self, capture_id: int) -> None:
+        """Começa a transcrever o item seguinte a ``capture_id``."""
+        ids = [row["id"] for row in self._rows]
+        try:
+            following = self._rows[ids.index(capture_id) + 1:]
+        except ValueError:
+            return
+        for row in following:
+            path = resolve_media_source(row["source_path"])
+            if not path.is_file():
+                continue  # vira "skipped" quando chegar a vez; não há o que adiantar
+            if row["id"] not in self._futures:
+                # Pelo nome, a cada chamada: é o que os testes substituem.
+                self._futures[row["id"]] = self._executor.submit(lambda item=path: transcribe(item))
+            return
+
+    def close(self) -> None:
+        # Espera a transcrição em curso: um whisper órfão seguraria a placa de
+        # vídeo depois de o worker dizer que terminou.
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _process_rows(kind: str, limit: int, rows, prefetch: TranscriptPrefetch | None) -> int:
     completed = 0
     for row in rows:
         if completed >= limit:
@@ -2019,10 +2072,16 @@ def process_pending(kind: str, limit: int, *, capture_ids: list[int] | None = No
             # O tempo medido aqui alimenta a média por tipo mostrada na fila.
             started = time.monotonic()
             clear_call_metrics()
-            result = transcribe(path) if kind == "audio" else describe_screen(path)
             if kind == "audio":
+                ahead = prefetch.take(capture_id) if prefetch is not None else None
+                result = ahead.result() if ahead is not None else transcribe(path)
+                # Só adianta o próximo se ainda houver vez para ele nesta rodada.
+                if prefetch is not None and completed + 1 < limit:
+                    prefetch.start_after(capture_id)
                 intelligence = analyze_video_audio(path, result.get("segments", []), known_voice_profiles())
                 result.update(segments=intelligence["segments"], speakers=intelligence["speakers"], audio_events=intelligence["events"])
+            else:
+                result = describe_screen(path)
             elapsed_ms = round((time.monotonic() - started) * 1000)
             call_metrics = json.dumps(last_call_metrics(), ensure_ascii=False)
             with connect() as db:

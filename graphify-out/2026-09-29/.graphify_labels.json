@@ -159,17 +159,5 @@
   "157": ".test_windows_structs_match_the_win32_sizes",
   "158": ".test_every_publish_path_cleans_the_mic",
   "159": ".resolution",
-  "160": ".active",
-  "161": "WindowsStartupTests",
-  "162": "_event_fields",
-  "163": "_kdotool_env",
-  "164": "forget_shared_link",
-  "165": ".test_next_audio_is_transcribed_while_the_current_one_is_analyzed",
-  "166": "_units_do_supervisor",
-  "167": "._wav",
-  "168": "test_updater.py",
-  "169": ".test_paused_capture_stays_paused_after_a_reboot",
-  "170": ".test_a_api_sobe_sem_numpy_e_sem_sherpa",
-  "171": ".test_an_unreadable_file_is_never_assumed_silent",
-  "172": "._forced_open"
+  "160": ".active"
 }

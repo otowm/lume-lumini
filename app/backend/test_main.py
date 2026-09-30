@@ -3,6 +3,7 @@ import dataclasses
 import os
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -253,7 +254,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(video["captured_at"], "2026-08-23T10:00:10-03:00")
             self.assertEqual((session["status"], session["summary"]), ("pending", ""))
 
-    def test_trim_to_new_file_keeps_the_original_and_its_analysis(self):
+    def test_trim_to_new_file_keeps_the_original_and_joins_its_session(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "clip.mkv"
@@ -264,9 +265,14 @@ class ConfigTests(unittest.TestCase):
                 with database.connect() as db:
                     session_id = db.execute("INSERT INTO video_sessions(name,status,summary) VALUES('Jogo','done','resumo')").lastrowid
                     video_id = db.execute(
-                        """INSERT INTO video_segments(source_path,captured_at,status,description,app,title,duration_seconds,session_id)
-                           VALUES(?,'2026-08-23T10:00:00-03:00','done','antiga','osu!','Partida',120,?)""",
+                        """INSERT INTO video_segments(source_path,captured_at,status,description,app,title,duration_seconds,session_id,sort_order)
+                           VALUES(?,'2026-08-23T10:00:00-03:00','done','antiga','osu!','Partida',120,?,0)""",
                         (str(source), session_id),
+                    ).lastrowid
+                    next_id = db.execute(
+                        """INSERT INTO video_segments(source_path,captured_at,status,duration_seconds,session_id,sort_order)
+                           VALUES(?,'2026-08-23T10:05:00-03:00','done',60,?,1)""",
+                        (str(root / "next.mkv"), session_id),
                     ).lastrowid
                     db.executemany(
                         "INSERT INTO video_markers(video_id,offset_seconds,title) VALUES(?,?,?)",
@@ -290,7 +296,8 @@ class ConfigTests(unittest.TestCase):
                     copy = db.execute("SELECT * FROM video_segments WHERE id=?", (result["id"],)).fetchone()
                     original_markers = db.execute("SELECT COUNT(*) FROM video_markers WHERE video_id=?", (video_id,)).fetchone()[0]
                     markers = db.execute("SELECT offset_seconds,title FROM video_markers WHERE video_id=?", (result["id"],)).fetchall()
-                    session = db.execute("SELECT status FROM video_sessions WHERE id=?", (session_id,)).fetchone()
+                    session = db.execute("SELECT status,summary FROM video_sessions WHERE id=?", (session_id,)).fetchone()
+                    following = db.execute("SELECT sort_order FROM video_segments WHERE id=?", (next_id,)).fetchone()
             target = root / "clip_corte_1m10s-1m35s.mkv"
             caches.assert_not_called()
             self.assertEqual(source.read_bytes(), b"original")
@@ -299,7 +306,11 @@ class ConfigTests(unittest.TestCase):
             self.assertNotEqual(result["id"], video_id)
             self.assertEqual((original["status"], original["description"], original["duration_seconds"]), ("done", "antiga", 120))
             self.assertEqual(original_markers, 3)
-            self.assertEqual(session["status"], "done")
+            # O corte entra na sessão, logo depois do original; o resumo fica,
+            # mas a sessão volta para a fila para contar o trecho novo.
+            self.assertEqual((copy["session_id"], copy["sort_order"]), (session_id, 1))
+            self.assertEqual(following["sort_order"], 2)
+            self.assertEqual((session["status"], session["summary"]), ("pending", "resumo"))
             self.assertEqual(copy["source_path"], str(target))
             self.assertEqual((copy["title"], copy["app"], copy["status"]), ("Partida · corte", "osu!", "pending"))
             self.assertEqual(copy["duration_seconds"], 25)
@@ -1626,6 +1637,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result[0]["speaker"], "speaker_1")
         self.assertEqual(result[0]["events"], ["risada"])
 
+    def test_audio_without_speech_skips_speaker_separation_but_keeps_events(self):
+        """Separar vozes custava minutos em áudio sem nenhuma fala transcrita."""
+        from app.backend import audio_intelligence
+
+        laugh = [{"start": 3.0, "end": 8.0, "event": "risada", "confidence": .9}]
+        with patch.object(audio_intelligence, "available", return_value=True), \
+             patch.object(audio_intelligence, "audio_channel_count", return_value=1), \
+             patch.object(audio_intelligence, "audio_stream_count", return_value=1), \
+             patch.object(audio_intelligence, "extract_audio"), \
+             patch.object(audio_intelligence, "read_pcm16", return_value=([0] * 16000, 16000)), \
+             patch.object(audio_intelligence, "diarize_file") as diarize, \
+             patch.object(audio_intelligence, "speaker_embeddings") as embeddings, \
+             patch.object(audio_intelligence, "detect_events", return_value=laugh):
+            result = audio_intelligence.analyze_video_audio(Path("silencio.wav"), [])
+            diarize.assert_not_called()
+            embeddings.assert_not_called()
+            self.assertEqual([event["event"] for event in result["events"]], ["risada"])
+
+            diarize.return_value = [{"start": 0.0, "end": 2.0, "speaker": "speaker_1"}]
+            embeddings.return_value = {"speaker_1": [0.1]}
+            spoken = audio_intelligence.analyze_video_audio(
+                Path("fala.wav"), [{"start": 0.5, "end": 1.5, "text": "oi"}])
+            diarize.assert_called_once()
+            self.assertEqual(spoken["segments"][0]["speaker"], "speaker_1")
+
     def test_adjacent_audio_events_are_consolidated(self):
         result = consolidate_events([
             {"start": 0, "end": 5, "event": "risada", "confidence": .7},
@@ -1751,6 +1787,83 @@ class ConfigTests(unittest.TestCase):
                     row = db.execute("SELECT status,error FROM captures WHERE id=?", (capture_id,)).fetchone()
             self.assertEqual(row["status"], "skipped")
             self.assertEqual(row["error"], "removido manualmente da fila")
+
+    def _audio_queue(self, root: Path, count: int) -> list[int]:
+        ids = []
+        with database.connect() as db:
+            for index in range(count):
+                audio = root / f"2026-08-06_10-0{index}-00.wav"
+                audio.write_bytes(b"audio")
+                ids.append(db.execute(
+                    "INSERT INTO captures(kind,source_path,captured_at,status) VALUES('audio',?,?,'pending')",
+                    (str(audio), f"2026-08-06T10:0{index}:00-03:00"),
+                ).lastrowid)
+        return ids
+
+    def test_next_audio_is_transcribed_while_the_current_one_is_analyzed(self):
+        """Whisper na placa e análise no processador não esperam mais um pelo outro."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"):
+                database.initialize()
+                self._audio_queue(root, 3)
+                transcribed: list[str] = []
+                second_started = threading.Event()
+
+                def transcribe(path):
+                    transcribed.append(path.name)
+                    if path.name.startswith("2026-08-06_10-01"):
+                        second_started.set()
+                    return {"title": "Áudio", "text": path.name, "app": "", "tags": [], "duration": 1, "segments": []}
+
+                overlapped = []
+
+                def analyze(path, segments, profiles):
+                    if path.name.startswith("2026-08-06_10-00"):
+                        # Ainda analisando o primeiro: o segundo já tem que estar na placa.
+                        overlapped.append(second_started.wait(5))
+                    return {"segments": [], "speakers": [], "events": [], "speaker_embeddings": {}}
+
+                with patch("app.backend.pipeline.transcribe", side_effect=transcribe), \
+                     patch("app.backend.pipeline.analyze_video_audio", side_effect=analyze), \
+                     patch("app.backend.pipeline.known_voice_profiles", return_value=[]), \
+                     patch("app.backend.pipeline.compact_saved_capture"):
+                    done = process_pending("audio", 3)
+                with database.connect() as db:
+                    rows = db.execute("SELECT status,text FROM captures ORDER BY id").fetchall()
+            self.assertEqual(overlapped, [True])
+            self.assertEqual(done, 3)
+            self.assertEqual(sorted(transcribed), sorted(set(transcribed)), "um áudio foi transcrito duas vezes")
+            self.assertEqual([row["status"] for row in rows], ["done"] * 3)
+            self.assertEqual([row["text"] for row in rows],
+                             [f"2026-08-06_10-0{index}-00.wav" for index in range(3)],
+                             "a transcrição adiantada foi gravada no áudio errado")
+
+    def test_audio_removed_from_the_queue_discards_its_early_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(database, "DB_PATH", root / "lume.sqlite3"):
+                database.initialize()
+                first, second = self._audio_queue(root, 2)
+
+                def analyze(path, segments, profiles):
+                    if path.name.startswith("2026-08-06_10-00"):
+                        with database.connect() as db:
+                            db.execute("UPDATE captures SET status='skipped',error='removido manualmente da fila' WHERE id=?",
+                                       (second,))
+                    return {"segments": [], "speakers": [], "events": [], "speaker_embeddings": {}}
+
+                result = {"title": "Áudio", "text": "texto", "app": "", "tags": [], "duration": 1, "segments": []}
+                with patch("app.backend.pipeline.transcribe", return_value=result), \
+                     patch("app.backend.pipeline.analyze_video_audio", side_effect=analyze) as analyzed, \
+                     patch("app.backend.pipeline.known_voice_profiles", return_value=[]), \
+                     patch("app.backend.pipeline.compact_saved_capture"):
+                    done = process_pending("audio", 2)
+                with database.connect() as db:
+                    removed = db.execute("SELECT status,text FROM captures WHERE id=?", (second,)).fetchone()
+            self.assertEqual(done, 1)
+            self.assertEqual(analyzed.call_count, 1)
+            self.assertEqual((removed["status"], removed["text"]), ("skipped", ""))
 
     def test_pipeline_queue_matches_audio_first_processing_order_and_reports_full_counts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2485,7 +2598,8 @@ class ConfirmationSoundTests(unittest.TestCase):
 
     def _upload(self, slot: str, name: str, data: bytes):
         request = SimpleNamespace(stream=lambda: _chunks(data))
-        return asyncio.run(backend_main.upload_confirmation_sound(slot, request, name=name))
+        return asyncio.run(backend_main.upload_confirmation_sound(
+            slot, request, backend_main.BackgroundTasks(), name=name))
 
     def test_upload_replaces_the_previous_file_and_reset_restores_default(self):
         self._upload("marcador", "plim.wav", b"RIFF1")
@@ -2499,7 +2613,7 @@ class ConfirmationSoundTests(unittest.TestCase):
         self.assertIsNone(self.sounds.custom_sound("marcador"))
 
     def test_preset_fills_every_slot_with_the_theme_sounds(self):
-        result = backend_main.apply_confirmation_sound_preset("minimal")
+        result = backend_main.apply_confirmation_sound_preset("minimal", backend_main.BackgroundTasks())
         self.assertIn("minimal", result["presets"])
         self.assertTrue(all(item["custom"] for item in result["items"]))
         preset = self.sounds.PRESETS_DIR / "minimal"
@@ -2512,7 +2626,7 @@ class ConfirmationSoundTests(unittest.TestCase):
         self.assertEqual(self.sounds.custom_sound("longa-fim").read_bytes(),
                          (preset / "deselect.ogg").read_bytes())
         with self.assertRaises(backend_main.HTTPException) as failure:
-            backend_main.apply_confirmation_sound_preset("../../etc")
+            backend_main.apply_confirmation_sound_preset("../../etc", backend_main.BackgroundTasks())
         self.assertEqual(failure.exception.status_code, 404)
 
     def test_every_preset_has_all_its_sounds(self):
@@ -2520,6 +2634,33 @@ class ConfirmationSoundTests(unittest.TestCase):
             for name in set(self.sounds.PRESET_SOUNDS.values()):
                 self.assertTrue((self.sounds.PRESETS_DIR / theme / f"{name}.ogg").is_file(),
                                 f"{theme}/{name}.ogg")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requer ffmpeg")
+    def test_windows_gets_a_wav_with_the_volume_applied(self):
+        """O winsound só toca WAV e não tem volume: a conversão cuida dos dois."""
+        backend_main.apply_confirmation_sound_preset("minimal", backend_main.BackgroundTasks())
+        ogg = self.sounds.custom_sound("clipe")
+        half = self.sounds.playable_wav(ogg, 50)
+        self.assertEqual(half.suffix, ".wav")
+        with wave.open(str(half)) as audio:
+            self.assertGreater(audio.getnframes(), 0)
+        self.assertEqual(self.sounds.playable_wav(ogg, 50), half, "converteu de novo à toa")
+        full = self.sounds.playable_wav(ogg, 100)
+        self.assertEqual(sorted(p.name for p in self.sounds.wav_cache_dir().iterdir()), [full.name],
+                         "a conversão antiga do slot ficou para trás")
+        self.assertTrue(self.sounds.playable_wav(self.sounds.custom_sound("clipe-estendido"), 100).is_file())
+        self.assertTrue(full.is_file(), "converter um slot apagou a conversão de outro")
+
+    def test_saving_sounds_prepares_the_windows_conversions_ahead_of_the_game(self):
+        tasks = backend_main.BackgroundTasks()
+        backend_main.apply_confirmation_sound_preset("minimal", tasks)
+        self.assertIn(backend_main._prepare_confirmation_sounds, [task.func for task in tasks.tasks])
+        with patch.object(self.sounds.os, "name", "nt"), \
+             patch.object(self.sounds, "playable_wav") as convert:
+            self.sounds.prepare(60)
+        self.assertEqual(sorted(call.args[0].stem for call in convert.call_args_list),
+                         sorted(self.sounds.SLOTS))
+        self.assertTrue(all(call.args[1] == 60 for call in convert.call_args_list))
 
     def test_rejects_unknown_slots_and_formats(self):
         with self.assertRaises(backend_main.HTTPException) as failure:
@@ -3220,6 +3361,65 @@ class SharingTests(unittest.TestCase):
         self.assertEqual(state["status"], "fits")
         shape.assert_not_called()
 
+    # --- volumes salvos no player -------------------------------------------
+
+    def test_volumes_salvos_viram_a_faixa_unica_da_versao_leve(self):
+        plan = sharing.share_plan(20, 60.0, 1080, 60)
+        command = sharing.light_video_command(Path("a.mp4"), Path("b.mp4"), plan,
+                                              mix={1: 0.4, 2: 1.0, 3: 0.25})
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[0:a:1]aformat=channel_layouts=stereo,volume=0.400", graph)
+        self.assertIn("[0:a:3]aformat=channel_layouts=stereo,volume=0.250", graph)
+        self.assertIn("amix=inputs=3:normalize=0", graph)
+        self.assertNotIn("0:a:0", command, "a mixagem pronta ignoraria os volumes")
+        self.assertEqual(command.count("-map"), 2, "ainda uma faixa de vídeo e uma de áudio")
+
+    def test_tudo_em_cem_por_cento_e_o_mesmo_que_nao_ter_salvo(self):
+        key, path = self._clip()
+        sharing.save_audio_mix(key, {1: 1.0, 2: 1.0, 3: 1.0})
+        self.assertIsNone(sharing.audio_mix(path))
+        sharing.save_audio_mix(key, {1: 0.5, 2: 1.0, 3: 1.0})
+        self.assertEqual(sharing.audio_mix(path), {1: 0.5, 2: 1.0, 3: 1.0})
+
+    def test_mudar_os_volumes_nunca_serve_a_versao_leve_antiga(self):
+        key, path = self._clip()
+        before = sharing.share_cache_path(path, 20)
+        sharing.save_audio_mix(key, {1: 0.3})
+        after = sharing.share_cache_path(path, 20)
+        self.assertNotEqual(before, after)
+        sharing.save_audio_mix(key, {1: 0.6})
+        self.assertNotEqual(after, sharing.share_cache_path(path, 20))
+        # Um glob só continua achando todas para a limpeza.
+        self.assertTrue(after.match(sharing.share_cache_glob(path)))
+
+    def test_original_que_cabe_com_volumes_copia_a_imagem_e_refaz_so_o_audio(self):
+        """Mandar o original ignoraria a mixagem: o Discord toca a faixa 1."""
+        key, path = self._clip(bytes=2048)
+        sharing.save_audio_mix(key, {1: 0.2, 2: 1.0, 3: 1.0})
+        shape = sharing.VideoShape(duration=30.0, height=1080, fps=60.0, bitrate=4_000_000)
+        with patch.object(sharing, "video_shape", return_value=shape), \
+             patch.object(sharing._LightVersionJob, "start"):
+            state = sharing.light_state(key, path, 20, start=True)
+        self.assertEqual(state["status"], "preparing")
+        self.assertTrue(state["mixed"])
+        self.assertTrue(state["plan"]["copy_video"])
+        plan = sharing.SharePlan(limit_bytes=1, duration=30, height=1080, fps=60, video_bitrate=1,
+                                 audio_bitrate=160_000, scale=False, resample=False, copy_video=True)
+        command = sharing.light_video_command(path, Path("b.mp4"), plan, mix={1: 0.2})
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertNotIn("-b:v", command)
+
+    def test_rota_salva_e_devolve_os_volumes(self):
+        key, path = self._clip()
+        with patch.object(backend_main, "safe_video_path", return_value=path):
+            saved = backend_main.save_video_audio_mix(key, backend_main.VideoAudioMix(volumes={1: 0.5, 3: 0.8}))
+            self.assertEqual(saved["volumes"], {1: 0.5, 3: 0.8})
+            self.assertEqual(backend_main.get_video_audio_mix(key)["volumes"], {1: 0.5, 3: 0.8})
+            with self.assertRaises(backend_main.HTTPException):
+                backend_main.save_video_audio_mix(key, backend_main.VideoAudioMix(volumes={1: 5.0}))
+            backend_main.save_video_audio_mix(key, backend_main.VideoAudioMix(volumes={}))
+            self.assertEqual(backend_main.get_video_audio_mix(key)["volumes"], {})
+
     def test_consultar_o_estado_nunca_liga_o_ventilador(self):
         """``GET`` que dispara meio minuto de ffmpeg viraria timeout no navegador."""
         key, path = self._clip(bytes=32 * 1024 * 1024)
@@ -3469,7 +3669,8 @@ class ModoLuminiTests(unittest.TestCase):
             "/api/media/raw/unkept", "/api/editing", "/api/editing/video/{video_id}",
             "/api/editing/session/{session_id}", "/api/editing/{name}", "/api/editing/open",
             "/api/settings/steamgriddb", "/api/settings/video/sounds", "/api/settings/video/sounds/{slot}",
-            "/api/settings/video/sounds/{slot}/test", "/api/settings/video/sounds/preset/{theme}", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
+            "/api/settings/video/sounds/{slot}/test", "/api/settings/video/sounds/preset/{theme}",
+            "/api/video-audio-mix", "/api/game-icons", "/api/game-icons/retry", "/api/game-icons/{file_name}",
         }
         sem_classificacao = []
         for rota in backend_main.app.routes:

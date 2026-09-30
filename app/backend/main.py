@@ -801,6 +801,13 @@ def _config_int(config: dict, key: str, default: int, minimum: int, maximum: int
         return default
 
 
+def _prepare_confirmation_sounds() -> None:
+    """No Windows, deixa os WAVs prontos antes da partida (ver sounds.prepare)."""
+    from ..capture import sounds
+
+    sounds.prepare(_config_int(parse_shell_config(VIDEO_CONFIG), "VIDEO_SOUND_VOLUME", 100, 0, 100))
+
+
 def _confirmation_sounds() -> dict:
     from ..capture import sounds
 
@@ -826,7 +833,7 @@ def list_confirmation_sounds() -> dict:
 
 
 @app.post("/api/settings/video/sounds/preset/{theme}")
-def apply_confirmation_sound_preset(theme: str) -> dict:
+def apply_confirmation_sound_preset(theme: str, background_tasks: BackgroundTasks) -> dict:
     """Preenche todos os sons com um pacote pronto do uisfx."""
     from ..capture import sounds
 
@@ -834,11 +841,12 @@ def apply_confirmation_sound_preset(theme: str) -> dict:
         sounds.apply_preset(theme)
     except ValueError:
         raise HTTPException(status_code=404, detail="Pacote de sons desconhecido")
+    background_tasks.add_task(_prepare_confirmation_sounds)
     return _confirmation_sounds()
 
 
 @app.put("/api/settings/video/sounds/{slot}")
-async def upload_confirmation_sound(slot: str, request: Request,
+async def upload_confirmation_sound(slot: str, request: Request, background_tasks: BackgroundTasks,
                                     name: str = Query(min_length=1, max_length=255)) -> dict:
     """Troca o som de um slot pelo arquivo enviado.
 
@@ -862,6 +870,7 @@ async def upload_confirmation_sound(slot: str, request: Request,
     partial.write_bytes(bytes(data))
     sounds.clear_custom(slot)
     partial.replace(sounds.SOUNDS_DIR / f"{slot}{extension}")
+    background_tasks.add_task(_prepare_confirmation_sounds)
     return _confirmation_sounds()
 
 
@@ -980,6 +989,9 @@ Icon=video-display
 NoDisplay=true
 X-KDE-Shortcuts={settings.hud_hotkey}
 """)
+    if config_changed:
+        # O volume entra na conversão para WAV do Windows.
+        background_tasks.add_task(_prepare_confirmation_sounds)
     if config_changed or rules_changed or shortcut_changed or hud_shortcut_changed:
         background_tasks.add_task(_apply_video_runtime, settings.enabled,
                                   shortcut_changed or hud_shortcut_changed,
@@ -2126,6 +2138,29 @@ def cancel_light_version(path: str) -> dict:
     return {"ok": True, "cancelled": sharing.cancel_light_jobs(source)}
 
 
+class VideoAudioMix(BaseModel):
+    #: Posição da faixa (``0:a:N``) → volume; vazio apaga o que estava salvo.
+    volumes: dict[int, float] = Field(default_factory=dict, max_length=32)
+
+
+@app.get("/api/video-audio-mix")
+def get_video_audio_mix(path: str) -> dict:
+    safe_video_path(path)
+    return {"volumes": sharing.load_audio_mix(path)}
+
+
+@app.put("/api/video-audio-mix")
+def save_video_audio_mix(path: str, payload: VideoAudioMix) -> dict:
+    """Guarda os volumes do player; a versão leve para o Discord sai com eles."""
+    source = safe_video_path(path)
+    if any(not 0 <= track <= 31 or not 0 <= volume <= 2 for track, volume in payload.volumes.items()):
+        raise HTTPException(status_code=422, detail="Volume ou faixa fora do intervalo")
+    sharing.save_audio_mix(path, payload.volumes)
+    # A versão leve em andamento foi pedida com os volumes antigos.
+    sharing.cancel_light_jobs(source)
+    return {"volumes": sharing.load_audio_mix(path)}
+
+
 @app.get("/api/video-light")
 def light_video_file(path: str, limit_mb: int | None = None) -> FileResponse:
     """Baixa a versão leve pronta; 409 enquanto ela não existir.
@@ -2621,7 +2656,7 @@ def trim_video(video_id: int, payload: VideoTrimRequest) -> dict:
     initialize()
     with connect() as db:
         row = db.execute(
-            "SELECT source_path,captured_at,status,session_id,preserved,app,title FROM video_segments WHERE id=?",
+            "SELECT source_path,captured_at,status,session_id,sort_order,preserved,app,title FROM video_segments WHERE id=?",
             (video_id,),
         ).fetchone()
     if not row:
@@ -2712,12 +2747,27 @@ def _trim_video_to_new_file(video_id: int, row, source: Path, start: float, end:
     except (TypeError, ValueError):
         pass
     title = f"{row['title'] or source.stem} · corte"[:300]
+    session_id = row["session_id"]
     with connect() as db:
+        # Numa sessão, o corte entra logo depois do vídeo de onde saiu. Quem
+        # quiser separá-lo depois usa o mesmo "separar da sessão" de sempre.
+        sort_order = 0
+        if session_id is not None:
+            sort_order = int(row["sort_order"] or 0) + 1
+            db.execute("UPDATE video_segments SET sort_order=sort_order+1 WHERE session_id=? AND sort_order>=?",
+                       (session_id, sort_order))
         new_id = db.execute(
-            """INSERT INTO video_segments(source_path,captured_at,app,title,duration_seconds,status)
-               VALUES(?,?,?,?,?,'pending')""",
-            (media_source_key(target), captured, row["app"] or "", title, end - start),
+            """INSERT INTO video_segments(source_path,captured_at,app,title,duration_seconds,status,
+                                          session_id,sort_order)
+               VALUES(?,?,?,?,?,'pending',?,?)""",
+            (media_source_key(target), captured, row["app"] or "", title, end - start,
+             session_id, sort_order),
         ).lastrowid
+        if session_id is not None:
+            # O resumo continua certo, só não conta o trecho novo: a sessão
+            # volta para a fila sem perder o que já foi escrito.
+            db.execute("UPDATE video_sessions SET status='pending',stage='Novo corte na sessão · análise desatualizada' WHERE id=?",
+                       (session_id,))
         # Os destaques do trecho vão junto, já na régua do arquivo novo.
         db.execute(
             """INSERT INTO video_markers(video_id,offset_seconds,title,ai_generated)
@@ -2725,10 +2775,14 @@ def _trim_video_to_new_file(video_id: int, row, source: Path, start: float, end:
                WHERE video_id=? AND offset_seconds>=? AND offset_seconds<?""",
             (new_id, start, video_id, start, end),
         )
+    # As faixas são as mesmas do original: os volumes salvos valem para o corte.
+    volumes = sharing.load_audio_mix(source)
+    if volumes:
+        sharing.save_audio_mix(target, volumes)
     return {
         "ok": True, "id": new_id, "start_seconds": start, "end_seconds": end,
         "duration_seconds": end - start, "captured_at": captured, "analysis_reset": False,
-        "name": target.name, "new_file": True,
+        "name": target.name, "new_file": True, "session_id": session_id,
     }
 
 

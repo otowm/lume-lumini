@@ -1154,6 +1154,10 @@ class VideoLoop:
         gamesession.close_stale()
         self._rescue_stale_pending_clip()
         self._release_others("limpeza inicial")
+        # Sons escolhidos antes desta versão ainda não têm WAV: converte agora,
+        # ao subir, e não no primeiro atalho da partida.
+        threading.Thread(target=sounds.prepare, args=(self._sound_volume(),),
+                         name="lume-sons", daemon=True).start()
 
         hotkey = MarkerHotkey(self.settings.hotkey, self.hotkey_pressed,
                               on_hold=self.hotkey_held,

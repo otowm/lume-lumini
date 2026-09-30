@@ -57,6 +57,15 @@ MAX_BYTES = 5 * 1024 * 1024
 
 _FREEDESKTOP = Path("/usr/share/sounds/freedesktop/stereo")
 
+# No Windows o ``winsound`` só toca WAV. Os outros formatos — inclusive os
+# pacotes, que são OGG — são convertidos pelo ffmpeg na primeira vez que tocam
+# e guardados aqui, já com o volume aplicado: o ``winsound`` também não tem
+# controle de volume.
+def wav_cache_dir() -> Path:
+    return SOUNDS_DIR / ".wav"
+
+_HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 def custom_sound(slot: str) -> Path | None:
     """Arquivo escolhido pela pessoa para o slot, se houver."""
@@ -103,23 +112,76 @@ def apply_preset(theme: str) -> None:
         partial.replace(SOUNDS_DIR / f"{slot}.ogg")
 
 
+def playable_wav(path: Path, volume: int) -> Path | None:
+    """WAV pronto para o ``winsound``, convertido e guardado se preciso.
+
+    O nome carrega a versão do arquivo e o volume: trocar o som ou mexer no
+    volume gera outra conversão, e as antigas do mesmo slot são apagadas.
+    """
+    volume = max(1, min(100, volume))
+    if path.suffix.lower() == ".wav" and volume == 100:
+        return path
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    cache = wav_cache_dir()
+    target = cache / f"{path.stem}@{stat.st_mtime_ns}-{stat.st_size}-{volume}.wav"
+    if target.is_file():
+        return target
+    cache.mkdir(parents=True, exist_ok=True)
+    for old in cache.glob(f"{path.stem}@*.wav"):
+        old.unlink(missing_ok=True)
+    partial = target.with_name(f".{target.name}")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(path),
+             "-af", f"volume={volume / 100:.2f}", "-ar", "48000", "-c:a", "pcm_s16le",
+             "-f", "wav", str(partial)],
+            check=False, capture_output=True, timeout=30, creationflags=_HIDDEN_PROCESS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not partial.is_file():
+        partial.unlink(missing_ok=True)
+        return None
+    partial.replace(target)
+    return target
+
+
+def prepare(volume: int) -> None:
+    """Converte de antemão tudo que o Windows vai precisar tocar.
+
+    Chamado quando a pessoa salva no app — aplica um pacote, escolhe um
+    arquivo, muda o volume —, para que o primeiro atalho da partida só toque
+    o que já está pronto, sem ffmpeg nenhum rodando durante o jogo.
+    """
+    if os.name != "nt" or volume <= 0:
+        return
+    for slot in SLOTS:
+        path = custom_sound(slot)
+        if path is not None:
+            playable_wav(path, volume)
+
+
 def play(slot: str, volume: int = 100) -> bool:
     """Toca o som do slot sem esperar o fim. Devolve se conseguiu disparar.
 
-    ``volume`` vai de 0 a 100. No Windows só arquivos ``.wav`` tocam (é o que
-    o ``winsound`` abre) e sem controle de volume; sem eles, quem chamou
+    ``volume`` vai de 0 a 100. No Windows vale o arquivo escolhido na
+    interface, convertido para WAV quando é outro formato — normalmente já
+    por :func:`prepare`; sem ele, ou sem ffmpeg para converter, quem chamou
     segue com a melodia de bipes.
     """
     if volume <= 0:
         return True
     if os.name == "nt":
         path = custom_sound(slot)
-        if path is None or path.suffix.lower() != ".wav":
+        wav = playable_wav(path, volume) if path is not None else None
+        if wav is None:
             return False
         try:
             import winsound
 
-            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
         except (ImportError, RuntimeError, OSError):
             return False
         return True
